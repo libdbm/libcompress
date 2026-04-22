@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:libcompress/libcompress.dart';
+import 'web_test_utils.dart';
 
 void main() {
   group('CodecFactory.get (block codecs)', () {
@@ -81,16 +82,22 @@ void main() {
     test('all codecs support block mode', () {
       for (final type in CodecFactory.types) {
         final codec = CodecFactory.codec(type);
-        expect(codec.supports(CodecMode.block), isTrue,
-            reason: '$type should support block mode');
+        expect(
+          codec.supports(CodecMode.block),
+          isTrue,
+          reason: '$type should support block mode',
+        );
       }
     });
 
     test('all codecs support stream mode', () {
       for (final type in CodecFactory.types) {
         final codec = CodecFactory.codec(type);
-        expect(codec.supports(CodecMode.stream), isTrue,
-            reason: '$type should support stream mode');
+        expect(
+          codec.supports(CodecMode.stream),
+          isTrue,
+          reason: '$type should support stream mode',
+        );
       }
     });
 
@@ -126,13 +133,16 @@ void main() {
 
   group('CodecFactory.types', () {
     test('contains all expected codec types', () {
-      expect(CodecFactory.types, containsAll([
-        CodecType.noop,
-        CodecType.snappy,
-        CodecType.gzip,
-        CodecType.lz4,
-        CodecType.zstd,
-      ]));
+      expect(
+        CodecFactory.types,
+        containsAll([
+          CodecType.noop,
+          CodecType.snappy,
+          CodecType.gzip,
+          CodecType.lz4,
+          CodecType.zstd,
+        ]),
+      );
     });
 
     test('all types are valid for get()', () {
@@ -146,5 +156,18 @@ void main() {
         expect(() => CodecFactory.streaming(type), returnsNormally);
       }
     });
+  });
+
+  group('Noop web/js round-trip', () {
+    test(
+      'passes bytes through unchanged on web/js',
+      () async {
+        await expectWebRoundTrip(
+          codecExpression: 'NoopCodec()',
+          data: Uint8List.fromList([1, 2, 3, 4, 5]),
+        );
+      },
+      timeout: const Timeout(Duration(seconds: 90)),
+    );
   });
 }

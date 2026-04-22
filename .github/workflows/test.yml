@@ -1,0 +1,86 @@
+name: Test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Dart tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install compression CLIs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gzip \
+            lz4 \
+            snappy-tools \
+            zstd
+
+          sudo tee /usr/local/bin/snzip >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "snzip compatibility shim using Ubuntu snappy-tools"
+            exit 0
+          fi
+
+          mode="compress"
+          input=""
+
+          for arg in "$@"; do
+            case "$arg" in
+              -d)
+                mode="decompress"
+                ;;
+              -c)
+                ;;
+              *)
+                input="$arg"
+                ;;
+            esac
+          done
+
+          if [[ -z "$input" ]]; then
+            echo "usage: snzip [-d] -c <file>" >&2
+            exit 2
+          fi
+
+          if [[ "$mode" == "decompress" ]]; then
+            exec unsnappy "$input"
+          fi
+
+          exec snappy -f "$input"
+          EOF
+          sudo chmod +x /usr/local/bin/snzip
+
+          command -v gzip
+          command -v lz4
+          command -v zstd
+          command -v snappy
+          command -v unsnappy
+          command -v snzip
+
+      - name: Install Dart dependencies
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze .
+
+      - name: Run all tests
+        run: dart test --reporter github

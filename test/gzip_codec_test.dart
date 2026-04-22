@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:libcompress/src/gzip/gzip_codec.dart';
 import 'test_utils.dart';
+import 'web_test_utils.dart';
 
 void main() {
   group('GZIP decompression fixtures', () {
@@ -15,6 +16,20 @@ void main() {
         expect(decompressed, equals(original));
       });
     }
+
+    for (final path in standardFixtures) {
+      test(
+        'decompresses $path on web/js',
+        () async {
+          await expectWebDecompresses(
+            codecExpression: 'GzipCodec()',
+            compressed: readCodecFixture('gzip', '$path.gz'),
+            expected: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
+    }
   });
 
   group('GZIP round-trip compression', () {
@@ -26,6 +41,19 @@ void main() {
         final decompressed = codec.decompress(compressed);
         expect(decompressed, equals(original));
       });
+    }
+
+    for (final path in standardFixtures) {
+      test(
+        'round-trips $path on web/js',
+        () async {
+          await expectWebRoundTrip(
+            codecExpression: 'GzipCodec()',
+            data: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
     }
   });
 
@@ -110,10 +138,7 @@ void main() {
     });
 
     test('stores both filename and comment', () {
-      final codec = GzipCodec(
-        filename: 'data.bin',
-        comment: 'Test data file',
-      );
+      final codec = GzipCodec(filename: 'data.bin', comment: 'Test data file');
       final data = Uint8List.fromList([1, 2, 3, 4, 5]);
       final compressed = codec.compress(data);
       final decompressed = codec.decompress(compressed);
@@ -192,9 +217,7 @@ void main() {
 
     test('handles large data', () {
       final codec = GzipCodec();
-      final data = Uint8List.fromList(
-        List.generate(100000, (i) => i % 256),
-      );
+      final data = Uint8List.fromList(List.generate(100000, (i) => i % 256));
       final compressed = codec.compress(data);
       final decompressed = codec.decompress(compressed);
       expect(decompressed, equals(data));
@@ -231,10 +254,7 @@ void main() {
 
       // Decompress should yield all parts
       final decompressed = codec.decompress(builder.takeBytes());
-      expect(
-        String.fromCharCodes(decompressed),
-        equals(parts.join()),
-      );
+      expect(String.fromCharCodes(decompressed), equals(parts.join()));
     });
 
     test('respects maxSize across concatenated members', () {
@@ -254,12 +274,14 @@ void main() {
       // With limit of 12, third member (15 bytes total) should fail
       // The limit is checked during decompression of the third member
       final threeMembers = Uint8List.fromList([
-        ...compressed1, ...compressed2, ...compressed3
+        ...compressed1,
+        ...compressed2,
+        ...compressed3,
       ]);
       final codec12 = GzipCodec(maxDecompressedSize: 12);
       expect(
         () => codec12.decompress(threeMembers),
-        throwsA(anything),  // DeflateException when limit exceeded
+        throwsA(anything), // DeflateException when limit exceeded
       );
     });
   });

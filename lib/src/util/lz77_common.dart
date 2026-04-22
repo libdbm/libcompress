@@ -40,6 +40,8 @@ class LZ77Hash {
   /// Snappy hash multiplier
   static const int snappyMultiplier = 0x1e35a7bd;
 
+  static final BigInt _u32Mask = BigInt.from(0xFFFFFFFF);
+
   /// Computes LZ4-style hash of 4 bytes
   ///
   /// Uses Knuth's multiplicative hashing for fast, good distribution.
@@ -47,11 +49,12 @@ class LZ77Hash {
     if (pos + 3 >= data.length) {
       return 0;
     }
-    final value = data[pos] |
+    final value =
+        data[pos] |
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return ((value * lz4Multiplier) >> shift) & 0xFFFF;
+    return (_mul32(value, lz4Multiplier) >> shift) & 0xFFFF;
   }
 
   /// Computes Snappy-style hash of 4 bytes
@@ -59,11 +62,12 @@ class LZ77Hash {
     if (pos + 3 >= data.length) {
       return 0;
     }
-    final value = data[pos] |
+    final value =
+        data[pos] |
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return ((value * snappyMultiplier) >> 16) & 0x3FFF;
+    return (_mul32(value, snappyMultiplier) >> 16) & 0x3FFF;
   }
 
   /// Computes GZIP/DEFLATE-style hash of 3 bytes
@@ -76,6 +80,10 @@ class LZ77Hash {
     final hash = ((data[pos] << 10) ^ (data[pos + 1] << 5) ^ data[pos + 2]);
     return hash & ((1 << tableSizeBits) - 1);
   }
+}
+
+int _mul32(int left, int right) {
+  return (BigInt.from(left) * BigInt.from(right) & LZ77Hash._u32Mask).toInt();
 }
 
 /// Constants for LZ77-based algorithms

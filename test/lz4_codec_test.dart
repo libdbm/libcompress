@@ -3,6 +3,7 @@ import 'package:test/test.dart';
 import 'package:libcompress/src/lz4/lz4_codec.dart';
 import 'package:libcompress/src/lz4/lz4_common.dart';
 import 'test_utils.dart';
+import 'web_test_utils.dart';
 
 void main() {
   group('LZ4 decompression fixtures', () {
@@ -15,6 +16,20 @@ void main() {
         expect(actual, orderedEquals(expected));
       });
     }
+
+    for (final path in standardFixtures) {
+      test(
+        'decompresses $path on web/js',
+        () async {
+          await expectWebDecompresses(
+            codecExpression: 'Lz4Codec()',
+            compressed: readCodecFixture('lz4', '$path.lz4'),
+            expected: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
+    }
   });
 
   group('LZ4 round-trip compression', () {
@@ -26,6 +41,19 @@ void main() {
         final restored = codec.decompress(compressed);
         expect(restored, orderedEquals(original));
       });
+    }
+
+    for (final path in standardFixtures) {
+      test(
+        'round-trips $path on web/js',
+        () async {
+          await expectWebRoundTrip(
+            codecExpression: 'Lz4Codec()',
+            data: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
     }
   });
 

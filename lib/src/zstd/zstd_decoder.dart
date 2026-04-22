@@ -240,7 +240,7 @@ class ZstdDecoder {
       }
       final expectedChecksum = ByteUtils.readUint32LE(data, offset);
       offset += 4;
-      final actualChecksum = XXH64.hash(frameBytes) & 0xFFFFFFFF;
+      final actualChecksum = XXH64.hashLow32(frameBytes);
       if (actualChecksum != expectedChecksum) {
         throw ZstdFormatException(
           'Content checksum mismatch: '

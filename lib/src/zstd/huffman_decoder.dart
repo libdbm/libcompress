@@ -249,14 +249,14 @@ class HuffmanBitReader {
   final Uint8List _data;
   final int _start;
   int _current;
-  int _bits;
+  BigInt _bits;
   int _consumed;
   bool _overflow = false;
 
   HuffmanBitReader(this._data, final int start, final int end)
       : _start = start,
         _current = 0,
-        _bits = 0,
+        _bits = BigInt.zero,
         _consumed = 0 {
     if (end <= start) {
       throw ZstdFormatException('Empty Huffman stream');
@@ -282,18 +282,18 @@ class HuffmanBitReader {
     }
   }
 
-  int _load64(final int off) {
-    var r = 0;
+  BigInt _load64(final int off) {
+    var r = BigInt.zero;
     for (var i = 0; i < 8 && off + i < _data.length; i++) {
-      r |= (_data[off + i] & 0xFF) << (i * 8);
+      r |= BigInt.from(_data[off + i] & 0xFF) << (i * 8);
     }
     return r;
   }
 
-  int _loadTail(final int off, final int n) {
-    var r = 0;
+  BigInt _loadTail(final int off, final int n) {
+    var r = BigInt.zero;
     for (var i = 0; i < n; i++) {
-      r |= (_data[off + i] & 0xFF) << (i * 8);
+      r |= BigInt.from(_data[off + i] & 0xFF) << (i * 8);
     }
     return r;
   }
@@ -336,8 +336,8 @@ class HuffmanBitReader {
   int peekBits(final int n) {
     if (n == 0) return 0;
     // Java formula: ((bits << consumed) >>> (64 - n))
-    final shifted = (_bits << _consumed) & 0xFFFFFFFFFFFFFFFF;
-    return (shifted >> (64 - n)) & ((1 << n) - 1);
+    final shifted = (_bits << _consumed) & _uint64Mask;
+    return ((shifted >> (64 - n)) & BigInt.from((1 << n) - 1)).toInt();
   }
 
   /// Consume bits
@@ -352,3 +352,5 @@ class HuffmanBitReader {
     return r;
   }
 }
+
+final BigInt _uint64Mask = (BigInt.one << 64) - BigInt.one;

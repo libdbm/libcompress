@@ -118,7 +118,7 @@ class ZstdEncoder {
     // Write checksum if enabled
     if (enableChecksum) {
       // Per RFC 8878: content checksum is low 32 bits of XXH64
-      final checksum = XXH64.hash(input) & 0xFFFFFFFF;
+      final checksum = XXH64.hashLow32(input);
       ByteUtils.writeUint32LEAt(output, pos, checksum);
       pos += 4;
     }

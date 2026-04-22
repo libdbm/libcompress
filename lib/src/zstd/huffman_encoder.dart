@@ -222,7 +222,10 @@ class HuffmanEncoder {
       final s1 = literals[i - 3];
       final s0 = literals[i - 4];
 
-      if (_bits[s3] == 0 || _bits[s2] == 0 || _bits[s1] == 0 || _bits[s0] == 0) {
+      if (_bits[s3] == 0 ||
+          _bits[s2] == 0 ||
+          _bits[s1] == 0 ||
+          _bits[s0] == 0) {
         return null;
       }
 
@@ -334,13 +337,11 @@ class _Node {
   final _Node? left;
   final _Node? right;
 
-  _Node.leaf(this.symbol, this.count)
-      : left = null,
-        right = null;
+  _Node.leaf(this.symbol, this.count) : left = null, right = null;
 
   _Node.internal(_Node this.left, _Node this.right)
-      : symbol = -1,
-        count = left.count + right.count;
+    : symbol = -1,
+      count = left.count + right.count;
 }
 
 /// Forward bitstream writer (LSB-first accumulation, like Java BitOutputStream)
@@ -349,21 +350,23 @@ class _Node {
 /// The final stream includes a sentinel bit for the decoder.
 class _BitWriter {
   final Uint8List _buffer;
-  int _container = 0;
+  BigInt _container = BigInt.zero;
   int _bitCount = 0;
   int _pos = 0;
 
   _BitWriter(final int size) : _buffer = Uint8List(size);
 
   void addBits(final int value, final int bits) {
-    _container |= (value & ((1 << bits) - 1)) << _bitCount;
+    if (bits <= 0) return;
+    final mask = (BigInt.one << bits) - BigInt.one;
+    _container |= (BigInt.from(value) & mask) << _bitCount;
     _bitCount += bits;
   }
 
   void flush() {
     final bytes = _bitCount >> 3;
     for (var i = 0; i < bytes && _pos < _buffer.length; i++) {
-      _buffer[_pos++] = _container & 0xFF;
+      _buffer[_pos++] = (_container & BigInt.from(0xFF)).toInt();
       _container >>= 8;
     }
     _bitCount &= 7;
@@ -376,7 +379,7 @@ class _BitWriter {
 
     // Write any remaining bits
     if (_bitCount > 0 && _pos < _buffer.length) {
-      _buffer[_pos++] = _container & 0xFF;
+      _buffer[_pos++] = (_container & BigInt.from(0xFF)).toInt();
     }
 
     if (_pos == 0) return null;

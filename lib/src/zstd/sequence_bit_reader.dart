@@ -12,14 +12,14 @@ class SequenceBitReader {
   final Uint8List data;
   final int _startAddress;
   int _currentAddress;
-  int _bits;
+  BigInt _bits;
   int _bitsConsumed;
   bool _overflow;
 
   SequenceBitReader(this.data, int endOffset, {int startOffset = 0})
-    : _startAddress = startOffset,
-      _currentAddress = 0,
-      _bits = 0,
+      : _startAddress = startOffset,
+        _currentAddress = 0,
+        _bits = BigInt.zero,
       _bitsConsumed = 0,
       _overflow = false {
     if (endOffset <= startOffset) {
@@ -53,18 +53,18 @@ class SequenceBitReader {
     return value.bitLength - 1;
   }
 
-  int _loadLittleEndian64(int offset) {
-    int result = 0;
+  BigInt _loadLittleEndian64(int offset) {
+    var result = BigInt.zero;
     for (var i = 0; i < 8 && offset + i < data.length; i++) {
-      result |= data[offset + i] << (8 * i);
+      result |= BigInt.from(data[offset + i]) << (8 * i);
     }
     return result;
   }
 
-  int _loadTail(int offset, int size) {
-    int result = 0;
+  BigInt _loadTail(int offset, int size) {
+    var result = BigInt.zero;
     for (var i = 0; i < size; i++) {
-      result |= data[offset + i] << (8 * i);
+      result |= BigInt.from(data[offset + i]) << (8 * i);
     }
     return result;
   }
@@ -110,10 +110,9 @@ class SequenceBitReader {
     // Java formula: (((bits << bitsConsumed) >>> 1) >>> (63 - numberOfBits))
     // Handle Dart's signed arithmetic carefully
     if (numBits == 0) return 0;
-    final shifted = (_bits << _bitsConsumed) & 0xFFFFFFFFFFFFFFFF;
-    // Unsigned right shift simulation
-    final step1 = (shifted >> 1) & 0x7FFFFFFFFFFFFFFF;
-    return (step1 >> (63 - numBits)) & ((1 << numBits) - 1);
+    final shifted = (_bits << _bitsConsumed) & _uint64Mask;
+    return ((shifted >> (64 - numBits)) & BigInt.from((1 << numBits) - 1))
+        .toInt();
   }
 
   /// Read specified number of bits (consumes them)
@@ -156,3 +155,5 @@ class SequenceBitReader {
     return bytesRemaining + (bitsRemaining > 0 ? 1 : 0);
   }
 }
+
+final BigInt _uint64Mask = (BigInt.one << 64) - BigInt.one;

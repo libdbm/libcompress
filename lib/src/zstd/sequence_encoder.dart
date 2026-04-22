@@ -132,7 +132,8 @@ class SequenceEncoder {
         }
 
         // Flush if needed (when bits accumulate)
-        final totalBits = token.offsetExtraBits +
+        final totalBits =
+            token.offsetExtraBits +
             token.matchExtraBits +
             token.literalExtraBits;
         if (totalBits >= 64 - 7 - 17) {
@@ -237,30 +238,8 @@ class SequenceEncoder {
     final int offset,
     final List<int> previousOffsets,
   ) {
-    // Per RFC 8878, offset values 0-2 are repeat offset codes:
-    // - Value 0: uses previousOffsets[0] (or [1] if literalLength==0)
-    // - Value 1-2: uses previousOffsets[1] or [2]
-    // When literalLength==0, the repeat value shifts by 1, which allows
-    // rep0-1 (value 3) via the value-2 repeat.
-
-    // Try repeat offsets (values 0-2 via symbols 0-1)
-    // Symbol 0: Offset_Value = 0 (no extra bits)
-    if (_repeatOffsetProduces(0, literalLength, previousOffsets) == offset) {
-      _updateRepeatHistory(0, literalLength, previousOffsets);
-      return _OffsetEncoding(symbol: 0, bits: 0, value: 0);
-    }
-
-    // Symbol 1: Offset_Value = 1 + extra_bit (1 bit)
-    // Can produce Offset_Value 1 or 2
-    for (var extra = 0; extra < 2; extra++) {
-      final offsetValue = 1 + extra;
-      if (_repeatOffsetValueProduces(offsetValue, literalLength, previousOffsets) == offset) {
-        _updateRepeatHistoryForValue(offsetValue, literalLength, previousOffsets);
-        return _OffsetEncoding(symbol: 1, bits: 1, value: extra);
-      }
-    }
-
-    // Use absolute offset (symbol 2+)
+    // Encode absolute offsets only. Repeat-offset symbols are frame stateful
+    // across blocks; this encoder builds each block independently.
     final symbol = _getAbsoluteOffsetSymbol(offset);
     final base = seq.offsetBase[symbol];
     final bits = seq.offsetBits[symbol];
@@ -271,88 +250,6 @@ class SequenceEncoder {
     previousOffsets[0] = offset;
 
     return _OffsetEncoding(symbol: symbol, bits: bits, value: value);
-  }
-
-  /// Check what offset symbol 0 (Offset_Value=0) produces
-  int _repeatOffsetProduces(
-    final int symbol,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    // Symbol 0: Offset_Value = 0
-    // If literalLength == 0: uses previousOffsets[1]
-    // Otherwise: uses previousOffsets[0]
-    if (literalLength == 0) {
-      return offsets[1];
-    }
-    return offsets[0];
-  }
-
-  /// Check what a given Offset_Value produces (for repeat offsets)
-  int _repeatOffsetValueProduces(
-    final int offsetValue,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    var idx = offsetValue;
-    if (literalLength == 0) {
-      idx++;
-    }
-
-    if (idx == 0) {
-      return offsets[0];
-    } else if (idx == 3) {
-      final temp = offsets[0] - 1;
-      return temp == 0 ? 1 : temp;
-    } else {
-      return offsets[idx];
-    }
-  }
-
-  /// Update repeat history for symbol 0
-  void _updateRepeatHistory(
-    final int symbol,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    if (literalLength == 0) {
-      // Swap offsets[0] and offsets[1]
-      final temp = offsets[0];
-      offsets[0] = offsets[1];
-      offsets[1] = temp;
-    }
-    // Otherwise no change for symbol 0 when literalLength > 0
-  }
-
-  /// Update repeat history for a given Offset_Value
-  void _updateRepeatHistoryForValue(
-    final int offsetValue,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    var idx = offsetValue;
-    if (literalLength == 0) {
-      idx++;
-    }
-
-    if (idx == 0) {
-      // No change
-    } else if (idx == 3) {
-      final temp = offsets[0] - 1;
-      offsets[2] = offsets[1];
-      offsets[1] = offsets[0];
-      offsets[0] = temp == 0 ? 1 : temp;
-    } else if (idx == 1) {
-      final temp = offsets[0];
-      offsets[0] = offsets[1];
-      offsets[1] = temp;
-    } else if (idx == 2) {
-      final t0 = offsets[0];
-      final t1 = offsets[1];
-      offsets[0] = offsets[2];
-      offsets[1] = t0;
-      offsets[2] = t1;
-    }
   }
 
   int _getAbsoluteOffsetSymbol(final int offset) {
@@ -370,7 +267,6 @@ class SequenceEncoder {
     }
     throw StateError('Unable to encode offset $offset');
   }
-
 }
 
 class _OffsetEncoding {
@@ -410,11 +306,9 @@ class SequenceSymbols {
     for (final match in matches) {
       llSymbols.add(_getLiteralLengthSymbol(match.literalLength));
       mlSymbols.add(_getMatchLengthSymbol(match.length));
-      ofSymbols.add(_encodeOffsetSymbol(
-        match.literalLength,
-        match.offset,
-        prevOffsets,
-      ));
+      ofSymbols.add(
+        _encodeOffsetSymbol(match.literalLength, match.offset, prevOffsets),
+      );
     }
 
     return SequenceSymbols(
@@ -451,94 +345,12 @@ class SequenceSymbols {
     final int offset,
     final List<int> prevOffsets,
   ) {
-    // Try repeat offset symbol 0: Offset_Value = 0
-    if (_repeatOffsetProduces(0, literalLength, prevOffsets) == offset) {
-      _updateRepeatHistory(0, literalLength, prevOffsets);
-      return 0;
-    }
-
-    // Try repeat offset symbol 1: Offset_Value = 1 or 2
-    for (var extra = 0; extra < 2; extra++) {
-      final offsetValue = 1 + extra;
-      if (_repeatOffsetValueProduces(offsetValue, literalLength, prevOffsets) ==
-          offset) {
-        _updateRepeatHistoryForValue(offsetValue, literalLength, prevOffsets);
-        return 1;
-      }
-    }
-
-    // Absolute offset (symbol 2+)
+    // Keep FSE statistics aligned with SequenceEncoder: absolute offsets only.
     final symbol = _getAbsoluteOffsetSymbol(offset);
     prevOffsets[2] = prevOffsets[1];
     prevOffsets[1] = prevOffsets[0];
     prevOffsets[0] = offset;
     return symbol;
-  }
-
-  static int _repeatOffsetProduces(
-    final int symbol,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    if (literalLength == 0) return offsets[1];
-    return offsets[0];
-  }
-
-  static int _repeatOffsetValueProduces(
-    final int offsetValue,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    var idx = offsetValue;
-    if (literalLength == 0) idx++;
-
-    if (idx == 0) return offsets[0];
-    if (idx == 3) {
-      final temp = offsets[0] - 1;
-      return temp == 0 ? 1 : temp;
-    }
-    return offsets[idx];
-  }
-
-  static void _updateRepeatHistory(
-    final int symbol,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    if (literalLength == 0) {
-      final temp = offsets[0];
-      offsets[0] = offsets[1];
-      offsets[1] = temp;
-    }
-  }
-
-  static void _updateRepeatHistoryForValue(
-    final int offsetValue,
-    final int literalLength,
-    final List<int> offsets,
-  ) {
-    var idx = offsetValue;
-    if (literalLength == 0) idx++;
-
-    if (idx == 0) {
-      return;
-    }
-    if (idx == 1) {
-      final temp = offsets[1];
-      offsets[1] = offsets[0];
-      offsets[0] = temp;
-    } else if (idx == 2) {
-      final t0 = offsets[0];
-      final t1 = offsets[1];
-      offsets[0] = offsets[2];
-      offsets[1] = t0;
-      offsets[2] = t1;
-    } else if (idx == 3) {
-      final temp = offsets[0] - 1;
-      offsets[2] = offsets[1];
-      offsets[1] = offsets[0];
-      offsets[0] = temp == 0 ? 1 : temp;
-    }
   }
 
   static int _getAbsoluteOffsetSymbol(final int offset) {
@@ -617,10 +429,9 @@ class FseCompressionTable {
     var position = 0;
 
     for (var symbol = 0; symbol <= maxSymbol; symbol++) {
-      final count =
-          (symbol < normalized.length && normalized[symbol] > 0)
-              ? normalized[symbol]
-              : 0;
+      final count = (symbol < normalized.length && normalized[symbol] > 0)
+          ? normalized[symbol]
+          : 0;
       for (var i = 0; i < count; i++) {
         table[position] = symbol;
         do {
@@ -643,8 +454,7 @@ class FseCompressionTable {
     var total = 0;
 
     for (var symbol = 0; symbol <= maxSymbol; symbol++) {
-      final count =
-          (symbol < normalized.length) ? normalized[symbol] : 0;
+      final count = (symbol < normalized.length) ? normalized[symbol] : 0;
       if (count == 0) {
         deltaNumberOfBits[symbol] = ((log + 1) << 16) - tableSize;
       } else if (count == -1 || count == 1) {
@@ -697,14 +507,15 @@ class FseCompressionTable {
 
 /// Bit output stream matching Java BitOutputStream behavior
 class BitOutputStream {
-  int _container = 0;
+  BigInt _container = BigInt.zero;
   int _bitCount = 0;
   final _bytes = <int>[];
 
   /// Add bits to the stream (LSB accumulation)
   void addBits(final int value, final int bits) {
     if (bits <= 0) return;
-    _container |= (value & ((1 << bits) - 1)) << _bitCount;
+    final mask = (BigInt.one << bits) - BigInt.one;
+    _container |= (BigInt.from(value) & mask) << _bitCount;
     _bitCount += bits;
   }
 
@@ -712,7 +523,7 @@ class BitOutputStream {
   void flush() {
     final bytes = _bitCount >> 3;
     for (var i = 0; i < bytes; i++) {
-      _bytes.add(_container & 0xFF);
+      _bytes.add((_container & BigInt.from(0xFF)).toInt());
       _container >>= 8;
     }
     _bitCount &= 7;
@@ -726,7 +537,8 @@ class BitOutputStream {
 
     // Flush remaining bits
     if (_bitCount > 0) {
-      _bytes.add(_container & ((1 << _bitCount) - 1));
+      final mask = (BigInt.one << _bitCount) - BigInt.one;
+      _bytes.add((_container & mask).toInt());
     }
 
     return Uint8List.fromList(_bytes);

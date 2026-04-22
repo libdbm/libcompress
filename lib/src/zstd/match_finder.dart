@@ -27,20 +27,20 @@ class MatchFinder {
   static const int _chainSize = 1 << 16;
   static const int _minMatch = 3; // Zstd minimum match
   static const int _maxOffset = 1 << 22; // ~4MB max offset for Zstd
+  static final BigInt _u32Mask = BigInt.from(0xFFFFFFFF);
 
   final int searchDepth;
   final int maxMatch;
 
-  MatchFinder({
-    this.searchDepth = 32,
-    this.maxMatch = 65536,
-  });
+  MatchFinder({this.searchDepth = 32, this.maxMatch = 65536});
 
   /// Hash function for match finding
   int _hash(final Uint8List data, final int pos) {
     if (pos + 3 >= data.length) return 0;
     final v = ByteUtils.readUint32LE(data, pos);
-    return ((v * 2654435761) >> (32 - _hashLog)) & _hashMask;
+    final product = (BigInt.from(v) * BigInt.from(2654435761) & _u32Mask)
+        .toInt();
+    return (product >> (32 - _hashLog)) & _hashMask;
   }
 
   /// Find all matches in the input data using hash chains
@@ -81,11 +81,9 @@ class MatchFinder {
       if (bestLen >= _minMatch) {
         // Emit match
         final litLen = pos - anchor;
-        matches.add(ZstdMatch(
-          offset: bestOffset,
-          length: bestLen,
-          literalLength: litLen,
-        ));
+        matches.add(
+          ZstdMatch(offset: bestOffset, length: bestLen, literalLength: litLen),
+        );
 
         // Update hash table for positions we're skipping
         for (var i = 1; i < bestLen && pos + i <= limit; i++) {

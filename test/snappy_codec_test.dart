@@ -4,6 +4,7 @@ import 'package:libcompress/src/snappy/snappy_codec.dart';
 import 'package:libcompress/src/snappy/snappy_decoder.dart';
 import 'package:libcompress/src/snappy/snappy_stream_encoder.dart';
 import 'test_utils.dart';
+import 'web_test_utils.dart';
 
 void main() {
   group('Snappy decompression fixtures', () {
@@ -15,6 +16,20 @@ void main() {
         final actual = codec.decompress(compressed);
         expect(actual, orderedEquals(expected));
       });
+    }
+
+    for (final path in standardFixtures) {
+      test(
+        'decompresses $path on web/js',
+        () async {
+          await expectWebDecompresses(
+            codecExpression: 'SnappyCodec(framing: false)',
+            compressed: readCodecFixture('snappy', '$path.snappy'),
+            expected: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
     }
   });
 
@@ -28,6 +43,19 @@ void main() {
         expect(restored, orderedEquals(original));
       });
     }
+
+    for (final path in standardFixtures) {
+      test(
+        'round-trips $path on web/js',
+        () async {
+          await expectWebRoundTrip(
+            codecExpression: 'SnappyCodec(framing: false)',
+            data: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
+    }
   });
 
   group('Snappy round-trip compression (framing)', () {
@@ -39,6 +67,19 @@ void main() {
         final restored = codec.decompress(compressed);
         expect(restored, orderedEquals(original));
       });
+    }
+
+    for (final path in standardFixtures) {
+      test(
+        'round-trips $path with framing on web/js',
+        () async {
+          await expectWebRoundTrip(
+            codecExpression: 'SnappyCodec(framing: true)',
+            data: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
     }
   });
 
@@ -126,10 +167,7 @@ void main() {
       final codec = SnappyCodec(maxSize: 100);
       final largeData = Uint8List.fromList(List.filled(1000, 65));
       final compressed = SnappyCodec().compress(largeData);
-      expect(
-        () => codec.decompress(compressed),
-        throwsA(isA<Exception>()),
-      );
+      expect(() => codec.decompress(compressed), throwsA(isA<Exception>()));
     });
   });
 

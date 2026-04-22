@@ -1,9 +1,11 @@
 import 'dart:typed_data';
+import 'dart:convert';
 import 'package:test/test.dart';
 import 'package:libcompress/src/zstd/zstd_codec.dart';
 import 'package:libcompress/src/zstd/zstd_encoder.dart';
 import 'package:libcompress/src/zstd/zstd_common.dart';
 import 'test_utils.dart';
+import 'web_test_utils.dart';
 
 void main() {
   group('ZSTD decompression fixtures', () {
@@ -16,6 +18,20 @@ void main() {
         expect(actual, orderedEquals(expected));
       });
     }
+
+    for (final path in standardFixtures) {
+      test(
+        'decompresses $path on web/js',
+        () async {
+          await expectWebDecompresses(
+            codecExpression: 'ZstdCodec()',
+            compressed: readCodecFixture('zstd', '$path.zst'),
+            expected: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
+    }
   });
 
   group('ZSTD round-trip compression', () {
@@ -27,6 +43,19 @@ void main() {
         final restored = codec.decompress(compressed);
         expect(restored, orderedEquals(original));
       });
+    }
+
+    for (final path in standardFixtures) {
+      test(
+        'round-trips $path on web/js',
+        () async {
+          await expectWebRoundTrip(
+            codecExpression: 'ZstdCodec()',
+            data: readDataFixture(path),
+          );
+        },
+        timeout: const Timeout(Duration(seconds: 90)),
+      );
     }
   });
 
@@ -91,7 +120,10 @@ void main() {
 
     test('decompresses alphabet with varied symbol frequencies', () {
       final codec = ZstdCodec();
-      final compressed = readCodecFixture('zstd', 'artificial/alphabet.txt.zst');
+      final compressed = readCodecFixture(
+        'zstd',
+        'artificial/alphabet.txt.zst',
+      );
       final expected = readDataFixture('artificial/alphabet.txt');
       final actual = codec.decompress(compressed);
       expect(actual, orderedEquals(expected));
@@ -258,10 +290,13 @@ void main() {
       final payload = Uint8List.fromList(List.generate(16, (i) => i + 1));
       final frame = codec.compress(payload);
 
-      final skippable = _buildSkippableFrame(
-        zstdSkippableFrameMagicBase + 3,
-        [0, 1, 2, 3, 4],
-      );
+      final skippable = _buildSkippableFrame(zstdSkippableFrameMagicBase + 3, [
+        0,
+        1,
+        2,
+        3,
+        4,
+      ]);
 
       final combined = Uint8List(
         frame.length + skippable.length + frame.length,
@@ -282,14 +317,18 @@ void main() {
       final codec = ZstdCodec();
 
       // Build a stream with only skippable frames
-      final skippable1 = _buildSkippableFrame(
-        zstdSkippableFrameMagicBase,
-        [1, 2, 3],
-      );
-      final skippable2 = _buildSkippableFrame(
-        zstdSkippableFrameMagicBase + 5,
-        [4, 5, 6, 7, 8],
-      );
+      final skippable1 = _buildSkippableFrame(zstdSkippableFrameMagicBase, [
+        1,
+        2,
+        3,
+      ]);
+      final skippable2 = _buildSkippableFrame(zstdSkippableFrameMagicBase + 5, [
+        4,
+        5,
+        6,
+        7,
+        8,
+      ]);
 
       final combined = Uint8List(skippable1.length + skippable2.length);
       combined.setRange(0, skippable1.length, skippable1);
@@ -392,16 +431,122 @@ void main() {
     test('compressed block with text-like data', () {
       final codec = ZstdCodec();
       final text = 'The quick brown fox jumps over the lazy dog. ';
-      final data = Uint8List.fromList(List.generate(
-        50,
-        (i) => text.codeUnits,
-      ).expand((x) => x).toList());
+      final data = Uint8List.fromList(
+        List.generate(50, (i) => text.codeUnits).expand((x) => x).toList(),
+      );
 
       final compressed = codec.compress(data);
       final decoded = codec.decompress(compressed);
       expect(decoded, equals(data));
       // Should achieve good compression
       expect(compressed.length, lessThan(data.length ~/ 2));
+    });
+
+    test('round-trips large json with embedded base64 across blocks', () {
+      final codec = ZstdCodec();
+      final data = Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'document': {'id': 'tpl'},
+            'elements': List.generate(
+              2000,
+              (i) => {
+                'id': 'e$i',
+                'kind': 'image',
+                'image': {
+                  'source':
+                      'data:image/png;base64,${base64Encode(List.generate(1024, (j) => (i + j) & 0xff))}',
+                },
+                'transform': {'x': i, 'y': i % 100, 'width': 20, 'height': 30},
+              },
+            ),
+          }),
+        ),
+      );
+
+      final compressed = codec.compress(data);
+      final decoded = codec.decompress(compressed);
+      expect(decoded, orderedEquals(data));
+    });
+
+    test(
+      'round-trips large json with embedded base64 across blocks on web/js',
+      () async {
+        final data = Uint8List.fromList(
+          utf8.encode(
+            jsonEncode({
+              'document': {'id': 'tpl'},
+              'elements': List.generate(
+                2000,
+                (i) => {
+                  'id': 'e$i',
+                  'kind': 'image',
+                  'image': {
+                    'source':
+                        'data:image/png;base64,${base64Encode(List.generate(1024, (j) => (i + j) & 0xff))}',
+                  },
+                  'transform': {
+                    'x': i,
+                    'y': i % 100,
+                    'width': 20,
+                    'height': 30,
+                  },
+                },
+              ),
+            }),
+          ),
+        );
+
+        await expectWebRoundTrip(codecExpression: 'ZstdCodec()', data: data);
+      },
+      timeout: const Timeout(Duration(seconds: 90)),
+    );
+
+    test(
+      'round-trips large base64 literals with repeated markers on web/js',
+      () async {
+        const alphabet =
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        const marker =
+            '--REPEATED-MATCH-MARKER-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789--';
+        var state = 1;
+        final buffer = StringBuffer();
+        for (var chunk = 0; chunk < 32; chunk += 1) {
+          for (var i = 0; i < 3000; i += 1) {
+            state = (state * 1664525 + 1013904223) & 0xffffffff;
+            buffer.write(alphabet[(state >> 16) & 63]);
+          }
+          buffer.write(marker);
+        }
+        final data = Uint8List.fromList(utf8.encode(buffer.toString()));
+
+        await expectWebRoundTrip(codecExpression: 'ZstdCodec()', data: data);
+      },
+      timeout: const Timeout(Duration(seconds: 90)),
+    );
+
+    test('round-trips utf8 json with high byte literals', () {
+      final codec = ZstdCodec();
+      final data = Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'document': {'id': 'shipping_label', 'locale': 'zh-CN'},
+            'elements': List.generate(
+              2000,
+              (i) => {
+                'id': 'text_$i',
+                'kind': 'text',
+                'text': '目的地 台北 发货 标签 $i {{destination}} PLT-2048',
+                'transform': {'x': i, 'y': i % 100, 'width': 90, 'height': 12},
+              },
+            ),
+          }),
+        ),
+      );
+
+      final compressed = codec.compress(data);
+      final decoded = codec.decompress(compressed);
+      expect(decoded, orderedEquals(data));
     });
 
     test('compressed block with varied literal lengths', () {
@@ -482,7 +627,11 @@ void main() {
       final compressed = codec.compress(data);
 
       // Truncate the compressed data (remove last 5 bytes)
-      final truncated = Uint8List.sublistView(compressed, 0, compressed.length - 5);
+      final truncated = Uint8List.sublistView(
+        compressed,
+        0,
+        compressed.length - 5,
+      );
 
       expect(
         () => codec.decompress(truncated),
@@ -578,11 +727,11 @@ Uint8List _buildSkippableFrame(final int magic, final List<int> payload) {
 }
 
 List<int> _uint32LE(final int value) => [
-      value & 0xFF,
-      (value >> 8) & 0xFF,
-      (value >> 16) & 0xFF,
-      (value >> 24) & 0xFF,
-    ];
+  value & 0xFF,
+  (value >> 8) & 0xFF,
+  (value >> 16) & 0xFF,
+  (value >> 24) & 0xFF,
+];
 
 Uint8List _injectDictionaryFlag(final Uint8List frame) {
   if (frame.length <= 5) {
@@ -602,7 +751,8 @@ int _firstBlockType(final Uint8List frame) {
   if (headerOffset + 3 > frame.length) {
     throw StateError('Frame too short to contain block header');
   }
-  final blockHeader = frame[headerOffset] |
+  final blockHeader =
+      frame[headerOffset] |
       (frame[headerOffset + 1] << 8) |
       (frame[headerOffset + 2] << 16);
   return (blockHeader >> 1) & 0x03;
