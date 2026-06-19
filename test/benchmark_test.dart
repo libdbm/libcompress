@@ -120,6 +120,23 @@ class BenchmarkReport {
       category: 'Large',
       data: Uint8List.fromList(List.generate(1024 * 1024, (i) => (i * 7 + 13) % 256)),
     ));
+
+    // Multi-MB fixtures (exercise multi-block + deep-match cost at high levels)
+    for (final spec in const [
+      ['Bible', 'large/bible.txt'],
+      ['E.coli', 'large/E.coli'],
+      ['URLs', 'urls.10K'],
+    ]) {
+      final path = 'test/fixtures/data/${spec[1]}';
+      if (File(path).existsSync()) {
+        final data = File(path).readAsBytesSync();
+        testDatasets.add(Dataset(
+          name: '${spec[0]} (${_formatBytes(data.length)})',
+          category: 'Large',
+          data: data,
+        ));
+      }
+    }
   }
 
   void _runDartBenchmarks() {
@@ -137,10 +154,14 @@ class BenchmarkReport {
       _benchmarkDartCodec(dataset, 'Gzip-6', GzipCodec(level: 6));
       _benchmarkDartCodec(dataset, 'Gzip-9', GzipCodec(level: 9));
 
-      // Zstd (raw/RLE only for now)
-      _benchmarkDartCodec(dataset, 'Zstd-3', ZstdCodec(level: 3));
+      // Zstd across levels (search depth scales steeply: 32 -> 128 -> 1024)
+      for (final level in _zstdLevels) {
+        _benchmarkDartCodec(dataset, 'Zstd-$level', ZstdCodec(level: level));
+      }
     }
   }
+
+  static const _zstdLevels = [3, 9, 19];
 
   void _benchmarkDartCodec(final Dataset dataset, final String codecName, final CompressionCodec codec) {
     if (dataset.data.isEmpty) {
@@ -247,7 +268,10 @@ class BenchmarkReport {
         // Zstd if available
         final zstdAvailable = Process.runSync('which', ['zstd']).exitCode == 0;
         if (zstdAvailable) {
-          _benchmarkCli(dataset, 'Zstd-3', 'zstd', ['-3', '-f'], '.zst', tmpFile);
+          for (final level in _zstdLevels) {
+            _benchmarkCli(
+              dataset, 'Zstd-$level', 'zstd', ['-$level', '-f'], '.zst', tmpFile);
+          }
         }
       } finally {
         if (tmpFile.existsSync()) tmpFile.deleteSync();
