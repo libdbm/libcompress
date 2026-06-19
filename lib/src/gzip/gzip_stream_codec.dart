@@ -67,6 +67,13 @@ class _GzipDecompressTransformer
     required super.maxBufferSize,
   });
 
+  // Resumable boundary-scan checkpoint for the in-progress member. The scan
+  // is restartable only at DEFLATE block boundaries, so on each chunk we
+  // resume from the last completed block instead of re-parsing the member.
+  int? _scanOffset; // member offset the checkpoint belongs to (null = none)
+  BitPosition _scanAt = const BitPosition(0, 0); // relative to deflateStart
+  bool _scanFinal = false; // final block already parsed
+
   @override
   int get minFrameSize => 10;
 
@@ -163,6 +170,8 @@ class _GzipDecompressTransformer
 
     final length = memberEnd - offset;
     final frame = Uint8List.fromList(buffer.sublist(offset, memberEnd));
+    // Member complete: drop the checkpoint so the next member scans fresh.
+    _scanOffset = null;
     return FrameParseResult(frame, length);
   }
 
@@ -172,16 +181,27 @@ class _GzipDecompressTransformer
   /// This parses block structure without fully decompressing.
   int? _findDeflateEnd(final List<int> buffer, final int start) {
     try {
-      // Single bulk copy of the tail into a typed array, rather than a
-      // List<int> sublist followed by a second Uint8List.fromList copy.
-      final length = buffer.length - start;
-      final data = Uint8List(length)..setRange(0, length, buffer, start);
-      final input = BitStreamReader(data);
+      // Read directly over the live buffer window — no tail copy. Block
+      // indices for an in-progress member are stable across chunk arrivals.
+      final input = BitStreamReader(buffer, start: start, end: buffer.length);
 
-      var final_ = false;
+      // Resume from the last checkpoint if it belongs to this member, so
+      // already-parsed blocks are never re-scanned.
+      final resuming = _scanOffset == start;
+      if (resuming) {
+        input.seek(_scanAt);
+      }
+      var final_ = resuming && _scanFinal;
+      _scanOffset = start;
+
       while (!final_) {
         // Need at least 3 bits for block header
-        if (input.isEndOfStream) return null;
+        if (input.isEndOfStream) {
+          // Ran out of data at a block boundary; checkpoint and wait.
+          _scanAt = input.position;
+          _scanFinal = false;
+          return null;
+        }
 
         try {
           final_ = input.readBits(1) == 1;
@@ -210,8 +230,14 @@ class _GzipDecompressTransformer
               return null; // Invalid block type
           }
         } catch (_) {
-          return null; // Incomplete data
+          // Incomplete block: leave the checkpoint at this block's start so
+          // the next chunk re-parses only this block, not the whole member.
+          return null;
         }
+
+        // Block completed: advance the checkpoint past it.
+        _scanAt = input.position;
+        _scanFinal = final_;
       }
 
       // Align to byte boundary after final block

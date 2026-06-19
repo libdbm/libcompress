@@ -47,30 +47,78 @@ class BitStreamWriter {
   }
 }
 
+/// An immutable bit-stream position (byte offset plus a 0-7 bit offset),
+/// captured from [BitStreamReader.position] and restored via [BitStreamReader.seek].
+class BitPosition {
+  /// Byte offset relative to the reader's window start.
+  final int byte;
+
+  /// Bit offset within [byte] (0-7).
+  final int bit;
+
+  const BitPosition(this.byte, this.bit);
+}
+
 /// A reader for consuming a stream of bits from a byte list.
 ///
 /// Bits are read in the same order they are written by [BitStreamWriter].
 /// Uses a simple byte-at-a-time approach for reliable byte alignment.
 class BitStreamReader {
-  final Uint8List _data;
-  int _bytePos = 0;
+  final List<int> _data;
+
+  /// Absolute index in [_data] where this reader's window begins.
+  final int _start;
+
+  /// Absolute index in [_data] one past the last readable byte.
+  final int _end;
+
+  int _bytePos; // Absolute index into _data
   int _bitPos = 0; // Bit position within current byte (0-7)
   int _lastReadValue = 0;
   int _lastReadBits = 0;
 
-  BitStreamReader(this._data);
+  /// Creates a reader over [data], optionally restricted to the window
+  /// `[start, end)`. The window lets a reader consume a slice of a larger
+  /// buffer without copying it; positions are reported relative to [start].
+  BitStreamReader(this._data, {final int start = 0, final int? end})
+      : _start = start,
+        _end = end ?? _data.length,
+        _bytePos = start;
 
-  /// Returns the current byte position in the stream
-  int get bytePosition => _bytePos;
+  /// Returns the current byte position, relative to the window start.
+  int get bytePosition => _bytePos - _start;
 
   /// Returns the current bit offset within the current byte (0-7)
   int get bitOffset => _bitPos;
 
-  /// Returns true if all bits from the underlying data have been consumed.
+  /// Captures the current position for later restore via [seek].
+  BitPosition get position => BitPosition(_bytePos - _start, _bitPos);
+
+  /// Restores a position previously captured from [position].
+  ///
+  /// The target is interpreted relative to the window start. Invalidates the
+  /// peek-cache so a later `readBits(reuseLast: true)` cannot return stale bits.
+  void seek(final BitPosition target) {
+    if (target.bit < 0 || target.bit > 7) {
+      throw ArgumentError('bit offset must be 0-7');
+    }
+    final bytePos = _start + target.byte;
+    if (bytePos < _start ||
+        bytePos > _end ||
+        (bytePos == _end && target.bit > 0)) {
+      throw ArgumentError('position out of range');
+    }
+    _bytePos = bytePos;
+    _bitPos = target.bit;
+    _lastReadValue = 0;
+    _lastReadBits = 0;
+  }
+
+  /// Returns true if all bits from the window have been consumed.
   ///
   /// Note: [consumeBits] normalizes position so _bitPos is always 0-7.
-  /// When all bits are consumed, _bytePos == _data.length and _bitPos == 0.
-  bool get isEndOfStream => _bytePos >= _data.length;
+  /// When all bits are consumed, _bytePos == _end and _bitPos == 0.
+  bool get isEndOfStream => _bytePos >= _end;
 
   /// Reads a single byte from the stream.
   int readByte() {
@@ -92,14 +140,14 @@ class BitStreamReader {
         'Cannot read bytes on a non-byte-aligned position. Call flushToByte() first.',
       );
     }
-    if (_bytePos + length > _data.length) {
+    if (_bytePos + length > _end) {
       throw ArgumentError(
-        'Read of $length bytes exceeds available data of ${_data.length - _bytePos} bytes.',
+        'Read of $length bytes exceeds available data of ${_end - _bytePos} bytes.',
       );
     }
-    final result = _data.sublist(_bytePos, _bytePos + length);
+    final slice = _data.sublist(_bytePos, _bytePos + length);
     _bytePos += length;
-    return result;
+    return slice is Uint8List ? slice : Uint8List.fromList(slice);
   }
 
   /// Reads a value with a specific number of bits from the stream.
@@ -136,7 +184,7 @@ class BitStreamReader {
     var bitPos = _bitPos;
 
     while (bitsRead < bitCount) {
-      if (bytePos >= _data.length) {
+      if (bytePos >= _end) {
         throw StateError('Not enough bits in stream to peek');
       }
 
@@ -174,8 +222,7 @@ class BitStreamReader {
       _bitPos -= 8;
     }
 
-    if (_bytePos > _data.length ||
-        (_bytePos == _data.length && _bitPos > 0)) {
+    if (_bytePos > _end || (_bytePos == _end && _bitPos > 0)) {
       throw StateError('Not enough bits in stream to consume');
     }
   }
@@ -198,9 +245,9 @@ class BitStreamReader {
         'Cannot create a substream on a non-byte-aligned position. Call flushToByte() first.',
       );
     }
-    if (_bytePos + length > _data.length) {
+    if (_bytePos + length > _end) {
       throw ArgumentError(
-        'Substream length of $length exceeds available data of ${_data.length - _bytePos} bytes.',
+        'Substream length of $length exceeds available data of ${_end - _bytePos} bytes.',
       );
     }
     final sublist = _data.sublist(_bytePos, _bytePos + length);
