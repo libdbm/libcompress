@@ -59,8 +59,6 @@ void main() {
           throwsA(anyOf(
             isA<GzipFormatException>(),
             isA<DeflateFormatException>(),
-            isA<FormatException>(),
-            isA<StateError>(), // BitStreamReader throws StateError on exhausted input
           )),
           reason: 'Truncated at $cutoff should be rejected',
         );
@@ -301,7 +299,6 @@ void main() {
         throwsA(anyOf(
           isA<GzipFormatException>(),
           isA<DeflateFormatException>(),
-          isA<StateError>(),
         )),
       );
     });
@@ -331,11 +328,8 @@ void main() {
           // Expected
         } on DeflateFormatException {
           // Expected
-        } on FormatException {
-          // Expected
         } on StateError {
-          // TODO: Phase 4 should convert these to FormatException
-          // Currently BitStreamReader throws StateError on exhausted input
+          fail('Corrupted byte at $i leaked a StateError');
         } on RangeError {
           fail('Corrupted byte at $i caused RangeError');
         }

@@ -32,6 +32,18 @@ class DeflateDecoder {
   /// This is useful for GZIP concatenated members where you need to know
   /// where the next member starts.
   (Uint8List, int) decompressWithPosition(Uint8List data) {
+    try {
+      return _decode(data);
+    } on DeflateFormatException {
+      rethrow;
+    } on StateError catch (e) {
+      throw DeflateFormatException('Malformed DEFLATE stream: ${e.message}');
+    } on RangeError catch (e) {
+      throw DeflateFormatException('Malformed DEFLATE stream: $e');
+    }
+  }
+
+  (Uint8List, int) _decode(Uint8List data) {
     final input = BitStreamReader(data);
     final output = <int>[];
 
@@ -105,11 +117,8 @@ class DeflateDecoder {
     final BitStreamReader input,
     final List<int> output,
   ) {
-    // Build fixed Huffman decode tables
-    final litLenDecoder = buildFixedLiteralDecoder();
-    final distDecoder = buildFixedDistanceDecoder();
-
-    _decodeHuffmanBlock(input, output, litLenDecoder, distDecoder);
+    // Reuse the shared fixed Huffman decode tables (RFC 1951 constants)
+    _decodeHuffmanBlock(input, output, fixedLiteralDecoder, fixedDistanceDecoder);
   }
 
   /// Reads a block compressed with dynamic Huffman codes

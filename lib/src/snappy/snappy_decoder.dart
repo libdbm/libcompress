@@ -35,7 +35,12 @@ class SnappyDecoder {
     if (uncompressedLength != null) {
       actualUncompressedLength = uncompressedLength;
     } else {
-      final result = Varint.decode(compressed, sourceIndex);
+      final VarintResult result;
+      try {
+        result = Varint.decode(compressed, sourceIndex);
+      } on FormatException catch (e) {
+        throw SnappyFormatException('Invalid Snappy length prefix: ${e.message}');
+      }
       actualUncompressedLength = result.value;
       sourceIndex += result.bytesRead;
     }

@@ -54,7 +54,17 @@ class ZstdCodec extends CompressionCodec {
     this.enableChecksum = false,
     this.maxDecompressedSize = zstdDefaultMaxDecompressedSize,
     this.validate = false,
-  });
+  }) {
+    if (level < 1 || level > 22) {
+      throw ArgumentError('Level must be between 1 and 22, got $level');
+    }
+    if (blockSize <= 0) {
+      throw ArgumentError('Block size must be positive, got $blockSize');
+    }
+    if (blockSize > zstdMaxBlockSize) {
+      throw ArgumentError('Block size cannot exceed $zstdMaxBlockSize');
+    }
+  }
 
   /// Creates a Zstd codec from compression options
   factory ZstdCodec.fromOptions(final ZstdOptions options) {

@@ -172,7 +172,10 @@ class _GzipDecompressTransformer
   /// This parses block structure without fully decompressing.
   int? _findDeflateEnd(final List<int> buffer, final int start) {
     try {
-      final data = Uint8List.fromList(buffer.sublist(start));
+      // Single bulk copy of the tail into a typed array, rather than a
+      // List<int> sublist followed by a second Uint8List.fromList copy.
+      final length = buffer.length - start;
+      final data = Uint8List(length)..setRange(0, length, buffer, start);
       final input = BitStreamReader(data);
 
       var final_ = false;
@@ -227,8 +230,8 @@ class _GzipDecompressTransformer
     HuffmanDecoder distanceDecoder;
 
     if (fixed) {
-      literalDecoder = buildFixedLiteralDecoder();
-      distanceDecoder = buildFixedDistanceDecoder();
+      literalDecoder = fixedLiteralDecoder;
+      distanceDecoder = fixedDistanceDecoder;
     } else {
       // Parse dynamic tables
       final hlit = input.readBits(5) + 257;
