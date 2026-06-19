@@ -499,16 +499,16 @@ class CompressedBlockDecoder {
       throw ZstdFormatException('Literals header extends beyond block boundary');
     }
 
-    var value = 0;
+    var value = BigInt.zero;
     for (var i = 0; i < headerSize; i++) {
-      value |= (data[offset + i] & 0xFF) << (8 * i);
+      value |= BigInt.from(data[offset + i] & 0xff) << (8 * i);
     }
 
-    final regeneratedMask = (1 << bitsPerSize) - 1;
+    final regeneratedMask = (BigInt.one << bitsPerSize) - BigInt.one;
     final compressedMask = regeneratedMask;
-    final regeneratedSize = (value >> 4) & regeneratedMask;
+    final regeneratedSize = ((value >> 4) & regeneratedMask).toInt();
     final compressedShift = 4 + bitsPerSize;
-    final compressedSize = (value >> compressedShift) & compressedMask;
+    final compressedSize = ((value >> compressedShift) & compressedMask).toInt();
 
     return _CompressedLiteralHeader(
       headerSize: headerSize,

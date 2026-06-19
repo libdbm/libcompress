@@ -6,11 +6,29 @@ import 'dart:typed_data';
 /// Based on the XXHash specification: https://github.com/Cyan4973/xxHash
 class XXH64 {
   // XXH64 constants
-  static const int _prime1 = 0x9E3779B185EBCA87;
-  static const int _prime2 = 0xC2B2AE3D27D4EB4F;
-  static const int _prime3 = 0x165667B19E3779F9;
-  static const int _prime4 = 0x85EBCA77C2B2AE63;
-  static const int _prime5 = 0x27D4EB2F165667C5;
+  static final BigInt _prime1 = BigInt.parse(
+    '9E3779B185EBCA87',
+    radix: 16,
+  );
+  static final BigInt _prime2 = BigInt.parse(
+    'C2B2AE3D27D4EB4F',
+    radix: 16,
+  );
+  static final BigInt _prime3 = BigInt.parse(
+    '165667B19E3779F9',
+    radix: 16,
+  );
+  static final BigInt _prime4 = BigInt.parse(
+    '85EBCA77C2B2AE63',
+    radix: 16,
+  );
+  static final BigInt _prime5 = BigInt.parse(
+    '27D4EB2F165667C5',
+    radix: 16,
+  );
+  static final BigInt _mask64 = (BigInt.one << 64) - BigInt.one;
+  static final BigInt _mask32 = (BigInt.one << 32) - BigInt.one;
+  static final BigInt _signBit64 = BigInt.one << 63;
 
   /// Computes the XXH64 hash of the given data with an optional seed.
   ///
@@ -18,16 +36,25 @@ class XXH64 {
   /// [seed] - Optional seed value (default: 0)
   /// Returns the 64-bit hash as an unsigned integer
   static int hash(Uint8List data, [int seed = 0]) {
+    return _toSignedInt64(_hashBigInt(data, BigInt.from(seed)));
+  }
+
+  /// Computes the low 32 bits of XXH64.
+  static int hashLow32(Uint8List data, [int seed = 0]) {
+    return (_hashBigInt(data, BigInt.from(seed)) & _mask32).toInt();
+  }
+
+  static BigInt _hashBigInt(Uint8List data, BigInt seed) {
     final length = data.length;
-    int h64;
+    BigInt h64;
     int index = 0;
 
     if (length >= 32) {
       final limit = length - 32;
-      int v1 = _add64(seed, _add64(_prime1, _prime2));
-      int v2 = _add64(seed, _prime2);
-      int v3 = seed;
-      int v4 = _sub64(seed, _prime1);
+      BigInt v1 = _add64(seed, _add64(_prime1, _prime2));
+      BigInt v2 = _add64(seed, _prime2);
+      BigInt v3 = seed;
+      BigInt v4 = _sub64(seed, _prime1);
 
       while (index <= limit) {
         v1 = _round64(v1, _readLittleEndian64(data, index));
@@ -45,7 +72,7 @@ class XXH64 {
           _add64(_rotateLeft64(v1, 1), _rotateLeft64(v2, 7)),
           _add64(_rotateLeft64(v3, 12), _rotateLeft64(v4, 18)),
         ),
-        0,
+        BigInt.zero,
       );
 
       h64 = _mergeRound64(h64, v1);
@@ -56,11 +83,11 @@ class XXH64 {
       h64 = _add64(seed, _prime5);
     }
 
-    h64 = _add64(h64, length);
+    h64 = _add64(h64, BigInt.from(length));
 
     // Process remaining bytes in 8-byte chunks
     while (index <= length - 8) {
-      int k1 = _readLittleEndian64(data, index);
+      BigInt k1 = _readLittleEndian64(data, index);
       k1 = _mult64(k1, _prime2);
       k1 = _rotateLeft64(k1, 31);
       k1 = _mult64(k1, _prime1);
@@ -72,7 +99,7 @@ class XXH64 {
 
     // Process remaining bytes in 4-byte chunks
     while (index <= length - 4) {
-      int k1 = _readLittleEndian32(data, index);
+      BigInt k1 = BigInt.from(_readLittleEndian32(data, index));
       k1 = _mult64(k1, _prime1);
       h64 ^= k1;
       h64 = _add64(_mult64(_rotateLeft64(h64, 23), _prime2), _prime3);
@@ -81,18 +108,18 @@ class XXH64 {
 
     // Process remaining bytes individually
     while (index < length) {
-      final k1 = _mult64(data[index], _prime5);
+      final k1 = _mult64(BigInt.from(data[index]), _prime5);
       h64 ^= k1;
       h64 = _mult64(_rotateLeft64(h64, 11), _prime1);
       index++;
     }
 
     // Final avalanche
-    h64 ^= h64 >>> 33;
+    h64 ^= h64 >> 33;
     h64 = _mult64(h64, _prime2);
-    h64 ^= h64 >>> 29;
+    h64 ^= h64 >> 29;
     h64 = _mult64(h64, _prime3);
-    h64 ^= h64 >>> 32;
+    h64 ^= h64 >> 32;
 
     return h64;
   }
@@ -102,26 +129,34 @@ class XXH64 {
     return hash(Uint8List.fromList(data), seed);
   }
 
-  static int _add64(int a, int b) {
-    return (a + b) & 0xFFFFFFFFFFFFFFFF;
+  static int _toSignedInt64(BigInt value) {
+    final unsigned = value & _mask64;
+    if (unsigned >= _signBit64) {
+      return (unsigned - (_mask64 + BigInt.one)).toInt();
+    }
+    return unsigned.toInt();
   }
 
-  static int _sub64(int a, int b) {
-    return (a - b) & 0xFFFFFFFFFFFFFFFF;
+  static BigInt _add64(BigInt a, BigInt b) {
+    return (a + b) & _mask64;
   }
 
-  static int _mult64(int a, int b) {
-    return (a * b) & 0xFFFFFFFFFFFFFFFF;
+  static BigInt _sub64(BigInt a, BigInt b) {
+    return (a - b) & _mask64;
   }
 
-  static int _round64(int acc, int input) {
+  static BigInt _mult64(BigInt a, BigInt b) {
+    return (a * b) & _mask64;
+  }
+
+  static BigInt _round64(BigInt acc, BigInt input) {
     acc = _add64(acc, _mult64(input, _prime2));
     acc = _rotateLeft64(acc, 31);
     acc = _mult64(acc, _prime1);
     return acc;
   }
 
-  static int _mergeRound64(int acc, int val) {
+  static BigInt _mergeRound64(BigInt acc, BigInt val) {
     val = _mult64(val, _prime2);
     val = _rotateLeft64(val, 31);
     val = _mult64(val, _prime1);
@@ -131,9 +166,9 @@ class XXH64 {
     return acc;
   }
 
-  static int _rotateLeft64(int value, int amount) {
-    value &= 0xFFFFFFFFFFFFFFFF;
-    return ((value << amount) | (value >>> (64 - amount))) & 0xFFFFFFFFFFFFFFFF;
+  static BigInt _rotateLeft64(BigInt value, int amount) {
+    value &= _mask64;
+    return ((value << amount) | (value >> (64 - amount))) & _mask64;
   }
 
   static int _readLittleEndian32(Uint8List data, int offset) {
@@ -143,14 +178,11 @@ class XXH64 {
         (data[offset + 3] << 24);
   }
 
-  static int _readLittleEndian64(Uint8List data, int offset) {
-    return data[offset] |
-        (data[offset + 1] << 8) |
-        (data[offset + 2] << 16) |
-        (data[offset + 3] << 24) |
-        (data[offset + 4] << 32) |
-        (data[offset + 5] << 40) |
-        (data[offset + 6] << 48) |
-        (data[offset + 7] << 56);
+  static BigInt _readLittleEndian64(Uint8List data, int offset) {
+    var result = BigInt.zero;
+    for (var i = 0; i < 8; i++) {
+      result |= BigInt.from(data[offset + i]) << (8 * i);
+    }
+    return result;
   }
 }

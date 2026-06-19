@@ -112,6 +112,12 @@ class CompressedBlockEncoder {
       return null;
     }
 
+    // The current Huffman weights encoder only supports the direct 4-bit
+    // representation, whose header can encode at most 128 weights.
+    if (maxSym + 1 > 128) {
+      return null;
+    }
+
     // Encode weights header
     final header = encoder.encodeWeightsHeader(maxSym + 1);
 
@@ -179,25 +185,28 @@ class CompressedBlockEncoder {
       bitsPerSize = 18;
     }
 
-    // Build header as little-endian value
-    // Bits 0-1: type, Bits 2-3: sizeFormat
-    // Bits 4 to 4+bitsPerSize-1: regeneratedSize
-    // Bits 4+bitsPerSize to 4+2*bitsPerSize-1: compressedSize
-    var header = (type & 0x03) | ((sizeFormat & 0x03) << 2);
-    header |= (regeneratedSize & ((1 << bitsPerSize) - 1)) << 4;
-    header |= (compressedSize & ((1 << bitsPerSize) - 1)) << (4 + bitsPerSize);
+    // Build header as little-endian value. This can require more than 32 bits
+    // for size format 3, so avoid JS bitwise operators after dart2js.
+    final sizeMask = (BigInt.one << bitsPerSize) - BigInt.one;
+    var header = BigInt.from((type & 0x03) | ((sizeFormat & 0x03) << 2));
+    header |= (BigInt.from(regeneratedSize) & sizeMask) << 4;
+    header |= (BigInt.from(compressedSize) & sizeMask) << (4 + bitsPerSize);
 
-    // Convert to bytes (little-endian)
-    final output = <int>[];
+    final output = Uint8List(
+      headerSize + weightsHeader.length + compressedStreams.length,
+    );
+
+    // Convert to bytes (little-endian).
     for (var i = 0; i < headerSize; i++) {
-      output.add((header >> (i * 8)) & 0xFF);
+      output[i] = ((header >> (i * 8)) & BigInt.from(0xff)).toInt();
     }
 
-    // Add weights header and compressed streams
-    output.addAll(weightsHeader);
-    output.addAll(compressedStreams);
+    var pos = headerSize;
+    output.setRange(pos, pos + weightsHeader.length, weightsHeader);
+    pos += weightsHeader.length;
+    output.setRange(pos, pos + compressedStreams.length, compressedStreams);
 
-    return Uint8List.fromList(output);
+    return output;
   }
 
   /// Encode raw literals section (header + payload)

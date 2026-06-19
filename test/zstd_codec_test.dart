@@ -30,6 +30,32 @@ void main() {
     }
   });
 
+  group('ZSTD multi-block', () {
+    // Regression: the encoder must not emit repeat-offset codes, whose state
+    // is frame-stateful across blocks. With a small block size, compressible
+    // data spans many blocks; rep-code emission corrupted later blocks.
+    test('round-trips compressible data across many small blocks', () {
+      final codec = ZstdCodec(blockSize: 1024);
+      final pattern = 'the quick brown fox jumps over the lazy dog. ';
+      final original = Uint8List.fromList(
+        List.generate(64 * 1024, (i) => pattern.codeUnitAt(i % pattern.length)),
+      );
+      final compressed = codec.compress(original);
+      final restored = codec.decompress(compressed);
+      expect(restored, orderedEquals(original));
+    });
+
+    test('round-trips repetitive binary across many small blocks', () {
+      final codec = ZstdCodec(blockSize: 512);
+      final original = Uint8List.fromList(
+        List.generate(32 * 1024, (i) => (i ~/ 7) % 13),
+      );
+      final compressed = codec.compress(original);
+      final restored = codec.decompress(compressed);
+      expect(restored, orderedEquals(original));
+    });
+  });
+
   group('ZSTD Raw blocks', () {
     test('compresses and decompresses empty data', () {
       final codec = ZstdCodec();
@@ -178,6 +204,22 @@ void main() {
 
     test('rejects block size exceeding maximum', () {
       expect(() => ZstdEncoder(blockSize: 129 * 1024), throwsArgumentError);
+    });
+
+    test('rejects non-positive block size at the codec boundary', () {
+      expect(() => ZstdCodec(blockSize: 0), throwsArgumentError);
+      expect(() => ZstdCodec(blockSize: -1), throwsArgumentError);
+      expect(() => ZstdEncoder(blockSize: 0), throwsArgumentError);
+      expect(() => ZstdEncoder(blockSize: -1), throwsArgumentError);
+    });
+
+    test('rejects oversized block size at the codec boundary', () {
+      expect(() => ZstdCodec(blockSize: 129 * 1024), throwsArgumentError);
+    });
+
+    test('rejects invalid level at the codec boundary', () {
+      expect(() => ZstdCodec(level: 0), throwsArgumentError);
+      expect(() => ZstdCodec(level: 23), throwsArgumentError);
     });
   });
 
