@@ -16,6 +16,9 @@ class CompressedBlockEncoder {
   /// Search depth for match finding (higher = better compression, slower)
   final int searchDepth;
 
+  /// Minimum match length to emit (level-derived; 3 or 4).
+  final int minMatch;
+
   /// Whether to validate encoded blocks by decompressing them
   ///
   /// When enabled, each block is decompressed immediately after compression
@@ -26,10 +29,15 @@ class CompressedBlockEncoder {
   String? lastValidationStack;
 
   /// Creates a compressed block encoder with specified search depth
-  CompressedBlockEncoder({this.searchDepth = 32, this.validate = false});
+  CompressedBlockEncoder({
+    this.searchDepth = 32,
+    this.minMatch = 3,
+    this.validate = false,
+  });
 
   // Reused across blocks so its large hash/chain tables are allocated once.
-  late final MatchFinder _matchFinder = MatchFinder(searchDepth: searchDepth);
+  late final MatchFinder _matchFinder =
+      MatchFinder(searchDepth: searchDepth, minMatch: minMatch);
 
   /// Encode a block using compressed format
   ///

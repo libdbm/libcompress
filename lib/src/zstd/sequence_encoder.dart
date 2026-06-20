@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import '../util/growable_buffer.dart';
 import 'sequence_constants.dart' as seq;
 import 'match_finder.dart';
 
@@ -10,6 +11,23 @@ final FseCompressionTable _predefinedOfTable =
     FseCompressionTable.create(seq.ofDefaultNorm, seq.ofDefaultNormLog, 31);
 final FseCompressionTable _predefinedMlTable =
     FseCompressionTable.create(seq.mlDefaultNorm, seq.mlDefaultNormLog, 52);
+
+/// Largest index `i` with `bases[i] <= value`, for the strictly-increasing
+/// literal-length and match-length base tables. Binary search replacing the
+/// previous per-match linear scans; result is identical.
+int _baseSymbol(final List<int> bases, final int value) {
+  var lo = 0;
+  var hi = bases.length - 1;
+  while (lo < hi) {
+    final mid = (lo + hi + 1) >> 1;
+    if (bases[mid] <= value) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
 
 /// Sequence encoder using FSE with configurable tables
 ///
@@ -201,27 +219,11 @@ class SequenceEncoder {
     return tokens;
   }
 
-  int _getLiteralLengthSymbol(final int length) {
-    for (var i = 0; i < seq.literalLengthBase.length; i++) {
-      if (i == seq.literalLengthBase.length - 1) return i;
-      if (length >= seq.literalLengthBase[i] &&
-          length < seq.literalLengthBase[i + 1]) {
-        return i;
-      }
-    }
-    return seq.literalLengthBase.length - 1;
-  }
+  int _getLiteralLengthSymbol(final int length) =>
+      _baseSymbol(seq.literalLengthBase, length);
 
-  int _getMatchLengthSymbol(final int length) {
-    for (var i = 0; i < seq.matchLengthBase.length; i++) {
-      if (i == seq.matchLengthBase.length - 1) return i;
-      if (length >= seq.matchLengthBase[i] &&
-          length < seq.matchLengthBase[i + 1]) {
-        return i;
-      }
-    }
-    return seq.matchLengthBase.length - 1;
-  }
+  int _getMatchLengthSymbol(final int length) =>
+      _baseSymbol(seq.matchLengthBase, length);
 
   int _literalExtraBits(final int symbol) =>
       symbol < seq.literalLengthBits.length ? seq.literalLengthBits[symbol] : 0;
@@ -317,27 +319,11 @@ class SequenceSymbols {
     );
   }
 
-  static int _getLiteralLengthSymbol(final int length) {
-    for (var i = 0; i < seq.literalLengthBase.length; i++) {
-      if (i == seq.literalLengthBase.length - 1) return i;
-      if (length >= seq.literalLengthBase[i] &&
-          length < seq.literalLengthBase[i + 1]) {
-        return i;
-      }
-    }
-    return seq.literalLengthBase.length - 1;
-  }
+  static int _getLiteralLengthSymbol(final int length) =>
+      _baseSymbol(seq.literalLengthBase, length);
 
-  static int _getMatchLengthSymbol(final int length) {
-    for (var i = 0; i < seq.matchLengthBase.length; i++) {
-      if (i == seq.matchLengthBase.length - 1) return i;
-      if (length >= seq.matchLengthBase[i] &&
-          length < seq.matchLengthBase[i + 1]) {
-        return i;
-      }
-    }
-    return seq.matchLengthBase.length - 1;
-  }
+  static int _getMatchLengthSymbol(final int length) =>
+      _baseSymbol(seq.matchLengthBase, length);
 
   static int _encodeOffsetSymbol(
     final int literalLength,
@@ -510,7 +496,9 @@ class FseCompressionTable {
 class BitOutputStream {
   int _container = 0;
   int _bitCount = 0;
-  final _bytes = <int>[];
+  // Uint8List-backed (via GrowableBuffer) rather than a boxed growable
+  // <int> list with a final fromList copy.
+  final _bytes = GrowableBuffer();
 
   /// Add bits to the stream (LSB accumulation)
   void addBits(final int value, final int bits) {
@@ -523,7 +511,7 @@ class BitOutputStream {
   void flush() {
     final bytes = _bitCount >> 3;
     for (var i = 0; i < bytes; i++) {
-      _bytes.add(_container & 0xFF);
+      _bytes.addByte(_container & 0xFF);
       _container >>= 8;
     }
     _bitCount &= 7;
@@ -537,9 +525,9 @@ class BitOutputStream {
 
     // Flush remaining bits
     if (_bitCount > 0) {
-      _bytes.add(_container & ((1 << _bitCount) - 1));
+      _bytes.addByte(_container & ((1 << _bitCount) - 1));
     }
 
-    return Uint8List.fromList(_bytes);
+    return _bytes.toBytes();
   }
 }

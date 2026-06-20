@@ -25,15 +25,18 @@ class MatchFinder {
   static const int _hashMask = _hashTableSize - 1;
   static const int _chainMask = 0xFFFF; // 64K chain table
   static const int _chainSize = 1 << 16;
-  static const int _minMatch = 3; // Zstd minimum match
   static const int _maxOffset = 1 << 22; // ~4MB max offset for Zstd
 
   final int searchDepth;
   final int maxMatch;
 
+  /// Minimum match length to emit (level-derived; 3 or 4).
+  final int minMatch;
+
   MatchFinder({
     this.searchDepth = 32,
     this.maxMatch = 65536,
+    this.minMatch = 3,
   });
 
   // Reused across blocks: a fresh MatchFinder per block would reallocate
@@ -54,7 +57,7 @@ class MatchFinder {
   /// Returns a list of matches and the trailing literals.
   /// Note: Repeat offset optimization is handled by SequenceEncoder.
   (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input) {
-    if (input.length < _minMatch) {
+    if (input.length < minMatch) {
       return (<ZstdMatch>[], input);
     }
 
@@ -65,26 +68,30 @@ class MatchFinder {
     var pos = 0;
     var anchor = 0;
     final end = input.length;
-    final limit = end - _minMatch;
+    final limit = end - minMatch;
 
     while (pos <= limit) {
+      // Hash this position once and reuse it for the chain search and the
+      // table update (it was computed twice per position before).
+      final hash = _hash(input, pos);
+
       // Find best match using hash chain
       final (bestLen, bestOffset) = _findBestMatch(
         input,
         pos,
+        hash,
         hashTable,
         chainTable,
       );
 
       // Update hash table and chain
-      final hash = _hash(input, pos);
       final prev = hashTable[hash];
       if (prev >= 0 && pos - prev < _chainSize) {
         chainTable[pos & _chainMask] = prev;
       }
       hashTable[hash] = pos;
 
-      if (bestLen >= _minMatch) {
+      if (bestLen >= minMatch) {
         // Emit match
         final litLen = pos - anchor;
         matches.add(ZstdMatch(
@@ -121,6 +128,7 @@ class MatchFinder {
   (int, int) _findBestMatch(
     final Uint8List input,
     final int pos,
+    final int hash,
     final List<int> hashTable,
     final List<int> chainTable,
   ) {
@@ -129,7 +137,6 @@ class MatchFinder {
     final end = input.length;
 
     // Search hash chain for best match
-    final hash = _hash(input, pos);
     var candidate = hashTable[hash];
     var depth = 0;
 

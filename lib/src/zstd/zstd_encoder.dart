@@ -90,6 +90,7 @@ class ZstdEncoder {
       // hash/chain tables that should be allocated once, not per block).
       final compressedEncoder = CompressedBlockEncoder(
         searchDepth: searchDepth,
+        minMatch: minMatchLen,
         validate: validate,
       );
 
