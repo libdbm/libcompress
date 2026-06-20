@@ -35,13 +35,21 @@ import 'dart:typed_data';
 ///
 /// ## Memory Guarantees
 ///
-/// Streaming codecs maintain bounded memory usage:
-/// - Compression buffers: Up to one block size (codec-dependent, typically 64KB-4MB)
-/// - Decompression buffers: Up to declared block size from compressed stream
-/// - Hash tables: Fixed size based on algorithm (e.g., 64KB for LZ4)
+/// **Decompression** is incremental: input is consumed and output emitted as
+/// data arrives, so retained memory is bounded by roughly the back-reference
+/// window plus one block, not the whole frame:
+/// - GZIP: ~32 KB window + the in-progress block
+/// - LZ4: one block (independent blocks; typically 64 KB, up to 4 MB)
+/// - Snappy: one chunk (≤ 64 KB)
+/// - Zstd: the frame window (bounded for window-descriptor frames; equal to the
+///   content size for single-segment frames, which declare they fit)
 ///
-/// For decompression, the `maxDecompressedSize` limit applies per-block,
-/// not to total output. Malicious streams declaring huge blocks are rejected.
+/// `maxDecompressedSize` caps cumulative output; `maxBufferSize` caps buffered
+/// compressed input. Malformed or oversized streams are rejected.
+///
+/// **Compression** currently emits an independent frame/member per input chunk
+/// (so history is not shared across chunk boundaries); retained memory is one
+/// chunk plus the algorithm's fixed hash tables.
 ///
 /// ## Error Handling
 ///

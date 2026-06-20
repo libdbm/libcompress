@@ -186,3 +186,120 @@ class XXH64 {
     return result;
   }
 }
+
+/// Incremental XXH64 — fed in pieces via [add], finalized with [digest] /
+/// [digestLow32]. Produces the same result as [XXH64] over the concatenated
+/// input regardless of chunking. Used to verify a whole-frame content checksum
+/// without retaining the whole frame.
+class Xxh64Sink {
+  final BigInt _seed;
+  late BigInt _v1;
+  late BigInt _v2;
+  late BigInt _v3;
+  late BigInt _v4;
+  final Uint8List _stripe = Uint8List(32); // buffers a partial 32-byte stripe
+  int _buffered = 0;
+  int _total = 0;
+
+  Xxh64Sink([final int seed = 0]) : _seed = BigInt.from(seed) {
+    _v1 = XXH64._add64(_seed, XXH64._add64(XXH64._prime1, XXH64._prime2));
+    _v2 = XXH64._add64(_seed, XXH64._prime2);
+    _v3 = _seed;
+    _v4 = XXH64._sub64(_seed, XXH64._prime1);
+  }
+
+  /// Feeds [count] bytes of [data] starting at [offset] (defaults to all).
+  void add(final Uint8List data, [final int offset = 0, final int? count]) {
+    var i = offset;
+    final end = offset + (count ?? data.length - offset);
+    _total += end - i;
+
+    if (_buffered > 0) {
+      while (_buffered < 32 && i < end) {
+        _stripe[_buffered++] = data[i++];
+      }
+      if (_buffered == 32) {
+        _round32(_stripe, 0);
+        _buffered = 0;
+      }
+    }
+    while (end - i >= 32) {
+      _round32(data, i);
+      i += 32;
+    }
+    while (i < end) {
+      _stripe[_buffered++] = data[i++];
+    }
+  }
+
+  void _round32(final Uint8List d, final int o) {
+    _v1 = XXH64._round64(_v1, XXH64._readLittleEndian64(d, o));
+    _v2 = XXH64._round64(_v2, XXH64._readLittleEndian64(d, o + 8));
+    _v3 = XXH64._round64(_v3, XXH64._readLittleEndian64(d, o + 16));
+    _v4 = XXH64._round64(_v4, XXH64._readLittleEndian64(d, o + 24));
+  }
+
+  BigInt _digestBig() {
+    BigInt h64;
+    if (_total >= 32) {
+      h64 = XXH64._add64(
+        XXH64._add64(
+          XXH64._add64(
+              XXH64._rotateLeft64(_v1, 1), XXH64._rotateLeft64(_v2, 7)),
+          XXH64._add64(
+              XXH64._rotateLeft64(_v3, 12), XXH64._rotateLeft64(_v4, 18)),
+        ),
+        BigInt.zero,
+      );
+      h64 = XXH64._mergeRound64(h64, _v1);
+      h64 = XXH64._mergeRound64(h64, _v2);
+      h64 = XXH64._mergeRound64(h64, _v3);
+      h64 = XXH64._mergeRound64(h64, _v4);
+    } else {
+      h64 = XXH64._add64(_seed, XXH64._prime5);
+    }
+
+    h64 = XXH64._add64(h64, BigInt.from(_total));
+
+    var index = 0;
+    while (index <= _buffered - 8) {
+      var k1 = XXH64._readLittleEndian64(_stripe, index);
+      k1 = XXH64._mult64(k1, XXH64._prime2);
+      k1 = XXH64._rotateLeft64(k1, 31);
+      k1 = XXH64._mult64(k1, XXH64._prime1);
+      h64 ^= k1;
+      h64 = XXH64._add64(
+          XXH64._mult64(XXH64._rotateLeft64(h64, 27), XXH64._prime1),
+          XXH64._prime4);
+      index += 8;
+    }
+    while (index <= _buffered - 4) {
+      var k1 = BigInt.from(XXH64._readLittleEndian32(_stripe, index));
+      k1 = XXH64._mult64(k1, XXH64._prime1);
+      h64 ^= k1;
+      h64 = XXH64._add64(
+          XXH64._mult64(XXH64._rotateLeft64(h64, 23), XXH64._prime2),
+          XXH64._prime3);
+      index += 4;
+    }
+    while (index < _buffered) {
+      final k1 = XXH64._mult64(BigInt.from(_stripe[index]), XXH64._prime5);
+      h64 ^= k1;
+      h64 = XXH64._mult64(XXH64._rotateLeft64(h64, 11), XXH64._prime1);
+      index++;
+    }
+
+    h64 ^= h64 >> 33;
+    h64 = XXH64._mult64(h64, XXH64._prime2);
+    h64 ^= h64 >> 29;
+    h64 = XXH64._mult64(h64, XXH64._prime3);
+    h64 ^= h64 >> 32;
+    return h64;
+  }
+
+  /// The full 64-bit XXH64 (signed, matching [XXH64.hash]).
+  int digest() => XXH64._toSignedInt64(_digestBig());
+
+  /// The low 32 bits (matching [XXH64.hashLow32]) — Zstd's content checksum.
+  int digestLow32() => (_digestBig() & XXH64._mask32).toInt();
+}

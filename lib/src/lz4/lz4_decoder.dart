@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../util/byte_utils.dart';
+import '../util/incremental_decompress_transformer.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
 
@@ -151,6 +152,223 @@ class Lz4Decoder {
     }
 
     return decompressed;
+  }
+}
+
+/// Incremental, memory-bounded LZ4 frame decoder.
+///
+/// Emits one block at a time (LZ4 frame blocks are independent), so peak
+/// memory is roughly one block plus its decoded output rather than the whole
+/// frame and its whole output. Verifies the header checksum, optional
+/// per-block checksums, and the optional content checksum (streamed via
+/// [Xxh32Sink]). Supports concatenated frames, matching the streaming codec.
+class Lz4IncrementalDecoder implements IncrementalDecoder {
+  Lz4IncrementalDecoder({this.maxSize, required this.maxBufferSize});
+
+  final int? maxSize;
+  final int maxBufferSize;
+
+  final List<int> _pending = <int>[];
+  int _cursor = 0;
+
+  bool _inFrame = false;
+  bool _blockChecksum = false;
+  bool _contentChecksumFlag = false;
+  int _blockMaxSize = 0;
+  int? _expectedContentSize;
+  Xxh32Sink? _contentSink;
+  int _produced = 0;
+  bool _sawEndMark = false;
+
+  int get _avail => _pending.length - _cursor;
+
+  int _u32(final int o) =>
+      _pending[o] +
+      _pending[o + 1] * 0x100 +
+      _pending[o + 2] * 0x10000 +
+      _pending[o + 3] * 0x1000000;
+
+  @override
+  void add(final Uint8List input, final void Function(Uint8List) emit) {
+    _pending.addAll(input);
+    if (_avail > maxBufferSize) {
+      throw Lz4FormatException(
+        'Stream buffer exceeded $maxBufferSize bytes - '
+        'frame too large or malformed',
+      );
+    }
+    _drive(emit);
+  }
+
+  @override
+  void close(final void Function(Uint8List) emit) {
+    _drive(emit);
+    if (_inFrame || _avail != 0) {
+      throw Lz4FormatException('Incomplete LZ4 frame at end of stream');
+    }
+  }
+
+  void _drive(final void Function(Uint8List) emit) {
+    var progressed = true;
+    while (progressed) {
+      if (!_inFrame) {
+        progressed = _avail > 0 && _parseHeader();
+      } else if (_sawEndMark) {
+        progressed = _finishFrame();
+      } else {
+        progressed = _decodeBlock(emit);
+      }
+    }
+    _compact();
+  }
+
+  bool _parseHeader() {
+    if (_avail < 6) return false;
+    final base = _cursor;
+    final magic = _u32(base);
+    if (magic != lz4FrameMagic) {
+      throw Lz4FormatException(
+        'Invalid LZ4 frame magic: 0x${magic.toRadixString(16)}',
+      );
+    }
+    final flag = _pending[base + 4];
+    if (flag >> 6 != 0x01) {
+      throw Lz4FormatException('Unsupported LZ4 frame version ${flag >> 6}');
+    }
+    if ((flag & 0x02) != 0) {
+      throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
+    }
+    if ((flag & 0x20) == 0) {
+      throw Lz4FormatException('Dependent blocks are not supported');
+    }
+    final bd = _pending[base + 5];
+    final contentSizeFlag = (flag & 0x08) != 0;
+    final dictIdFlag = (flag & 0x01) != 0;
+    final needed = 6 + (contentSizeFlag ? 8 : 0) + (dictIdFlag ? 4 : 0) + 1;
+    if (_avail < needed) return false;
+
+    final headerBytes = <int>[flag, bd];
+    var p = base + 6;
+    int? expectedContentSize;
+    if (contentSizeFlag) {
+      var size = 0;
+      for (var i = 0; i < 8; i++) {
+        final b = _pending[p + i];
+        headerBytes.add(b);
+        size |= b << (8 * i);
+      }
+      p += 8;
+      expectedContentSize = size;
+      if (maxSize != null && size > maxSize!) {
+        throw Lz4FormatException(
+          'Declared content size $size exceeds maximum allowed size $maxSize',
+        );
+      }
+    }
+    if (dictIdFlag) {
+      for (var i = 0; i < 4; i++) {
+        headerBytes.add(_pending[p + i]);
+      }
+      if (_u32(p) != 0) {
+        throw Lz4FormatException('External dictionaries are not supported');
+      }
+      p += 4;
+    }
+    if (_pending[p] != lz4HeaderChecksum(headerBytes)) {
+      throw Lz4FormatException('Invalid LZ4 header checksum');
+    }
+    p += 1;
+
+    _cursor = p;
+    _inFrame = true;
+    _sawEndMark = false;
+    _blockChecksum = (flag & 0x10) != 0;
+    _contentChecksumFlag = (flag & 0x04) != 0;
+    _blockMaxSize = blockSizeFromCode((bd >> 4) & 0x07);
+    _expectedContentSize = expectedContentSize;
+    _contentSink = _contentChecksumFlag ? Xxh32Sink() : null;
+    _produced = 0;
+    return true;
+  }
+
+  bool _decodeBlock(final void Function(Uint8List) emit) {
+    if (_avail < 4) return false;
+    final sizeField = _u32(_cursor);
+    if (sizeField == 0) {
+      _cursor += 4;
+      _sawEndMark = true;
+      return true;
+    }
+    final isCompressed = (sizeField & 0x80000000) == 0;
+    final blockSize = sizeField & 0x7FFFFFFF;
+    if (blockSize > _blockMaxSize) {
+      throw Lz4FormatException(
+        'Block size $blockSize exceeds maximum $_blockMaxSize',
+      );
+    }
+    final trailer = _blockChecksum ? 4 : 0;
+    if (_avail < 4 + blockSize + trailer) return false;
+
+    final start = _cursor + 4;
+    final blockBytes =
+        Uint8List.fromList(_pending.sublist(start, start + blockSize));
+    var p = start + blockSize;
+    if (_blockChecksum) {
+      if (_u32(p) != XXH32.hash(blockBytes)) {
+        throw Lz4FormatException('Block checksum mismatch');
+      }
+      p += 4;
+    }
+
+    final Uint8List output;
+    if (isCompressed) {
+      // Fresh per-block buffer: matches reference only within this block
+      // (independent blocks), so prior blocks need not be retained.
+      final out = GrowableBuffer(_blockMaxSize, maxSize);
+      _BlockDecoder(out)
+        ..reset(blockBytes)
+        ..decode();
+      output = out.toBytes();
+    } else {
+      output = blockBytes;
+    }
+
+    _produced += output.length;
+    if (maxSize != null && _produced > maxSize!) {
+      throw Lz4FormatException(
+        'Decompressed size $_produced exceeds maximum allowed size $maxSize',
+      );
+    }
+    _contentSink?.add(output);
+    _cursor = p;
+    emit(output);
+    return true;
+  }
+
+  bool _finishFrame() {
+    if (_contentChecksumFlag) {
+      if (_avail < 4) return false;
+      if (_u32(_cursor) != _contentSink!.digest()) {
+        throw Lz4FormatException('Content checksum mismatch');
+      }
+      _cursor += 4;
+    }
+    if (_expectedContentSize != null && _produced != _expectedContentSize) {
+      throw Lz4FormatException(
+        'Decompressed size $_produced != expected $_expectedContentSize',
+      );
+    }
+    _inFrame = false;
+    _sawEndMark = false;
+    _contentSink = null;
+    return true;
+  }
+
+  void _compact() {
+    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
+      _pending.removeRange(0, _cursor);
+      _cursor = 0;
+    }
   }
 }
 

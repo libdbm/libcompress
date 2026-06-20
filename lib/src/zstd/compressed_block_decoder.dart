@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import '../util/bit_math.dart';
-import '../util/growable_buffer.dart';
+import '../util/byte_sink.dart';
 import 'fse_decoder.dart';
 import 'huffman_decoder.dart';
 import 'sequence_bit_reader.dart';
@@ -308,7 +308,7 @@ class CompressedBlockDecoder {
     Uint8List data,
     int offset,
     int blockSize,
-    GrowableBuffer output,
+    ByteSink output,
     List<int> previousOffsets, {
     int? windowSize,
   }) {
@@ -1233,7 +1233,7 @@ class CompressedBlockDecoder {
   void _executeSequences(
     Uint8List literals,
     List<ZstdSequence> sequences,
-    GrowableBuffer output,
+    ByteSink output,
     List<int> previousOffsets,
     int? windowSize,
   ) {

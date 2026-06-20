@@ -107,3 +107,91 @@ class XXH32 {
         (data[offset + 3] << 24);
   }
 }
+
+/// Incremental XXH32 — fed in pieces via [add], finalized with [digest].
+///
+/// Produces the same result as [XXH32.hash] over the concatenated input,
+/// regardless of how it was chunked. Used by streaming codecs to verify a
+/// whole-content checksum without retaining the whole content.
+class Xxh32Sink {
+  static const int _mask = 0xFFFFFFFF;
+
+  final int _seed;
+  int _v1;
+  int _v2;
+  int _v3;
+  int _v4;
+  final Uint8List _stripe = Uint8List(16); // buffers a partial 16-byte stripe
+  int _buffered = 0;
+  int _total = 0;
+
+  Xxh32Sink([final int seed = 0])
+      : _seed = seed,
+        _v1 = (seed + XXH32._prime1 + XXH32._prime2) & _mask,
+        _v2 = (seed + XXH32._prime2) & _mask,
+        _v3 = seed & _mask,
+        _v4 = (seed - XXH32._prime1) & _mask;
+
+  /// Feeds [count] bytes of [data] starting at [offset] (defaults to all).
+  void add(final Uint8List data, [final int offset = 0, final int? count]) {
+    var i = offset;
+    final end = offset + (count ?? data.length - offset);
+    _total += end - i;
+
+    if (_buffered > 0) {
+      while (_buffered < 16 && i < end) {
+        _stripe[_buffered++] = data[i++];
+      }
+      if (_buffered == 16) {
+        _round16(_stripe, 0);
+        _buffered = 0;
+      }
+    }
+    while (end - i >= 16) {
+      _round16(data, i);
+      i += 16;
+    }
+    while (i < end) {
+      _stripe[_buffered++] = data[i++];
+    }
+  }
+
+  void _round16(final Uint8List d, final int o) {
+    _v1 = XXH32._round(_v1, XXH32._readLittleEndian32(d, o));
+    _v2 = XXH32._round(_v2, XXH32._readLittleEndian32(d, o + 4));
+    _v3 = XXH32._round(_v3, XXH32._readLittleEndian32(d, o + 8));
+    _v4 = XXH32._round(_v4, XXH32._readLittleEndian32(d, o + 12));
+  }
+
+  /// Returns the XXH32 of everything fed so far.
+  int digest() {
+    var h32 = _total >= 16
+        ? (XXH32._rotateLeft(_v1, 1) +
+                XXH32._rotateLeft(_v2, 7) +
+                XXH32._rotateLeft(_v3, 12) +
+                XXH32._rotateLeft(_v4, 18)) &
+            _mask
+        : (_seed + XXH32._prime5) & _mask;
+
+    h32 = (h32 + _total) & _mask;
+
+    var index = 0;
+    while (index <= _buffered - 4) {
+      h32 = (h32 + XXH32._mul32(XXH32._readLittleEndian32(_stripe, index), XXH32._prime3)) & _mask;
+      h32 = XXH32._mul32(XXH32._rotateLeft(h32, 17), XXH32._prime4);
+      index += 4;
+    }
+    while (index < _buffered) {
+      h32 = (h32 + XXH32._mul32(_stripe[index], XXH32._prime5)) & _mask;
+      h32 = XXH32._mul32(XXH32._rotateLeft(h32, 11), XXH32._prime1);
+      index++;
+    }
+
+    h32 ^= h32 >> 15;
+    h32 = XXH32._mul32(h32, XXH32._prime2);
+    h32 ^= h32 >> 13;
+    h32 = XXH32._mul32(h32, XXH32._prime3);
+    h32 ^= h32 >> 16;
+    return h32;
+  }
+}
