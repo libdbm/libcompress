@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'dart:typed_data';
 import '../util/bit_stream.dart';
 import '../util/growable_buffer.dart';
@@ -158,22 +157,28 @@ class DeflateDecoder {
           throw DeflateFormatException('Invalid repeat code at start');
         }
         final prev = codeLengths.last;
-        var repeat = input.readBits(2) + 3;
-        repeat = math.min(repeat, totalLength - codeLengths.length);
+        final repeat = input.readBits(2) + 3;
+        if (repeat > totalLength - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(prev);
         }
       } else if (symbol == 17) {
         // Repeat zero 3-10 times
-        var repeat = input.readBits(3) + 3;
-        repeat = math.min(repeat, totalLength - codeLengths.length);
+        final repeat = input.readBits(3) + 3;
+        if (repeat > totalLength - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }
       } else if (symbol == 18) {
         // Repeat zero 11-138 times
-        var repeat = input.readBits(7) + 11;
-        repeat = math.min(repeat, totalLength - codeLengths.length);
+        final repeat = input.readBits(7) + 11;
+        if (repeat > totalLength - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }

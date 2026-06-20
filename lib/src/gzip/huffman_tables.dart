@@ -20,13 +20,14 @@ class HuffmanDecoder {
 
 /// Builds a Huffman decoder from code lengths.
 ///
-/// Rejects an *over-subscribed* length set (RFC 1951 §3.2.2) — one whose codes
-/// would overflow the code space and alias two symbols onto one code, silently
-/// mis-decoding. Incomplete sets are permitted (the RFC fixed distance table is
-/// itself incomplete); an unused/unreachable code surfaces as a decode-time
-/// "Invalid Huffman code" error rather than silent corruption.
-HuffmanDecoder buildDecoder(List<int> lengths) {
-  _validateCodeLengths(lengths);
+/// Validates the set forms a valid prefix code (RFC 1951 §3.2.2): an
+/// over-subscribed set (codes overflow the space, aliasing symbols and
+/// silently mis-decoding) is always rejected; an *incomplete* set is rejected
+/// too — except an empty table or a single 1-bit code (which zlib permits), or
+/// when [allowIncomplete] is set for the RFC fixed distance table, which is
+/// itself incomplete (30 codes of length 5).
+HuffmanDecoder buildDecoder(List<int> lengths, {bool allowIncomplete = false}) {
+  _validateCodeLengths(lengths, allowIncomplete);
 
   // Generate canonical codes
   final codes = HuffmanTreeBuilder.generateCanonicalCodes(lengths);
@@ -43,9 +44,10 @@ HuffmanDecoder buildDecoder(List<int> lengths) {
   return HuffmanDecoder(codeToSymbol);
 }
 
-void _validateCodeLengths(List<int> lengths) {
+void _validateCodeLengths(List<int> lengths, bool allowIncomplete) {
   final counts = List<int>.filled(16, 0);
   var numSymbols = 0;
+  var maxLen = 0;
   for (final len in lengths) {
     if (len < 0 || len > 15) {
       throw DeflateFormatException('Invalid Huffman code length: $len');
@@ -53,6 +55,7 @@ void _validateCodeLengths(List<int> lengths) {
     if (len > 0) {
       counts[len]++;
       numSymbols++;
+      if (len > maxLen) maxLen = len;
     }
   }
   if (numSymbols == 0) return; // empty table (e.g. no distance codes) is allowed
@@ -64,6 +67,11 @@ void _validateCodeLengths(List<int> lengths) {
     if (left < 0) {
       throw DeflateFormatException('Over-subscribed Huffman code');
     }
+  }
+  // Incomplete code: allowed only for the RFC fixed tables (allowIncomplete) or
+  // a single 1-bit code (zlib's exception); otherwise it is malformed.
+  if (left > 0 && !allowIncomplete && maxLen > 1) {
+    throw DeflateFormatException('Incomplete Huffman code');
   }
 }
 
@@ -103,8 +111,11 @@ HuffmanDecoder buildFixedLiteralDecoder() {
   return buildDecoder(lengths);
 }
 
-/// Builds the fixed distance Huffman decoder
+/// Builds the fixed distance Huffman decoder.
+///
+/// The RFC 1951 fixed distance code is 30 codes of length 5 — incomplete by
+/// design (codes 30-31 are unused), so [allowIncomplete] is required.
 HuffmanDecoder buildFixedDistanceDecoder() {
   final lengths = List<int>.filled(30, 5);
-  return buildDecoder(lengths);
+  return buildDecoder(lengths, allowIncomplete: true);
 }

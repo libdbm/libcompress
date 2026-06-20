@@ -327,20 +327,26 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           throw DeflateFormatException('Invalid repeat code at start');
         }
         final previous = codeLengths.last;
-        var repeat = input.readBits(2) + 3;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(2) + 3;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(previous);
         }
       } else if (symbol == 17) {
-        var repeat = input.readBits(3) + 3;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(3) + 3;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }
       } else if (symbol == 18) {
-        var repeat = input.readBits(7) + 11;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(7) + 11;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }
