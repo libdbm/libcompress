@@ -328,13 +328,10 @@ class CompressedBlockDecoder {
     final literals = literalsResult.$1;
     pos = literalsResult.$2;
 
-    // Decode sequences section
-    final sequencesResult = _decodeSequencesSection(data, pos, blockEnd);
-    final sequences = sequencesResult.$1;
-    pos = sequencesResult.$2;
-
-    // Execute sequences
-    _executeSequences(literals, sequences, output, previousOffsets, windowSize);
+    // Decode and execute the sequences section in a single pass (no
+    // intermediate per-sequence objects or second traversal).
+    _decodeAndExecuteSequencesSection(
+      data, pos, blockEnd, literals, output, previousOffsets, windowSize);
   }
 
   /// Decode literals section
@@ -757,13 +754,18 @@ class CompressedBlockDecoder {
   }
 
   /// Decode sequences section
-  (List<ZstdSequence>, int) _decodeSequencesSection(
+  void _decodeAndExecuteSequencesSection(
     Uint8List data,
     int offset,
     int blockEnd,
+    Uint8List literals,
+    ByteSink output,
+    List<int> previousOffsets,
+    int? windowSize,
   ) {
     if (offset >= blockEnd) {
-      return (<ZstdSequence>[], offset);
+      output.addBytes(literals, 0, literals.length);
+      return;
     }
 
     // Read sequence count
@@ -771,7 +773,8 @@ class CompressedBlockDecoder {
     var numSequences = 0;
 
     if (firstByte == 0) {
-      return (<ZstdSequence>[], offset);
+      output.addBytes(literals, 0, literals.length);
+      return;
     } else if (firstByte < 128) {
       numSequences = firstByte;
     } else if (firstByte < 255) {
@@ -789,7 +792,8 @@ class CompressedBlockDecoder {
 
 
     if (numSequences == 0) {
-      return (<ZstdSequence>[], offset);
+      output.addBytes(literals, 0, literals.length);
+      return;
     }
 
     if (offset >= blockEnd) {
@@ -853,7 +857,7 @@ class CompressedBlockDecoder {
       throw ZstdFormatException('Sequence headers exceed block boundary');
     }
 
-    final (sequences, reader) = _decodeSequences(
+    final reader = _decodeAndExecuteSequences(
       data,
       offset,
       blockEnd,
@@ -861,6 +865,10 @@ class CompressedBlockDecoder {
       literalLengthTable,
       offsetTable,
       matchLengthTable,
+      literals,
+      output,
+      previousOffsets,
+      windowSize,
     );
 
     // Validate bitstream was fully consumed (no trailing bytes)
@@ -871,8 +879,6 @@ class CompressedBlockDecoder {
         '~${reader.remaining} bytes remaining',
       );
     }
-
-    return (sequences, blockEnd);
   }
 
   static final SequenceCodingTable _predefinedLiteralLengthTable =
@@ -1081,7 +1087,7 @@ class CompressedBlockDecoder {
     return _NormalizedCountsResult(counts, tableLog, nextOffset, highestSymbol);
   }
 
-  (List<ZstdSequence>, SequenceBitReader) _decodeSequences(
+  SequenceBitReader _decodeAndExecuteSequences(
     Uint8List data,
     int bitstreamStart,
     int blockEnd,
@@ -1089,6 +1095,10 @@ class CompressedBlockDecoder {
     SequenceCodingTable literalLengthTable,
     SequenceCodingTable offsetTable,
     SequenceCodingTable matchLengthTable,
+    Uint8List literals,
+    ByteSink output,
+    List<int> previousOffsets,
+    int? windowSize,
   ) {
     final reader = SequenceBitReader(data, blockEnd, startOffset: bitstreamStart);
 
@@ -1097,7 +1107,9 @@ class CompressedBlockDecoder {
     var ofState = offsetTable.initializeState(reader);
     var mlState = matchLengthTable.initializeState(reader);
 
-    final sequences = List<ZstdSequence?>.filled(count, null, growable: false);
+    // Capture before any output is written for this block.
+    final isFirstOfFirstBlock = output.length == 0;
+    var literalPos = 0;
 
     for (var seqIndex = 0; seqIndex < count; seqIndex++) {
       // Reload bits at start of each sequence
@@ -1113,7 +1125,6 @@ class CompressedBlockDecoder {
       final llSymbol = literalLengthTable.peekSymbol(llState);
       final ofSymbol = offsetTable.peekSymbol(ofState);
       final mlSymbol = matchLengthTable.peekSymbol(mlState);
-
 
       // Step 2: Read offset extra bits first
       final offsetBits = ofSymbol.additionalBits;
@@ -1137,21 +1148,44 @@ class CompressedBlockDecoder {
         ofState = offsetTable.readNextState(reader, ofState);
       }
 
-      sequences[seqIndex] = ZstdSequence(
-        literalLength,
-        matchLength,
-        ofSymbol,
-        offsetAdditional: offsetAdditional,
-        literalSymbol: llSymbol.symbol,
-        matchSymbol: mlSymbol.symbol,
-        offsetSymbol: ofSymbol.symbol,
-      );
+      // Step 6: Execute immediately — copy literals, then the match. The
+      // repeat-offset state evolves in sequence order exactly as before, so
+      // fusing decode and execution is behaviour-preserving.
+      if (literalLength > 0) {
+        output.addBytes(literals, literalPos, literalLength);
+        literalPos += literalLength;
+      }
+      if (matchLength > 0) {
+        final offset =
+            _computeOffset(ofSymbol, literalLength, previousOffsets, offsetAdditional);
+        if (windowSize != null && offset > windowSize) {
+          throw ZstdFormatException(
+            'Match offset $offset exceeds window size $windowSize',
+          );
+        }
+        final available = output.length;
+        if (offset > available) {
+          // Valid only for the very first sequence of the first block without a
+          // dictionary; the format allows it and the match is ignored.
+          if (available == 0 && seqIndex == 0 && isFirstOfFirstBlock) {
+            continue;
+          }
+          throw ZstdFormatException(
+            'Match offset $offset exceeds available $available '
+            '(literalLength=$literalLength, matchLength=$matchLength, '
+            'isFirstSequence=${seqIndex == 0 && isFirstOfFirstBlock})',
+          );
+        }
+        output.copyFromHistory(offset, matchLength);
+      }
     }
 
-    return (
-      List<ZstdSequence>.unmodifiable(sequences.map((sequence) => sequence!)),
-      reader,
-    );
+    // Copy any remaining literals after the last sequence.
+    if (literalPos < literals.length) {
+      output.addBytes(literals, literalPos, literals.length - literalPos);
+    }
+
+    return reader;
   }
 
   int _computeOffset(
@@ -1229,92 +1263,4 @@ class CompressedBlockDecoder {
     return offsetValue;
   }
 
-  /// Execute sequences to reconstruct data
-  void _executeSequences(
-    Uint8List literals,
-    List<ZstdSequence> sequences,
-    ByteSink output,
-    List<int> previousOffsets,
-    int? windowSize,
-  ) {
-    // If no sequences, just output literals
-    if (sequences.isEmpty) {
-      output.addBytes(literals, 0, literals.length);
-      return;
-    }
-
-    // Execute each sequence
-    var literalPos = 0;
-    final isFirstSequenceOfFirstBlock = output.length == 0;
-    for (var i = 0; i < sequences.length; i++) {
-      final sequence = sequences[i];
-      final isFirstSequence = (i == 0) && isFirstSequenceOfFirstBlock;
-      // Copy literals
-      if (sequence.literalLength > 0) {
-        output.addBytes(literals, literalPos, sequence.literalLength);
-        literalPos += sequence.literalLength;
-      }
-
-      // Copy match from history
-      if (sequence.matchLength > 0) {
-        final offset = _computeOffset(
-          sequence.offsetSymbolData,
-          sequence.literalLength,
-          previousOffsets,
-          sequence.offsetAdditional,
-        );
-
-        // Validate offset against window size
-        if (windowSize != null && offset > windowSize) {
-          throw ZstdFormatException(
-            'Match offset $offset exceeds window size $windowSize',
-          );
-        }
-
-        final available = output.length;
-
-        if (offset > available) {
-          // This is a valid case for the first sequence in the first block without a dictionary.
-          // The zstd format allows this, and the match should be ignored.
-          if (available == 0 && isFirstSequence) {
-            continue;
-          }
-          throw ZstdFormatException(
-            'Match offset $offset exceeds available $available '
-            '(literalLength=${sequence.literalLength}, matchLength=${sequence.matchLength}, '
-            'isFirstSequence=$isFirstSequence)',
-          );
-        }
-        output.copyFromHistory(offset, sequence.matchLength);
-      }
-
-    }
-
-    // Copy remaining literals
-    if (literalPos < literals.length) {
-      output.addBytes(literals, literalPos, literals.length - literalPos);
-    }
-  }
-}
-
-
-/// Represents a decoded sequence
-class ZstdSequence {
-  final int literalLength;
-  final int matchLength;
-  final SequenceSymbol offsetSymbolData;
-  final int offsetAdditional;
-  final int literalSymbol;
-  final int matchSymbol;
-  final int offsetSymbol;
-
-  ZstdSequence(
-    this.literalLength,
-    this.matchLength,
-    this.offsetSymbolData, {
-    required this.offsetAdditional,
-    required this.literalSymbol,
-    required this.matchSymbol,
-    required this.offsetSymbol,
-  });
 }
