@@ -168,10 +168,22 @@ class Lz4Decoder {
 /// per-block checksums, and the optional content checksum (streamed via
 /// [Xxh32Sink]). Supports concatenated frames, matching the streaming codec.
 class Lz4IncrementalDecoder implements IncrementalDecoder {
-  Lz4IncrementalDecoder({this.maxSize, required this.maxBufferSize});
+  Lz4IncrementalDecoder({
+    this.maxSize,
+    required this.maxBufferSize,
+    this.verified = false,
+  });
 
   final int? maxSize;
   final int maxBufferSize;
+
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (memory rises to one frame's output, bounded
+  /// by [maxSize]). The default emits as it decodes.
+  final bool verified;
+
+  // Holds a frame's output in verified mode until its trailer validates.
+  BytesBuilder? _hold;
 
   // Cumulative output limit across all concatenated frames.
   late final OutputLimit _limit = OutputLimit(maxSize);
@@ -302,6 +314,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     // block can't balloon memory before the post-decode check, and so many
     // frames can't collectively exceed maxSize.
     _output = WindowBuffer(1 << 16, maxSize: _limit.remaining);
+    _hold = verified ? BytesBuilder(copy: false) : null;
     _blockDecoder = _BlockDecoder(_output!);
     return true;
   }
@@ -365,6 +378,12 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
         'Decompressed size ${output.length} != expected $_expectedContentSize',
       );
     }
+    // Frame validated — in verified mode, release the held output now.
+    final hold = _hold;
+    if (hold != null) {
+      if (hold.isNotEmpty) emit(hold.takeBytes());
+      _hold = null;
+    }
     _inFrame = false;
     _sawEndMark = false;
     _contentSink = null;
@@ -377,7 +396,12 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     if (bytes.isEmpty) return;
     _contentSink?.add(bytes);
     _limit.record(bytes.length);
-    emit(bytes);
+    final hold = _hold;
+    if (hold != null) {
+      hold.add(bytes); // verified mode: release only after the frame validates
+    } else {
+      emit(bytes);
+    }
   }
 
   void _compact() {

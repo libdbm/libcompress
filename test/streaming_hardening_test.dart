@@ -84,4 +84,60 @@ void main() {
           throwsA(isA<CompressionFormatException>()));
     });
   });
+
+  group('Verified mode withholds output until validated (#3)', () {
+    Future<(List<int>, Object?)> decodeCollect(
+        final CompressionStreamCodec codec, final Uint8List data) async {
+      final out = <int>[];
+      Object? err;
+      try {
+        await for (final c in codec.decompress(Stream.fromIterable([data]))) {
+          out.addAll(c);
+        }
+      } catch (e) {
+        err = e;
+      }
+      return (out, err);
+    }
+
+    final payload = _bytes(List.generate(5000, (i) => (i * 31 + 7) % 256));
+
+    test('GZIP verified emits nothing when the trailer CRC is corrupted', () async {
+      final comp = Uint8List.fromList(GzipCodec().compress(payload));
+      comp[comp.length - 5] ^= 0xFF; // flip a CRC32 trailer byte
+      final (out, err) = await decodeCollect(GzipStreamCodec(verified: true), comp);
+      expect(err, isA<CompressionFormatException>());
+      expect(out, isEmpty,
+          reason: 'verified mode must not emit bytes from a member that fails CRC');
+    });
+
+    test('GZIP verified round-trips valid data', () async {
+      final comp = GzipCodec().compress(payload);
+      final (out, err) = await decodeCollect(GzipStreamCodec(verified: true), comp);
+      expect(err, isNull);
+      expect(out, orderedEquals(payload));
+    });
+
+    test('Zstd verified emits nothing when the checksum is corrupted', () async {
+      final comp = Uint8List.fromList(ZstdCodec(enableChecksum: true).compress(payload));
+      comp[comp.length - 1] ^= 0xFF; // flip a content-checksum byte
+      final (out, err) = await decodeCollect(ZstdStreamCodec(verified: true), comp);
+      expect(err, isA<CompressionFormatException>());
+      expect(out, isEmpty);
+    });
+
+    test('Zstd verified round-trips valid data', () async {
+      final comp = ZstdCodec(enableChecksum: true).compress(payload);
+      final (out, err) = await decodeCollect(ZstdStreamCodec(verified: true), comp);
+      expect(err, isNull);
+      expect(out, orderedEquals(payload));
+    });
+
+    test('LZ4 verified round-trips valid data', () async {
+      final comp = Lz4Codec().compress(payload);
+      final (out, err) = await decodeCollect(Lz4StreamCodec(verified: true), comp);
+      expect(err, isNull);
+      expect(out, orderedEquals(payload));
+    });
+  });
 }

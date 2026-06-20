@@ -44,8 +44,19 @@ import 'dart:typed_data';
 /// - Zstd: the frame window (bounded for window-descriptor frames; equal to the
 ///   content size for single-segment frames, which declare they fit)
 ///
-/// `maxDecompressedSize` caps cumulative output; `maxBufferSize` caps buffered
-/// compressed input. Malformed or oversized streams are rejected.
+/// `maxDecompressedSize` caps cumulative output (across all concatenated
+/// members/frames); `maxBufferSize` caps buffered compressed input. Malformed
+/// or oversized input is rejected as a [CompressionFormatException].
+///
+/// ## Integrity
+///
+/// By default decompression emits output *as it decodes*, so for a corrupt
+/// stream some bytes may already be emitted before the trailing CRC/checksum
+/// fails — inherent to streaming (as in zlib). Callers piping directly to a
+/// file or downstream parser that need all-or-nothing integrity can set the
+/// codec's `verified: true`, which withholds each member/frame's output until
+/// its trailer validates, then releases it (raising peak memory to one
+/// member/frame's output, still bounded by `maxDecompressedSize`).
 ///
 /// **Compression** preserves history across chunks where supported, producing
 /// a single standard frame/member rather than one per chunk:

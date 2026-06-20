@@ -391,10 +391,22 @@ class ZstdDecoder {
 /// content checksum is streamed via [Xxh64Sink]. Supports skippable and
 /// concatenated frames.
 class ZstdIncrementalDecoder implements IncrementalDecoder {
-  ZstdIncrementalDecoder({this.maxSize, required this.maxBufferSize});
+  ZstdIncrementalDecoder({
+    this.maxSize,
+    required this.maxBufferSize,
+    this.verified = false,
+  });
 
   final int? maxSize;
   final int maxBufferSize;
+
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (memory rises to one frame's output, bounded
+  /// by [maxSize]). The default emits as it decodes.
+  final bool verified;
+
+  // Holds a frame's output in verified mode until its trailer validates.
+  BytesBuilder? _hold;
 
   final BytePending _pending = BytePending();
   int _cursor = 0;
@@ -533,6 +545,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     _frameContentSize = contentSize;
     _offsets = [1, 4, 8];
     _output = WindowBuffer(window, maxSize: frameLimit);
+    _hold = verified ? BytesBuilder(copy: false) : null;
     _sink = descriptor.checksumFlag ? Xxh64Sink() : null;
     _blockDecoder = CompressedBlockDecoder()..reset();
     return true;
@@ -604,6 +617,13 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
       );
     }
 
+    // Frame validated — in verified mode, release the held output now.
+    final hold = _hold;
+    if (hold != null) {
+      if (hold.isNotEmpty) emit(hold.takeBytes());
+      _hold = null;
+    }
+
     _total += output.length;
     _inFrame = false;
     _lastBlockSeen = false;
@@ -616,7 +636,12 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
     if (bytes.isEmpty) return;
     _sink?.add(bytes);
-    emit(bytes);
+    final hold = _hold;
+    if (hold != null) {
+      hold.add(bytes); // verified mode: release only after the frame validates
+    } else {
+      emit(bytes);
+    }
   }
 
   void _compact() {

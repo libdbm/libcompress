@@ -25,7 +25,8 @@ class ZstdStreamCodec extends CompressionStreamCodec {
   /// Whether to include XXH64 content checksum
   final bool checksum;
 
-  /// Maximum decompressed size per frame (prevents OOM attacks)
+  /// Maximum *cumulative* decompressed size across all frames (prevents OOM
+  /// attacks from concatenated frames).
   final int? maxSize;
 
   /// Maximum buffer size for compressed data before rejecting
@@ -37,6 +38,12 @@ class ZstdStreamCodec extends CompressionStreamCodec {
   /// Whether to validate compressed blocks by decompressing them
   final bool validate;
 
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (buffers up to one frame's output, bounded
+  /// by [maxSize]). The default (false) emits as it decodes, so an integrity
+  /// error can arrive after some bytes were already emitted.
+  final bool verified;
+
   /// Creates a Zstd streaming codec
   ZstdStreamCodec({
     this.level = 3,
@@ -46,6 +53,7 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     this.maxBufferSize = zstdDefaultMaxBufferSize,
     this.chunkSize = 1024 * 1024, // 1MB default
     this.validate = false,
+    this.verified = false,
   });
 
   @override
@@ -69,6 +77,7 @@ class ZstdStreamCodec extends CompressionStreamCodec {
       () => ZstdIncrementalDecoder(
         maxSize: maxSize,
         maxBufferSize: maxBufferSize,
+        verified: verified,
       ),
     ).bind(input);
   }
