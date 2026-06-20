@@ -187,11 +187,20 @@ class SnappyStreamDecoder {
     reset();
 
     var cursor = 0;
+    var total = 0;
     final output = <int>[];
 
     while (cursor < data.length) {
       final chunk = _readChunk(data, cursor);
       final decompressed = _processChunk(chunk, cursor);
+      total += decompressed.length;
+      // Cumulative cap across all chunks (each chunk alone is bounded by
+      // maxUncompressedSize, but an unbounded number of chunks is not).
+      if (total > maxUncompressedSize) {
+        throw SnappyFormatException(
+          'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
+        );
+      }
       output.addAll(decompressed);
       cursor += chunk.totalSize;
     }

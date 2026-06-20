@@ -49,6 +49,23 @@ void main() {
         throwsA(isA<CompressionFormatException>()),
       );
     });
+
+    test('Snappy rejects many chunks exceeding the cumulative cap', () {
+      // ~400 KB -> multiple <=64 KB framing chunks, each under the 100 KB cap
+      // but cumulatively over it.
+      final big = _bytes(List.generate(400 * 1024, (i) => (i * 31 + 7) % 256));
+      final framed = SnappyCodec(framing: true).compress(big);
+      // streaming path
+      expect(
+        _decodeStream(SnappyStreamCodec(maxSize: 100 * 1024), framed),
+        throwsA(isA<CompressionFormatException>()),
+      );
+      // block multi-chunk path
+      expect(
+        () => SnappyCodec(framing: true, maxSize: 100 * 1024).decompress(framed),
+        throwsA(isA<CompressionFormatException>()),
+      );
+    });
   });
 
   group('GZIP streaming header CRC (#4)', () {

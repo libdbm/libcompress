@@ -1146,6 +1146,15 @@ class CompressedBlockDecoder {
       final offsetBits = ofSymbol.additionalBits;
       final offsetAdditional = offsetBits > 0 ? reader.readBits(offsetBits) : 0;
 
+      // The 64-bit window holds ~57 readable bits after a reload, but offset +
+      // ML + LL extra bits + the three FSE state transitions can exceed that.
+      // Reload after the (largest) offset bits and again before the state
+      // updates so no read segment overruns the window (which would otherwise
+      // read zeros and silently corrupt output). load() is a transparent refill
+      // — it preserves the logical bit position — so this never changes the
+      // result for sequences that already fit.
+      reader.load();
+
       // Step 3: Read match length extra bits
       final matchBits = mlSymbol.additionalBits;
       final matchExtra = matchBits > 0 ? reader.readBits(matchBits) : 0;
@@ -1159,6 +1168,7 @@ class CompressedBlockDecoder {
       // Step 5: Update states by reading bits (LL, ML, OF order per RFC)
       // Don't update on last sequence
       if (seqIndex < count - 1) {
+        reader.load();
         llState = literalLengthTable.readNextState(reader, llState);
         mlState = matchLengthTable.readNextState(reader, mlState);
         ofState = offsetTable.readNextState(reader, ofState);

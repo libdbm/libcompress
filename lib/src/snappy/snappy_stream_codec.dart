@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import '../compression_stream_codec.dart';
 import '../util/byte_pending.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/output_limit.dart';
 import '../util/stream_compressor.dart';
 import 'snappy_decoder.dart';
 import 'snappy_stream_decoder.dart';
@@ -61,6 +62,10 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
   final int maxSize;
   final int maxBufferSize;
 
+  // Cumulative output cap across all chunks (the per-chunk SnappyStreamDecoder
+  // limit alone lets an unbounded number of chunks exceed maxSize).
+  late final OutputLimit _limit = OutputLimit(maxSize);
+
   final BytePending _pending = BytePending();
   int _cursor = 0;
   late final SnappyStreamDecoder _decoder =
@@ -84,7 +89,14 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
       final chunkSize = 4 + length;
       if (_avail < chunkSize) break;
       final chunk = _pending.slice(_cursor, _cursor + chunkSize);
-      emit(_decoder.decompressChunk(chunk));
+      final decoded = _decoder.decompressChunk(chunk);
+      _limit.record(decoded.length);
+      if (_limit.produced > maxSize) {
+        throw SnappyFormatException(
+          'Decompressed size ${_limit.produced} exceeds maximum allowed size $maxSize',
+        );
+      }
+      emit(decoded);
       _cursor += chunkSize;
     }
     if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
