@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/byte_sink.dart';
 import '../util/byte_utils.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
@@ -20,7 +22,10 @@ class Lz4Decoder {
   /// Set to null to allow unlimited output (use with trusted input only).
   Lz4Decoder({this.maxSize = lz4DefaultMaxDecompressedSize});
 
-  Uint8List decompress(Uint8List input) {
+  Uint8List decompress(Uint8List input) =>
+      guardFormat(() => _decompress(input), Lz4FormatException.new);
+
+  Uint8List _decompress(Uint8List input) {
     if (input.isEmpty) {
       return Uint8List(0);
     }
@@ -168,6 +173,9 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   final int? maxSize;
   final int maxBufferSize;
 
+  // Cumulative output limit across all concatenated frames.
+  late final OutputLimit _limit = OutputLimit(maxSize);
+
   final BytePending _pending = BytePending();
   int _cursor = 0;
 
@@ -201,12 +209,12 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
         'frame too large or malformed',
       );
     }
-    _drive(emit);
+    guardFormat(() => _drive(emit), Lz4FormatException.new);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    _drive(emit);
+    guardFormat(() => _drive(emit), Lz4FormatException.new);
     if (_inFrame || _avail != 0) {
       throw Lz4FormatException('Incomplete LZ4 frame at end of stream');
     }
@@ -260,9 +268,11 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       }
       p += 8;
       expectedContentSize = size;
-      if (maxSize != null && size > maxSize!) {
+      final budget = _limit.remaining;
+      if (budget != null && size > budget) {
         throw Lz4FormatException(
-          'Declared content size $size exceeds maximum allowed size $maxSize',
+          'Declared content size $size exceeds remaining budget $budget '
+          '(maximum $maxSize)',
         );
       }
     }
@@ -288,7 +298,10 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     _blockMaxSize = blockSizeFromCode((bd >> 4) & 0x07);
     _expectedContentSize = expectedContentSize;
     _contentSink = _contentChecksumFlag ? Xxh32Sink() : null;
-    _output = WindowBuffer(1 << 16); // 64 KB LZ4 window
+    // 64 KB LZ4 window, capped at the remaining cumulative budget so a single
+    // block can't balloon memory before the post-decode check, and so many
+    // frames can't collectively exceed maxSize.
+    _output = WindowBuffer(1 << 16, maxSize: _limit.remaining);
     _blockDecoder = _BlockDecoder(_output!);
     return true;
   }
@@ -322,17 +335,14 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     }
 
     final output = _output!;
+    // The window's maxSize (the remaining cumulative budget) enforces the limit
+    // *during* expansion below, before a whole block can balloon memory.
     if (isCompressed) {
       _blockDecoder!
         ..reset(blockBytes)
         ..decode();
     } else {
       output.addBytes(blockBytes, 0, blockBytes.length);
-    }
-    if (maxSize != null && output.length > maxSize!) {
-      throw Lz4FormatException(
-        'Decompressed size ${output.length} exceeds maximum allowed size $maxSize',
-      );
     }
     _cursor = p;
     _flush(output.drain(), emit);
@@ -366,6 +376,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
     if (bytes.isEmpty) return;
     _contentSink?.add(bytes);
+    _limit.record(bytes.length);
     emit(bytes);
   }
 

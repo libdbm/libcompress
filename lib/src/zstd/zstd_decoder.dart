@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/growable_buffer.dart';
 import '../util/incremental_decompress_transformer.dart';
@@ -32,7 +33,10 @@ class ZstdDecoder {
   /// Set to null to allow unlimited output (use with trusted input only).
   ZstdDecoder({this.maxSize = zstdDefaultMaxDecompressedSize});
 
-  Uint8List decompress(final Uint8List data) {
+  Uint8List decompress(final Uint8List data) =>
+      guardFormat(() => _decompress(data), ZstdFormatException.new);
+
+  Uint8List _decompress(final Uint8List data) {
     if (data.isEmpty) {
       throw ZstdFormatException('Input too short for Zstd frame');
     }
@@ -423,12 +427,12 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
         'frame too large or malformed',
       );
     }
-    _drive(emit);
+    guardFormat(() => _drive(emit), ZstdFormatException.new);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    _drive(emit);
+    guardFormat(() => _drive(emit), ZstdFormatException.new);
     if (_inFrame || _avail != 0) {
       throw ZstdFormatException('Incomplete Zstd frame at end of stream');
     }
