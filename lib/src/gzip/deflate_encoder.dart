@@ -57,15 +57,16 @@ class DeflateEncoder {
       final isFinal = offset + chunkSize >= data.length;
 
       final chunk = Uint8List.sublistView(data, offset, offset + chunkSize);
+      final tokens = _lz77.compress(chunk);
 
       // Choose compression strategy based on level
       // All levels compress - differ in Huffman strategy and lazy matching
       if (level <= 3) {
         // Fast: use fixed Huffman (no tree overhead)
-        _writeFixedHuffmanBlock(output, chunk, isFinal: isFinal);
+        writeFixedBlock(output, tokens, isFinal: isFinal);
       } else {
         // Use dynamic Huffman for better compression
-        _writeDynamicHuffmanBlock(output, chunk, isFinal: isFinal);
+        writeDynamicBlock(output, tokens, isFinal: isFinal);
       }
 
       offset += chunkSize;
@@ -109,18 +110,15 @@ class DeflateEncoder {
     }
   }
 
-  /// Writes a block using fixed Huffman codes
-  void _writeFixedHuffmanBlock(
+  /// Writes a block using fixed Huffman codes from precomputed [tokens].
+  void writeFixedBlock(
     BitStreamWriter output,
-    Uint8List data, {
+    List<Token> tokens, {
     required bool isFinal,
   }) {
     // Block header: BFINAL (1 bit) + BTYPE (2 bits = 01 for fixed)
     output.writeBits(isFinal ? 1 : 0, 1);
     output.writeBits(BlockType.fixedHuffman.value, 2);
-
-    // Compress data using LZ77
-    final tokens = _lz77.compress(data);
 
     // Encode tokens using fixed Huffman codes
     final literalLengths = List<int>.filled(288, 0);
@@ -173,18 +171,15 @@ class DeflateEncoder {
     _writeHuffmanCode(output, endCode);
   }
 
-  /// Writes a block using dynamic Huffman codes
-  void _writeDynamicHuffmanBlock(
+  /// Writes a block using dynamic Huffman codes from precomputed [tokens].
+  void writeDynamicBlock(
     BitStreamWriter output,
-    Uint8List data, {
+    List<Token> tokens, {
     required bool isFinal,
   }) {
     // Block header: BFINAL (1 bit) + BTYPE (2 bits = 10 for dynamic)
     output.writeBits(isFinal ? 1 : 0, 1);
     output.writeBits(BlockType.dynamicHuffman.value, 2);
-
-    // Compress data using LZ77
-    final tokens = _lz77.compress(data);
 
     // Build frequency tables
     final literalFrequencies = List<int>.filled(286, 0);

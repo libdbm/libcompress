@@ -47,9 +47,14 @@ import 'dart:typed_data';
 /// `maxDecompressedSize` caps cumulative output; `maxBufferSize` caps buffered
 /// compressed input. Malformed or oversized streams are rejected.
 ///
-/// **Compression** currently emits an independent frame/member per input chunk
-/// (so history is not shared across chunk boundaries); retained memory is one
-/// chunk plus the algorithm's fixed hash tables.
+/// **Compression** preserves history across chunks where supported, producing
+/// a single standard frame/member rather than one per chunk:
+/// - GZIP: one member; DEFLATE matches span chunk boundaries (32 KB window)
+/// - LZ4: one frame with linked blocks (64 KB window across blocks)
+/// - Zstd: one window-descriptor frame; blocks share a 64 KB history
+/// - Snappy: independent ≤64 KB chunks (per the framing spec)
+///
+/// Retained compression memory is roughly the window plus one chunk.
 ///
 /// ## Error Handling
 ///

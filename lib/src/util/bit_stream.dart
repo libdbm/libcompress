@@ -34,6 +34,11 @@ class BitStreamWriter {
     }
   }
 
+  /// Returns and clears the complete bytes written so far, preserving any
+  /// pending sub-byte bits. Lets a streaming writer drain finished bytes
+  /// between bit-packed blocks without disturbing the in-progress byte.
+  Uint8List takeBytes() => _builder.takeBytes();
+
   /// Returns the written bits as a byte list, flushing any remaining bits.
   Uint8List toBytes() {
     if (_bitCount == 0) {

@@ -41,15 +41,18 @@ class CompressedBlockEncoder {
 
   /// Encode a block using compressed format
   ///
-  /// Returns the encoded block data (without block header)
-  Uint8List encodeBlock(final Uint8List input) {
-    if (input.isEmpty) {
+  /// Returns the encoded block data (without block header).
+  ///
+  /// Bytes in `input[0..from)` are a history prefix used only for matching
+  /// (cross-chunk back-references); the block encodes `input[from..]`.
+  Uint8List encodeBlock(final Uint8List input, {final int from = 0}) {
+    if (input.length - from <= 0) {
       return Uint8List(0);
     }
 
     try {
       final matchFinder = _matchFinder;
-      final matchResult = matchFinder.findMatches(input);
+      final matchResult = matchFinder.findMatches(input, from: from);
       final matches = matchResult.$1;
       final trailingLiterals = matchResult.$2;
 
@@ -61,6 +64,7 @@ class CompressedBlockEncoder {
         input,
         matches,
         trailingLiterals,
+        from: from,
       );
 
       final literalSection = _encodeLiteralSection(literals);

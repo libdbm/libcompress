@@ -1,8 +1,10 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../util/byte_sink.dart';
 import '../util/byte_utils.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/window_buffer.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
 
@@ -40,7 +42,6 @@ class Lz4Decoder {
       throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
     }
 
-    final blockIndependence = (flag & 0x20) != 0;
     final blockChecksumFlag = (flag & 0x10) != 0;
     final contentSizeFlag = (flag & 0x08) != 0;
     final contentChecksumFlag = (flag & 0x04) != 0;
@@ -48,10 +49,8 @@ class Lz4Decoder {
     final bd = reader.readByte();
     final blockMaxSizeCode = (bd >> 4) & 0x07;
     final blockMaxSize = blockSizeFromCode(blockMaxSizeCode);
-    if (!blockIndependence) {
-      throw Lz4FormatException('Dependent blocks are not supported');
-    }
-
+    // Both independent and linked (dependent) blocks decode correctly: a single
+    // shared output buffer is used, and LZ4 match offsets are <= 64 KB.
     final headerBytes = <int>[flag, bd];
 
     int? expectedContentSize;
@@ -177,7 +176,11 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   int _blockMaxSize = 0;
   int? _expectedContentSize;
   Xxh32Sink? _contentSink;
-  int _produced = 0;
+  // One 64 KB window per frame (LZ4 match offsets are <= 64 KB), shared across
+  // blocks so linked (dependent) blocks resolve and independent blocks also
+  // decode correctly. Drained as it advances.
+  WindowBuffer? _output;
+  _BlockDecoder? _blockDecoder;
   bool _sawEndMark = false;
 
   int get _avail => _pending.length - _cursor;
@@ -214,7 +217,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       if (!_inFrame) {
         progressed = _avail > 0 && _parseHeader();
       } else if (_sawEndMark) {
-        progressed = _finishFrame();
+        progressed = _finishFrame(emit);
       } else {
         progressed = _decodeBlock(emit);
       }
@@ -237,9 +240,6 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     }
     if ((flag & 0x02) != 0) {
       throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
-    }
-    if ((flag & 0x20) == 0) {
-      throw Lz4FormatException('Dependent blocks are not supported');
     }
     final bd = _pending[base + 5];
     final contentSizeFlag = (flag & 0x08) != 0;
@@ -287,7 +287,8 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     _blockMaxSize = blockSizeFromCode((bd >> 4) & 0x07);
     _expectedContentSize = expectedContentSize;
     _contentSink = _contentChecksumFlag ? Xxh32Sink() : null;
-    _produced = 0;
+    _output = WindowBuffer(1 << 16); // 64 KB LZ4 window
+    _blockDecoder = _BlockDecoder(_output!);
     return true;
   }
 
@@ -320,32 +321,28 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       p += 4;
     }
 
-    final Uint8List output;
+    final output = _output!;
     if (isCompressed) {
-      // Fresh per-block buffer: matches reference only within this block
-      // (independent blocks), so prior blocks need not be retained.
-      final out = GrowableBuffer(_blockMaxSize, maxSize);
-      _BlockDecoder(out)
+      _blockDecoder!
         ..reset(blockBytes)
         ..decode();
-      output = out.toBytes();
     } else {
-      output = blockBytes;
+      output.addBytes(blockBytes, 0, blockBytes.length);
     }
-
-    _produced += output.length;
-    if (maxSize != null && _produced > maxSize!) {
+    if (maxSize != null && output.length > maxSize!) {
       throw Lz4FormatException(
-        'Decompressed size $_produced exceeds maximum allowed size $maxSize',
+        'Decompressed size ${output.length} exceeds maximum allowed size $maxSize',
       );
     }
-    _contentSink?.add(output);
     _cursor = p;
-    emit(output);
+    _flush(output.drain(), emit);
     return true;
   }
 
-  bool _finishFrame() {
+  bool _finishFrame(final void Function(Uint8List) emit) {
+    final output = _output!;
+    _flush(output.finish(), emit);
+
     if (_contentChecksumFlag) {
       if (_avail < 4) return false;
       if (_u32(_cursor) != _contentSink!.digest()) {
@@ -353,15 +350,23 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       }
       _cursor += 4;
     }
-    if (_expectedContentSize != null && _produced != _expectedContentSize) {
+    if (_expectedContentSize != null && output.length != _expectedContentSize) {
       throw Lz4FormatException(
-        'Decompressed size $_produced != expected $_expectedContentSize',
+        'Decompressed size ${output.length} != expected $_expectedContentSize',
       );
     }
     _inFrame = false;
     _sawEndMark = false;
     _contentSink = null;
+    _output = null;
+    _blockDecoder = null;
     return true;
+  }
+
+  void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
+    if (bytes.isEmpty) return;
+    _contentSink?.add(bytes);
+    emit(bytes);
   }
 
   void _compact() {
@@ -405,7 +410,7 @@ class _FrameReader {
 class _BlockDecoder {
   _BlockDecoder(this._output);
 
-  final GrowableBuffer _output;
+  final ByteSink _output;
   late Uint8List _block;
 
   void reset(Uint8List block) {

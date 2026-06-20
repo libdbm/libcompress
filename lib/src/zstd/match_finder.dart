@@ -56,17 +56,26 @@ class MatchFinder {
   ///
   /// Returns a list of matches and the trailing literals.
   /// Note: Repeat offset optimization is handled by SequenceEncoder.
-  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input) {
-    if (input.length < minMatch) {
-      return (<ZstdMatch>[], input);
+  /// Finds matches in `input[from..]`. Positions in `[0, from)` are a history
+  /// prefix: they seed the hash so matches in the new region can reference them
+  /// (cross-chunk back-references), but no tokens are emitted for them. With
+  /// the default `from == 0` this is plain whole-buffer matching.
+  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input, {final int from = 0}) {
+    if (input.length - from < minMatch) {
+      return (<ZstdMatch>[], Uint8List.sublistView(input, from));
     }
 
     final matches = <ZstdMatch>[];
     final hashTable = _hashTable..fillRange(0, _hashTableSize, -1);
     final chainTable = _chainTable..fillRange(0, _chainSize, -1);
 
-    var pos = 0;
-    var anchor = 0;
+    // Seed the hash with the history prefix.
+    for (var i = 0; i < from; i++) {
+      _update(input, i, hashTable, chainTable);
+    }
+
+    var pos = from;
+    var anchor = from;
     final end = input.length;
     final limit = end - minMatch;
 
@@ -102,12 +111,7 @@ class MatchFinder {
 
         // Update hash table for positions we're skipping
         for (var i = 1; i < bestLen && pos + i <= limit; i++) {
-          final h = _hash(input, pos + i);
-          final p = hashTable[h];
-          if (p >= 0 && (pos + i) - p < _chainSize) {
-            chainTable[(pos + i) & _chainMask] = p;
-          }
-          hashTable[h] = pos + i;
+          _update(input, pos + i, hashTable, chainTable);
         }
 
         pos += bestLen;
@@ -120,6 +124,16 @@ class MatchFinder {
     // Trailing literals
     final trailing = Uint8List.sublistView(input, anchor);
     return (matches, trailing);
+  }
+
+  void _update(final Uint8List input, final int pos, final List<int> hashTable,
+      final List<int> chainTable) {
+    final h = _hash(input, pos);
+    final prev = hashTable[h];
+    if (prev >= 0 && pos - prev < _chainSize) {
+      chainTable[pos & _chainMask] = prev;
+    }
+    hashTable[h] = pos;
   }
 
   /// Find the best match at current position using hash chain
@@ -201,8 +215,9 @@ class MatchFinder {
   Uint8List extractLiterals(
     final Uint8List input,
     final List<ZstdMatch> matches,
-    final Uint8List trailing,
-  ) {
+    final Uint8List trailing, {
+    final int from = 0,
+  }) {
     var total = trailing.length;
     for (final match in matches) {
       total += match.literalLength;
@@ -211,7 +226,7 @@ class MatchFinder {
     // Single typed allocation with bulk copies, rather than per-match
     // sublist + growable addAll + a final fromList (three copies of the data).
     final literals = Uint8List(total);
-    var src = 0; // read cursor into input
+    var src = from; // read cursor into input (history prefix is skipped)
     var dst = 0; // write cursor into literals
     for (final match in matches) {
       final len = match.literalLength;
