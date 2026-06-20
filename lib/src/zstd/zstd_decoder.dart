@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/growable_buffer.dart';
 import '../util/incremental_decompress_transformer.dart';
@@ -32,7 +33,10 @@ class ZstdDecoder {
   /// Set to null to allow unlimited output (use with trusted input only).
   ZstdDecoder({this.maxSize = zstdDefaultMaxDecompressedSize});
 
-  Uint8List decompress(final Uint8List data) {
+  Uint8List decompress(final Uint8List data) =>
+      guardFormat(() => _decompress(data), ZstdFormatException.new);
+
+  Uint8List _decompress(final Uint8List data) {
     if (data.isEmpty) {
       throw ZstdFormatException('Input too short for Zstd frame');
     }
@@ -387,10 +391,22 @@ class ZstdDecoder {
 /// content checksum is streamed via [Xxh64Sink]. Supports skippable and
 /// concatenated frames.
 class ZstdIncrementalDecoder implements IncrementalDecoder {
-  ZstdIncrementalDecoder({this.maxSize, required this.maxBufferSize});
+  ZstdIncrementalDecoder({
+    this.maxSize,
+    required this.maxBufferSize,
+    this.verified = false,
+  });
 
   final int? maxSize;
   final int maxBufferSize;
+
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (memory rises to one frame's output, bounded
+  /// by [maxSize]). The default emits as it decodes.
+  final bool verified;
+
+  // Holds a frame's output in verified mode until its trailer validates.
+  BytesBuilder? _hold;
 
   final BytePending _pending = BytePending();
   int _cursor = 0;
@@ -423,12 +439,12 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
         'frame too large or malformed',
       );
     }
-    _drive(emit);
+    guardFormat(() => _drive(emit), ZstdFormatException.new);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    _drive(emit);
+    guardFormat(() => _drive(emit), ZstdFormatException.new);
     if (_inFrame || _avail != 0) {
       throw ZstdFormatException('Incomplete Zstd frame at end of stream');
     }
@@ -529,6 +545,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     _frameContentSize = contentSize;
     _offsets = [1, 4, 8];
     _output = WindowBuffer(window, maxSize: frameLimit);
+    _hold = verified ? BytesBuilder(copy: false) : null;
     _sink = descriptor.checksumFlag ? Xxh64Sink() : null;
     _blockDecoder = CompressedBlockDecoder()..reset();
     return true;
@@ -600,6 +617,13 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
       );
     }
 
+    // Frame validated — in verified mode, release the held output now.
+    final hold = _hold;
+    if (hold != null) {
+      if (hold.isNotEmpty) emit(hold.takeBytes());
+      _hold = null;
+    }
+
     _total += output.length;
     _inFrame = false;
     _lastBlockSeen = false;
@@ -612,7 +636,12 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
     if (bytes.isEmpty) return;
     _sink?.add(bytes);
-    emit(bytes);
+    final hold = _hold;
+    if (hold != null) {
+      hold.add(bytes); // verified mode: release only after the frame validates
+    } else {
+      emit(bytes);
+    }
   }
 
   void _compact() {

@@ -33,10 +33,7 @@ void main() {
         );
         expect(
           () => codec.decompress(noise),
-          throwsA(anyOf(
-            isA<ZstdFormatException>(),
-            isA<StateError>(),
-          )),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Short random data ($length bytes) should be rejected',
         );
       }
@@ -58,11 +55,7 @@ void main() {
         final truncated = Uint8List.sublistView(validCompressed, 0, cutoff);
         expect(
           () => codec.decompress(truncated),
-          throwsA(anyOf(
-            isA<ZstdFormatException>(),
-            isA<StateError>(),
-            isA<RangeError>(), // May occur for very truncated data
-          )),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Truncated at $cutoff should be rejected',
         );
       }
@@ -109,10 +102,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -124,10 +114,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -140,10 +127,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -156,10 +140,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -189,10 +170,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -206,10 +184,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -225,11 +200,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-          isA<RangeError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -246,11 +217,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-          isA<RangeError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -284,10 +251,7 @@ void main() {
 
       expect(
         () => codecWithChecksum.decompress(truncated),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -318,10 +282,7 @@ void main() {
       final restrictedCodec = ZstdCodec(maxDecompressedSize: 1000);
       expect(
         () => restrictedCodec.decompress(compressed),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -339,10 +300,10 @@ void main() {
       // Behavior depends on implementation - may work or fail
       try {
         codec.decompress(data);
-      } on ZstdFormatException {
+      } on CompressionFormatException {
         // Expected
-      } on StateError {
-        // Also acceptable
+      } catch (e) {
+        fail('Expected CompressionFormatException, got $e');
       }
     });
 
@@ -381,10 +342,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -425,13 +383,11 @@ void main() {
         try {
           codec.decompress(corrupted);
           // May succeed with wrong output
-        } on ZstdFormatException {
-          // Expected
-        } on StateError {
-          // Acceptable
-        } on RangeError {
-          // Log but don't fail - Zstd has complex state
-          // In production, this should be caught and converted to FormatException
+        } on CompressionFormatException {
+          // Expected for detected corruption
+        } catch (e) {
+          fail('Corrupted byte at position $i threw $e '
+              'instead of CompressionFormatException');
         }
       }
     });
@@ -446,10 +402,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(partial),
-        throwsA(anyOf(
-          isA<ZstdFormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 

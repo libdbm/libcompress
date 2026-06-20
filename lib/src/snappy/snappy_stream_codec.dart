@@ -109,28 +109,32 @@ class _SnappyStreamCompressor implements StreamCompressor {
 
   final int _chunkSize;
   final SnappyStreamEncoder _encoder;
-  final List<int> _buf = <int>[];
+  // Typed, contiguous pending buffer; consumed full chunks are discarded once
+  // per addChunk rather than via repeated List.removeRange (which was O(n^2)).
+  final BytePending _buf = BytePending();
 
   @override
   Uint8List header() => _encoder.streamIdentifier;
 
   @override
   Uint8List addChunk(final Uint8List data) {
-    _buf.addAll(data);
+    _buf.add(data);
     final out = BytesBuilder(copy: false);
-    while (_buf.length >= _chunkSize) {
-      out.add(_encoder.compressChunkOnly(
-          Uint8List.fromList(_buf.sublist(0, _chunkSize))));
-      _buf.removeRange(0, _chunkSize);
+    var cursor = 0;
+    while (_buf.length - cursor >= _chunkSize) {
+      out.add(_encoder.compressChunkOnly(_buf.slice(cursor, cursor + _chunkSize)));
+      cursor += _chunkSize;
     }
+    if (cursor > 0) _buf.discard(cursor);
     return out.takeBytes();
   }
 
   @override
   Uint8List finish() {
-    if (_buf.isEmpty) return Uint8List(0);
-    final chunk = Uint8List.fromList(_buf);
-    _buf.clear();
+    final remaining = _buf.length;
+    if (remaining == 0) return Uint8List(0);
+    final chunk = _buf.slice(0, remaining);
+    _buf.discard(remaining);
     return _encoder.compressChunkOnly(chunk);
   }
 }

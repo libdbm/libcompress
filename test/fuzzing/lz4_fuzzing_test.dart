@@ -34,10 +34,7 @@ void main() {
         );
         expect(
           () => codec.decompress(noise),
-          throwsA(anyOf(
-            isA<Lz4FormatException>(),
-            isA<StateError>(), // For very short inputs
-          )),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Short random data ($length bytes) should be rejected',
         );
       }
@@ -66,10 +63,7 @@ void main() {
         final truncated = Uint8List.sublistView(validCompressed, 0, cutoff);
         expect(
           () => codec.decompress(truncated),
-          throwsA(anyOf(
-            isA<Lz4FormatException>(),
-            isA<StateError>(),
-          )),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Truncated at $cutoff should be rejected',
         );
       }
@@ -133,10 +127,7 @@ void main() {
       ]);
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<Lz4FormatException>(),
-          isA<ArgumentError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -168,10 +159,7 @@ void main() {
       final restrictedCodec = Lz4Codec(maxDecompressedSize: 100);
       expect(
         () => restrictedCodec.decompress(compressed),
-        throwsA(anyOf(
-          isA<Lz4FormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });
@@ -208,12 +196,11 @@ void main() {
               // It's acceptable if corruption produces different output
               // The test is that it doesn't crash
             }
-          } on Lz4FormatException {
+          } on CompressionFormatException {
             // Expected for detected corruption
-          } on StateError {
-            // Also acceptable
-          } on RangeError {
-            fail('Corrupted byte at position $i caused RangeError instead of FormatException');
+          } catch (e) {
+            fail('Corrupted byte at position $i threw $e '
+                'instead of CompressionFormatException');
           }
         }
       }
@@ -257,11 +244,7 @@ void main() {
 
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<Lz4FormatException>(),
-          isA<StateError>(),
-          isA<RangeError>(), // Acceptable if bounds check throws RangeError
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
 
@@ -279,10 +262,7 @@ void main() {
 
       expect(
         () => codec.decompress(data),
-        throwsA(anyOf(
-          isA<Lz4FormatException>(),
-          isA<StateError>(),
-        )),
+        throwsA(isA<CompressionFormatException>()),
       );
     });
   });

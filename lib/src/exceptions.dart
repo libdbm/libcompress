@@ -24,6 +24,29 @@ abstract class CompressionFormatException extends FormatException {
   const CompressionFormatException(super.message);
 }
 
+/// Runs [body], converting any error that is *not* already a
+/// [CompressionFormatException] (e.g. a `StateError` or `RangeError` thrown
+/// deep in a decoder on malformed input) into a codec-specific format
+/// exception via [wrap].
+///
+/// This gives callers a single, reliable boundary: invalid compressed input
+/// always surfaces as a [CompressionFormatException], never as an internal
+/// implementation exception.
+T guardFormat<T>(
+  final T Function() body,
+  final CompressionFormatException Function(String message) wrap,
+) {
+  try {
+    return body();
+  } on CompressionFormatException {
+    rethrow;
+  } on StateError catch (e) {
+    throw wrap(e.message);
+  } catch (e) {
+    throw wrap(e.toString());
+  }
+}
+
 /// Exception thrown when invalid LZ4 data is encountered
 class Lz4FormatException extends CompressionFormatException {
   /// Creates an LZ4 format exception with the given [message].

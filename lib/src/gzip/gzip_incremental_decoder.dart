@@ -5,6 +5,7 @@ import '../util/bit_stream.dart';
 import '../util/byte_pending.dart';
 import '../util/crc32.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
 import 'deflate_common.dart';
 import 'gzip_frame.dart';
@@ -24,10 +25,27 @@ enum _Phase { header, deflate, trailer }
 /// out mid-unit, rewinds and waits for more input. CRC32 and ISIZE are streamed
 /// and validated at each member's trailer. Supports concatenated members.
 class GzipIncrementalDecoder implements IncrementalDecoder {
-  GzipIncrementalDecoder({this.maxSize, required this.maxBufferSize});
+  GzipIncrementalDecoder({
+    this.maxSize,
+    required this.maxBufferSize,
+    this.verified = false,
+  });
 
   final int? maxSize;
   final int maxBufferSize;
+
+  /// When true, a member's output is withheld until its CRC32/ISIZE trailer
+  /// validates, then flushed — so a downstream consumer never receives bytes
+  /// from a member that later fails integrity. Memory rises to one member's
+  /// output (bounded by [maxSize]); the default (false) emits as it decodes.
+  final bool verified;
+
+  // Holds a member's output in verified mode until the trailer validates.
+  BytesBuilder? _hold;
+
+  // Cumulative output limit across all concatenated members (the public stream
+  // contract caps total output, not per-member output).
+  late final OutputLimit _limit = OutputLimit(maxSize);
 
   final BytePending _pending = BytePending();
   int _cursor = 0; // fully-consumed byte boundary in _pending
@@ -60,12 +78,12 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
         'frame too large or malformed',
       );
     }
-    _drive(emit);
+    guardFormat(() => _drive(emit), GzipFormatException.new);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    _drive(emit);
+    guardFormat(() => _drive(emit), GzipFormatException.new);
     if (_phase != _Phase.header || _avail != 0) {
       throw GzipFormatException('Incomplete GZIP member at end of stream');
     }
@@ -91,6 +109,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   bool _parseHeader() {
     if (_avail < 10) return false;
+    final memberStart = _cursor;
     var p = _cursor;
     if (_pending[p] != GzipFrame.id1 || _pending[p + 1] != GzipFrame.id2) {
       throw GzipFormatException('Invalid GZIP magic number at offset $p');
@@ -120,6 +139,16 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     }
     if ((flags & GzipFrame.fhcrc) != 0) {
       if (_pending.length < p + 2) return false;
+      // Validate the header CRC16 (low 16 bits of CRC32 over the header bytes),
+      // matching the block decoder rather than silently skipping it.
+      final expected = Crc32.hash(_pending.slice(memberStart, p)) & 0xFFFF;
+      final actual = _pending[p] | (_pending[p + 1] << 8);
+      if (actual != expected) {
+        throw GzipFormatException(
+          'Header CRC mismatch: expected 0x${expected.toRadixString(16)}, '
+          'got 0x${actual.toRadixString(16)}',
+        );
+      }
       p += 2;
     }
 
@@ -133,7 +162,10 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     _deflateDone = false;
     _litDecoder = null;
     _distDecoder = null;
-    _output = WindowBuffer(_deflateWindow, maxSize: maxSize);
+    // Per-member buffer capped at the remaining cumulative budget, so many
+    // small members can't collectively exceed maxSize.
+    _output = WindowBuffer(_deflateWindow, maxSize: _limit.remaining);
+    _hold = verified ? BytesBuilder(copy: false) : null;
     _crc = 0xFFFFFFFF;
     _isize = 0;
     return true;
@@ -344,7 +376,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   bool _parseTrailer(final void Function(Uint8List) emit) {
     if (_avail < 8) return false;
-    // Emit the window tail before validating.
+    // Drain the window tail (held until validation in verified mode).
     _emit(_output!.finish(), emit);
 
     final p = _cursor;
@@ -368,6 +400,13 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       throw GzipFormatException('Size mismatch: expected $expectedSize, got $_isize');
     }
 
+    // Member validated — in verified mode, release the held output now.
+    final hold = _hold;
+    if (hold != null) {
+      if (hold.isNotEmpty) emit(hold.takeBytes());
+      _hold = null;
+    }
+
     _cursor += 8;
     _phase = _Phase.header; // next concatenated member, if any
     _output = null;
@@ -378,7 +417,13 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     if (bytes.isEmpty) return;
     _crc = Crc32.update(bytes, _crc);
     _isize = (_isize + bytes.length) & 0xFFFFFFFF;
-    emit(bytes);
+    _limit.record(bytes.length);
+    final hold = _hold;
+    if (hold != null) {
+      hold.add(bytes); // verified mode: release only after the trailer validates
+    } else {
+      emit(bytes);
+    }
   }
 
   void _compact() {

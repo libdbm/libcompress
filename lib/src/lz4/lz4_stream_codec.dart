@@ -25,7 +25,8 @@ class Lz4StreamCodec extends CompressionStreamCodec {
   /// Whether to include content checksum in output
   final bool checksum;
 
-  /// Maximum decompressed size per frame (prevents OOM attacks)
+  /// Maximum *cumulative* decompressed size across all frames (prevents OOM
+  /// attacks from concatenated frames).
   final int? maxSize;
 
   /// Maximum buffer size for compressed data before rejecting
@@ -33,6 +34,12 @@ class Lz4StreamCodec extends CompressionStreamCodec {
 
   /// Chunk size for buffering input during compression
   final int chunkSize;
+
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (buffers up to one frame's output, bounded
+  /// by [maxSize]). The default (false) emits as it decodes, so an integrity
+  /// error can arrive after some bytes were already emitted.
+  final bool verified;
 
   /// Creates an LZ4 streaming codec
   Lz4StreamCodec({
@@ -42,6 +49,7 @@ class Lz4StreamCodec extends CompressionStreamCodec {
     this.maxSize = lz4DefaultMaxDecompressedSize,
     this.maxBufferSize = lz4DefaultMaxBufferSize,
     this.chunkSize = 1024 * 1024, // 1MB default
+    this.verified = false,
   });
 
   @override
@@ -69,6 +77,7 @@ class Lz4StreamCodec extends CompressionStreamCodec {
       () => Lz4IncrementalDecoder(
         maxSize: maxSize,
         maxBufferSize: maxBufferSize,
+        verified: verified,
       ),
     ).bind(input);
   }

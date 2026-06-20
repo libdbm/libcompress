@@ -22,7 +22,8 @@ class GzipStreamCodec extends CompressionStreamCodec {
   /// Compression level (1-9)
   final int level;
 
-  /// Maximum decompressed size per member (prevents OOM attacks)
+  /// Maximum *cumulative* decompressed size across all members (prevents OOM
+  /// attacks from concatenated members).
   final int? maxSize;
 
   /// Maximum buffer size for compressed data before rejecting
@@ -31,12 +32,23 @@ class GzipStreamCodec extends CompressionStreamCodec {
   /// Chunk size for buffering input during compression
   final int chunkSize;
 
+  /// When true, each member's decompressed output is withheld until its CRC32
+  /// and ISIZE trailer validate, then released — so a consumer never receives
+  /// bytes from a member that later fails integrity (at the cost of buffering
+  /// up to one member's output, bounded by [maxSize]).
+  ///
+  /// The default (false) emits output as it decodes for true bounded-memory
+  /// streaming; in that mode an integrity error can arrive *after* some bytes
+  /// have already been emitted (inherent to streaming, like zlib).
+  final bool verified;
+
   /// Creates a GZIP streaming codec
   GzipStreamCodec({
     this.level = 6,
     this.maxSize = gzipDefaultMaxDecompressedSize,
     this.maxBufferSize = defaultMaxBufferSize,
     this.chunkSize = 1024 * 1024, // 1MB default
+    this.verified = false,
   });
 
   @override
@@ -60,6 +72,7 @@ class GzipStreamCodec extends CompressionStreamCodec {
       () => GzipIncrementalDecoder(
         maxSize: maxSize,
         maxBufferSize: maxBufferSize,
+        verified: verified,
       ),
     ).bind(input);
   }
