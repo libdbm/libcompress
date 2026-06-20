@@ -71,19 +71,21 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.add(input);
-    if (_avail > maxBufferSize) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
       throw GzipFormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
+        'Stream buffer would exceed $maxBufferSize bytes - '
         'frame too large or malformed',
       );
     }
-    guardFormat(() => _drive(emit), GzipFormatException.new);
+    _pending.add(input);
+    gzipBoundary(() => _drive(emit));
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    guardFormat(() => _drive(emit), GzipFormatException.new);
+    gzipBoundary(() => _drive(emit));
     if (_phase != _Phase.header || _avail != 0) {
       throw GzipFormatException('Incomplete GZIP member at end of stream');
     }

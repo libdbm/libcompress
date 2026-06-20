@@ -214,13 +214,15 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.add(input);
-    if (_avail > maxBufferSize) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
       throw Lz4FormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
+        'Stream buffer would exceed $maxBufferSize bytes - '
         'frame too large or malformed',
       );
     }
+    _pending.add(input);
     guardFormat(() => _drive(emit), Lz4FormatException.new);
   }
 

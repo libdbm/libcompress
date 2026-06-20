@@ -193,6 +193,29 @@ void main() {
     });
   });
 
+  group('Stream buffer preflight (reject before allocation)', () {
+    test('an oversized input chunk is rejected before being buffered', () {
+      // Incompressible payload so the compressed blob stays well over the cap.
+      final comp = GzipCodec()
+          .compress(_bytes(List.generate(5000, (i) => (i * 131 + 7) % 256)));
+      expect(comp.length, greaterThan(64));
+      // Whole compressed blob arrives as ONE chunk, far over the tiny buffer cap.
+      final out = GzipStreamCodec(maxBufferSize: 64).decompress(Stream.value(comp));
+      expect(out.toList(), throwsA(isA<CompressionFormatException>()));
+    });
+  });
+
+  group('GZIP error boundary', () {
+    test('corrupt DEFLATE surfaces as GzipFormatException (block + stream)', () {
+      final good = Uint8List.fromList(GzipCodec().compress(_bytes(List.filled(300, 65))));
+      for (var i = 12; i < good.length - 8; i++) {
+        good[i] ^= 0xFF; // corrupt the DEFLATE body, leave header/trailer framing
+      }
+      expect(() => GzipCodec().decompress(good), throwsA(isA<GzipFormatException>()));
+      expect(_decodeStream(GzipStreamCodec(), good), throwsA(isA<GzipFormatException>()));
+    });
+  });
+
   group('Block decoder size limits', () {
     final payload = _bytes(List.generate(50000, (i) => (i * 13 + 5) % 256));
 
