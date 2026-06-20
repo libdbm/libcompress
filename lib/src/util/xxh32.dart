@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'byte_utils.dart';
+
 /// XXH32 hash algorithm implementation as used by Zstandard.
 ///
 /// This is a fast, non-cryptographic hash function that produces a 32-bit hash.
@@ -11,7 +13,6 @@ class XXH32 {
   static const int _prime3 = 0xC2B2AE3D;
   static const int _prime4 = 0x27D4EB2F;
   static const int _prime5 = 0x165667B1;
-  static final BigInt _u32Mask = BigInt.from(0xFFFFFFFF);
 
   /// Computes the XXH32 hash of the given data with an optional seed.
   ///
@@ -91,9 +92,7 @@ class XXH32 {
     return acc;
   }
 
-  static int _mul32(int left, int right) {
-    return (BigInt.from(left) * BigInt.from(right) & _u32Mask).toInt();
-  }
+  static int _mul32(int left, int right) => ByteUtils.mul32(left, right);
 
   static int _rotateLeft(int value, int amount) {
     value &= 0xFFFFFFFF;

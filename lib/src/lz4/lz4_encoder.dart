@@ -97,8 +97,8 @@ class Lz4Encoder {
       return 1;
     }
 
-    final hashTable = List<int>.filled(lz4HashTableSize, -1);
-    final chainTable = List<int>.filled(lz4MaxOffset + 1, -1);
+    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
+    final chainTable = Int32List(lz4MaxOffset + 1)..fillRange(0, lz4MaxOffset + 1, -1);
     var op = 0;
     final end = input.length;
     final limit = end - lz4MFLimit;
@@ -187,7 +187,7 @@ class Lz4Encoder {
       return 1;
     }
 
-    final hashTable = List<int>.filled(lz4HashTableSize, -1);
+    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
     var op = 0;
     final end = input.length;
     final limit = end - lz4MFLimit;
@@ -390,7 +390,7 @@ class StreamingLz4Encoder implements StreamCompressor {
   Uint8List _compressLinked(final Uint8List buf, final int start) {
     final span = buf.length - start;
     final out = Uint8List(span + (span >> 8) + 64);
-    final hashTable = List<int>.filled(lz4HashTableSize, -1);
+    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
     var op = 0;
     final end = buf.length;
     final limit = end - lz4MFLimit;
