@@ -37,7 +37,8 @@ class SnappyDecoder {
     } else {
       final VarintResult result;
       try {
-        result = Varint.decode(compressed, sourceIndex);
+        // Snappy's uncompressed-length preamble is at most 32 bits (5 bytes).
+        result = Varint.decode(compressed, sourceIndex, maxBytes: 5);
       } on FormatException catch (e) {
         throw SnappyFormatException('Invalid Snappy length prefix: ${e.message}');
       }
