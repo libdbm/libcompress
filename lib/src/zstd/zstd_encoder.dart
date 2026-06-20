@@ -86,6 +86,13 @@ class ZstdEncoder {
     if (input.isEmpty) {
       pos = _writeBlockHeader(output, pos, true, ZstdBlockType.raw, 0);
     } else {
+      // One encoder reused across blocks (its match finder owns large
+      // hash/chain tables that should be allocated once, not per block).
+      final compressedEncoder = CompressedBlockEncoder(
+        searchDepth: searchDepth,
+        validate: validate,
+      );
+
       // Compress data in blocks
       var offset = 0;
       while (offset < input.length) {
@@ -102,10 +109,6 @@ class ZstdEncoder {
         } else {
           // Try compressed block encoding with FSE sequences
           // Falls back to raw if compression doesn't help
-          final compressedEncoder = CompressedBlockEncoder(
-            searchDepth: searchDepth,
-            validate: validate,
-          );
           final compressed = compressedEncoder.encodeBlock(chunk);
           if (compressed.length < chunk.length && compressed.isNotEmpty) {
             pos = _writeCompressedBlock(output, pos, compressed, isLastBlock);

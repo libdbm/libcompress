@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'byte_utils.dart';
+
 /// Common utilities for LZ77-based compression algorithms
 ///
 /// LZ77 is a sliding window compression algorithm used by GZIP, LZ4, Snappy,
@@ -40,8 +42,6 @@ class LZ77Hash {
   /// Snappy hash multiplier
   static const int snappyMultiplier = 0x1e35a7bd;
 
-  static final BigInt _u32Mask = BigInt.from(0xFFFFFFFF);
-
   /// Computes LZ4-style hash of 4 bytes
   ///
   /// Uses Knuth's multiplicative hashing for fast, good distribution.
@@ -80,9 +80,7 @@ class LZ77Hash {
   }
 }
 
-int _mul32(int left, int right) {
-  return (BigInt.from(left) * BigInt.from(right) & LZ77Hash._u32Mask).toInt();
-}
+int _mul32(int left, int right) => ByteUtils.mul32(left, right);
 
 /// Constants for LZ77-based algorithms
 class LZ77Constants {

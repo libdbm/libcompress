@@ -28,6 +28,9 @@ class CompressedBlockEncoder {
   /// Creates a compressed block encoder with specified search depth
   CompressedBlockEncoder({this.searchDepth = 32, this.validate = false});
 
+  // Reused across blocks so its large hash/chain tables are allocated once.
+  late final MatchFinder _matchFinder = MatchFinder(searchDepth: searchDepth);
+
   /// Encode a block using compressed format
   ///
   /// Returns the encoded block data (without block header)
@@ -37,7 +40,7 @@ class CompressedBlockEncoder {
     }
 
     try {
-      final matchFinder = MatchFinder(searchDepth: searchDepth);
+      final matchFinder = _matchFinder;
       final matchResult = matchFinder.findMatches(input);
       final matches = matchResult.$1;
       final trailingLiterals = matchResult.$2;

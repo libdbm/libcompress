@@ -2,6 +2,15 @@ import 'dart:typed_data';
 import 'sequence_constants.dart' as seq;
 import 'match_finder.dart';
 
+// Predefined (mode 0) FSE tables are built from compile-time constants and are
+// immutable during encoding, so they are built once and shared across blocks.
+final FseCompressionTable _predefinedLlTable =
+    FseCompressionTable.create(seq.llDefaultNorm, seq.llDefaultNormLog, 35);
+final FseCompressionTable _predefinedOfTable =
+    FseCompressionTable.create(seq.ofDefaultNorm, seq.ofDefaultNormLog, 31);
+final FseCompressionTable _predefinedMlTable =
+    FseCompressionTable.create(seq.mlDefaultNorm, seq.mlDefaultNormLog, 52);
+
 /// Sequence encoder using FSE with configurable tables
 ///
 /// This implementation follows the Java aircompressor library's approach:
@@ -51,11 +60,7 @@ class SequenceEncoder {
   }) {
     // Build LL table
     if (llMode == 0) {
-      _llTable = FseCompressionTable.create(
-        seq.llDefaultNorm,
-        seq.llDefaultNormLog,
-        35,
-      );
+      _llTable = _predefinedLlTable;
     } else if (llMode == 2 && llNorm != null && llLog != null) {
       _llTable = FseCompressionTable.create(llNorm, llLog, 35);
     } else {
@@ -64,11 +69,7 @@ class SequenceEncoder {
 
     // Build OF table
     if (ofMode == 0) {
-      _ofTable = FseCompressionTable.create(
-        seq.ofDefaultNorm,
-        seq.ofDefaultNormLog,
-        31,
-      );
+      _ofTable = _predefinedOfTable;
     } else if (ofMode == 2 && ofNorm != null && ofLog != null) {
       _ofTable = FseCompressionTable.create(ofNorm, ofLog, 31);
     } else {
@@ -77,11 +78,7 @@ class SequenceEncoder {
 
     // Build ML table
     if (mlMode == 0) {
-      _mlTable = FseCompressionTable.create(
-        seq.mlDefaultNorm,
-        seq.mlDefaultNormLog,
-        52,
-      );
+      _mlTable = _predefinedMlTable;
     } else if (mlMode == 2 && mlNorm != null && mlLog != null) {
       _mlTable = FseCompressionTable.create(mlNorm, mlLog, 52);
     } else {

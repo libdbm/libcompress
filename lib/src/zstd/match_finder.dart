@@ -27,7 +27,6 @@ class MatchFinder {
   static const int _chainSize = 1 << 16;
   static const int _minMatch = 3; // Zstd minimum match
   static const int _maxOffset = 1 << 22; // ~4MB max offset for Zstd
-  static final BigInt _u32Mask = BigInt.from(0xFFFFFFFF);
 
   final int searchDepth;
   final int maxMatch;
@@ -37,12 +36,16 @@ class MatchFinder {
     this.maxMatch = 65536,
   });
 
+  // Reused across blocks: a fresh MatchFinder per block would reallocate
+  // these ~192K entries every time. Reset (not reallocated) per findMatches.
+  late final List<int> _hashTable = List<int>.filled(_hashTableSize, -1);
+  late final List<int> _chainTable = List<int>.filled(_chainSize, -1);
+
   /// Hash function for match finding
   int _hash(final Uint8List data, final int pos) {
     if (pos + 3 >= data.length) return 0;
     final v = ByteUtils.readUint32LE(data, pos);
-    final product = (BigInt.from(v) * BigInt.from(2654435761) & _u32Mask)
-        .toInt();
+    final product = ByteUtils.mul32(v, 2654435761);
     return (product >> (32 - _hashLog)) & _hashMask;
   }
 
@@ -56,8 +59,8 @@ class MatchFinder {
     }
 
     final matches = <ZstdMatch>[];
-    final hashTable = List<int>.filled(_hashTableSize, -1);
-    final chainTable = List<int>.filled(_chainSize, -1);
+    final hashTable = _hashTable..fillRange(0, _hashTableSize, -1);
+    final chainTable = _chainTable..fillRange(0, _chainSize, -1);
 
     var pos = 0;
     var anchor = 0;
@@ -193,17 +196,25 @@ class MatchFinder {
     final List<ZstdMatch> matches,
     final Uint8List trailing,
   ) {
-    final literals = <int>[];
-    var pos = 0;
-
+    var total = trailing.length;
     for (final match in matches) {
-      if (match.literalLength > 0) {
-        literals.addAll(input.sublist(pos, pos + match.literalLength));
-      }
-      pos += match.literalLength + match.length;
+      total += match.literalLength;
     }
 
-    literals.addAll(trailing);
-    return Uint8List.fromList(literals);
+    // Single typed allocation with bulk copies, rather than per-match
+    // sublist + growable addAll + a final fromList (three copies of the data).
+    final literals = Uint8List(total);
+    var src = 0; // read cursor into input
+    var dst = 0; // write cursor into literals
+    for (final match in matches) {
+      final len = match.literalLength;
+      if (len > 0) {
+        literals.setRange(dst, dst + len, input, src);
+        dst += len;
+      }
+      src += len + match.length;
+    }
+    literals.setRange(dst, dst + trailing.length, trailing);
+    return literals;
   }
 }
