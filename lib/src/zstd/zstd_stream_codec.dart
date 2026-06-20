@@ -1,8 +1,8 @@
-import 'dart:async';
 import 'dart:typed_data';
 
 import '../compression_stream_codec.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/stream_compressor.dart';
 import 'zstd_common.dart';
 import 'zstd_decoder.dart';
 import 'streaming_zstd_encoder.dart';
@@ -53,43 +53,12 @@ class ZstdStreamCodec extends CompressionStreamCodec {
 
   @override
   Stream<Uint8List> compress(final Stream<Uint8List> input) {
-    // Stateful single-frame compression with a shared window, so matches span
-    // chunk boundaries (history preserved) rather than an independent frame
-    // per chunk.
-    final controller = StreamController<Uint8List>();
-    final encoder = StreamingZstdEncoder(
-      level: level,
-      checksum: checksum,
-      validate: validate,
+    // Stateful single-frame compression with a shared window so matches span
+    // chunk boundaries. Backpressure + error boundary come from the base.
+    return compressStream(
+      input,
+      StreamingZstdEncoder(level: level, checksum: checksum, validate: validate),
     );
-    var headerWritten = false;
-    late StreamSubscription<Uint8List> subscription;
-
-    void writeHeaderIfNeeded() {
-      if (headerWritten) return;
-      controller.add(encoder.header());
-      headerWritten = true;
-    }
-
-    subscription = input.listen(
-      (chunk) {
-        writeHeaderIfNeeded();
-        final out = encoder.addChunk(chunk);
-        if (out.isNotEmpty) controller.add(out);
-      },
-      onError: (Object e, StackTrace st) {
-        controller.addError(e, st);
-        subscription.cancel();
-      },
-      onDone: () {
-        writeHeaderIfNeeded();
-        controller.add(encoder.finish());
-        controller.close();
-      },
-      cancelOnError: true,
-    );
-    controller.onCancel = subscription.cancel;
-    return controller.stream;
   }
 
   @override

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import '../exceptions.dart';
 import '../util/bit_stream.dart';
+import '../util/byte_pending.dart';
 import '../util/crc32.dart';
 import '../util/incremental_decompress_transformer.dart';
 import '../util/window_buffer.dart';
@@ -28,7 +29,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
   final int? maxSize;
   final int maxBufferSize;
 
-  final List<int> _pending = <int>[];
+  final BytePending _pending = BytePending();
   int _cursor = 0; // fully-consumed byte boundary in _pending
 
   _Phase _phase = _Phase.header;
@@ -52,7 +53,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.addAll(input);
+    _pending.add(input);
     if (_avail > maxBufferSize) {
       throw GzipFormatException(
         'Stream buffer exceeded $maxBufferSize bytes - '
@@ -149,7 +150,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   bool _runDeflate(final void Function(Uint8List) emit) {
     final output = _output!;
-    final input = BitStreamReader(_pending, start: _cursor, end: _pending.length)
+    final input = BitStreamReader(_pending.bytes, start: _cursor, end: _pending.length)
       ..seek(BitPosition(0, _bitOffset));
 
     var madeProgress = false;
@@ -382,7 +383,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   void _compact() {
     if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.removeRange(0, _cursor);
+      _pending.discard(_cursor);
       _cursor = 0;
     }
   }

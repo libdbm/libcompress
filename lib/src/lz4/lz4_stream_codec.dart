@@ -1,8 +1,8 @@
-import 'dart:async';
 import 'dart:typed_data';
 
 import '../compression_stream_codec.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/stream_compressor.dart';
 import 'lz4_common.dart';
 import 'lz4_decoder.dart';
 import 'lz4_encoder.dart';
@@ -50,41 +50,15 @@ class Lz4StreamCodec extends CompressionStreamCodec {
   @override
   Stream<Uint8List> compress(final Stream<Uint8List> input) {
     // Stateful, block-linked single frame: matches span chunk boundaries
-    // (history preserved), better ratio than an independent frame per chunk.
-    final controller = StreamController<Uint8List>();
-    final encoder = StreamingLz4Encoder(
-      level: level,
-      blockSize: blockSize,
-      contentChecksum: checksum,
+    // (history preserved). Backpressure + error boundary come from the base.
+    return compressStream(
+      input,
+      StreamingLz4Encoder(
+        level: level,
+        blockSize: blockSize,
+        contentChecksum: checksum,
+      ),
     );
-    var headerWritten = false;
-    late StreamSubscription<Uint8List> subscription;
-
-    void writeHeaderIfNeeded() {
-      if (headerWritten) return;
-      controller.add(encoder.header());
-      headerWritten = true;
-    }
-
-    subscription = input.listen(
-      (chunk) {
-        writeHeaderIfNeeded();
-        final out = encoder.addChunk(chunk);
-        if (out.isNotEmpty) controller.add(out);
-      },
-      onError: (Object e, StackTrace st) {
-        controller.addError(e, st);
-        subscription.cancel();
-      },
-      onDone: () {
-        writeHeaderIfNeeded();
-        controller.add(encoder.finish());
-        controller.close();
-      },
-      cancelOnError: true,
-    );
-    controller.onCancel = subscription.cancel;
-    return controller.stream;
   }
 
   @override

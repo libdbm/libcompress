@@ -28,11 +28,17 @@ class CompressedBlockEncoder {
   String? lastValidationError;
   String? lastValidationStack;
 
+  /// Optional hook invoked when an unexpected encode error makes the block fall
+  /// back to raw output (normal mode). Lets production wire a log/metric so the
+  /// fallback isn't silent; null = no-op.
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Creates a compressed block encoder with specified search depth
   CompressedBlockEncoder({
     this.searchDepth = 32,
     this.minMatch = 3,
     this.validate = false,
+    this.onFallback,
   });
 
   // Reused across blocks so its large hash/chain tables are allocated once.
@@ -89,6 +95,7 @@ class CompressedBlockEncoder {
       lastValidationError = 'Compressed block encoding failed: $e';
       lastValidationStack = st.toString();
       if (validate) rethrow;
+      onFallback?.call(e, st);
       return Uint8List(0);
     }
   }

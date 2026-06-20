@@ -1,9 +1,9 @@
-import 'dart:async';
 import 'dart:typed_data';
 
 import '../compression_stream_codec.dart';
 import '../util/crc32.dart';
 import '../util/incremental_decompress_transformer.dart';
+import '../util/stream_compressor.dart';
 import 'gzip_codec.dart';
 import 'gzip_frame.dart';
 import 'gzip_incremental_decoder.dart';
@@ -45,63 +45,10 @@ class GzipStreamCodec extends CompressionStreamCodec {
   @override
   Stream<Uint8List> compress(final Stream<Uint8List> input) {
     // Stateful single-member compression: one GZIP header, one DEFLATE stream
-    // whose matches span chunk boundaries (history is preserved), and one
-    // trailer with the streamed CRC32 + ISIZE. More standard and better-
-    // compressing than the previous member-per-chunk output.
-    final controller = StreamController<Uint8List>();
-    final encoder = StreamingDeflateEncoder(level: level);
-    var crc = 0xFFFFFFFF;
-    var isize = 0;
-    var headerWritten = false;
-    late StreamSubscription<Uint8List> subscription;
-
-    void writeHeaderIfNeeded() {
-      if (headerWritten) return;
-      controller.add(_header());
-      headerWritten = true;
-    }
-
-    subscription = input.listen(
-      (chunk) {
-        writeHeaderIfNeeded();
-        crc = Crc32.update(chunk, crc);
-        isize = (isize + chunk.length) & 0xFFFFFFFF;
-        final out = encoder.addChunk(chunk);
-        if (out.isNotEmpty) controller.add(out);
-      },
-      onError: (Object e, StackTrace st) {
-        controller.addError(e, st);
-        subscription.cancel();
-      },
-      onDone: () {
-        writeHeaderIfNeeded();
-        final out = encoder.finish();
-        if (out.isNotEmpty) controller.add(out);
-        controller.add(_trailer(crc ^ 0xFFFFFFFF, isize));
-        controller.close();
-      },
-      cancelOnError: true,
-    );
-    controller.onCancel = subscription.cancel;
-    return controller.stream;
-  }
-
-  /// 10-byte GZIP header (no optional fields).
-  Uint8List _header() {
-    final xfl = level >= 9 ? 2 : (level <= 1 ? 4 : 0);
-    return Uint8List.fromList([
-      GzipFrame.id1, GzipFrame.id2, GzipFrame.cmDeflate, 0, // magic, CM, FLG
-      0, 0, 0, 0, // MTIME = 0
-      xfl, GzipFrame.osUnix,
-    ]);
-  }
-
-  /// 8-byte GZIP trailer: CRC32 then ISIZE, little-endian.
-  Uint8List _trailer(final int crc, final int isize) {
-    return Uint8List.fromList([
-      crc & 0xFF, (crc >> 8) & 0xFF, (crc >> 16) & 0xFF, (crc >> 24) & 0xFF,
-      isize & 0xFF, (isize >> 8) & 0xFF, (isize >> 16) & 0xFF, (isize >> 24) & 0xFF,
-    ]);
+    // whose matches span chunk boundaries (history is preserved), one trailer
+    // with the streamed CRC32 + ISIZE. Backpressure + error boundary come from
+    // the shared base.
+    return compressStream(input, _GzipStreamCompressor(level));
   }
 
   @override
@@ -115,5 +62,52 @@ class GzipStreamCodec extends CompressionStreamCodec {
         maxBufferSize: maxBufferSize,
       ),
     ).bind(input);
+  }
+}
+
+/// Wraps [StreamingDeflateEncoder] with the GZIP member framing (single header,
+/// streamed CRC32 + ISIZE trailer).
+class _GzipStreamCompressor implements StreamCompressor {
+  _GzipStreamCompressor(this._level)
+      : _deflate = StreamingDeflateEncoder(level: _level);
+
+  final int _level;
+  final StreamingDeflateEncoder _deflate;
+  int _crc = 0xFFFFFFFF;
+  int _isize = 0;
+
+  @override
+  Uint8List header() {
+    final xfl = _level >= 9 ? 2 : (_level <= 1 ? 4 : 0);
+    return Uint8List.fromList([
+      GzipFrame.id1, GzipFrame.id2, GzipFrame.cmDeflate, 0, // magic, CM, FLG
+      0, 0, 0, 0, // MTIME = 0
+      xfl, GzipFrame.osUnix,
+    ]);
+  }
+
+  @override
+  Uint8List addChunk(final Uint8List data) {
+    _crc = Crc32.update(data, _crc);
+    _isize = (_isize + data.length) & 0xFFFFFFFF;
+    return _deflate.addChunk(data);
+  }
+
+  @override
+  Uint8List finish() {
+    final tail = _deflate.finish();
+    final crc = _crc ^ 0xFFFFFFFF;
+    final out = Uint8List(tail.length + 8);
+    out.setRange(0, tail.length, tail);
+    var p = tail.length;
+    out[p++] = crc & 0xFF;
+    out[p++] = (crc >> 8) & 0xFF;
+    out[p++] = (crc >> 16) & 0xFF;
+    out[p++] = (crc >> 24) & 0xFF;
+    out[p++] = _isize & 0xFF;
+    out[p++] = (_isize >> 8) & 0xFF;
+    out[p++] = (_isize >> 16) & 0xFF;
+    out[p++] = (_isize >> 24) & 0xFF;
+    return out;
   }
 }

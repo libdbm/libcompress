@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import '../util/byte_pending.dart';
 import '../util/growable_buffer.dart';
 import '../util/incremental_decompress_transformer.dart';
 import '../util/window_buffer.dart';
@@ -391,7 +392,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   final int? maxSize;
   final int maxBufferSize;
 
-  final List<int> _pending = <int>[];
+  final BytePending _pending = BytePending();
   int _cursor = 0;
   int _total = 0; // decompressed bytes across completed frames
 
@@ -415,7 +416,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.addAll(input);
+    _pending.add(input);
     if (_avail > maxBufferSize) {
       throw ZstdFormatException(
         'Stream buffer exceeded $maxBufferSize bytes - '
@@ -552,7 +553,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     final start = _cursor + 3;
     switch (header.blockType) {
       case ZstdBlockType.raw:
-        output.addBytes(_pending, start, header.blockSize);
+        output.addBytes(_pending.bytes, start, header.blockSize);
         break;
       case ZstdBlockType.rle:
         final byte = _pending[start];
@@ -561,8 +562,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
         }
         break;
       case ZstdBlockType.compressed:
-        final block =
-            Uint8List.fromList(_pending.sublist(start, start + header.blockSize));
+        final block = _pending.slice(start, start + header.blockSize);
         _blockDecoder!.decodeBlock(
           block,
           0,
@@ -617,7 +617,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
 
   void _compact() {
     if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.removeRange(0, _cursor);
+      _pending.discard(_cursor);
       _cursor = 0;
     }
   }

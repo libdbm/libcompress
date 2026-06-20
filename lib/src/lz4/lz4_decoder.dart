@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../util/byte_pending.dart';
 import '../util/byte_sink.dart';
 import '../util/byte_utils.dart';
 import '../util/incremental_decompress_transformer.dart';
@@ -167,7 +168,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   final int? maxSize;
   final int maxBufferSize;
 
-  final List<int> _pending = <int>[];
+  final BytePending _pending = BytePending();
   int _cursor = 0;
 
   bool _inFrame = false;
@@ -193,7 +194,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.addAll(input);
+    _pending.add(input);
     if (_avail > maxBufferSize) {
       throw Lz4FormatException(
         'Stream buffer exceeded $maxBufferSize bytes - '
@@ -311,8 +312,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     if (_avail < 4 + blockSize + trailer) return false;
 
     final start = _cursor + 4;
-    final blockBytes =
-        Uint8List.fromList(_pending.sublist(start, start + blockSize));
+    final blockBytes = _pending.slice(start, start + blockSize);
     var p = start + blockSize;
     if (_blockChecksum) {
       if (_u32(p) != XXH32.hash(blockBytes)) {
@@ -371,7 +371,7 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
 
   void _compact() {
     if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.removeRange(0, _cursor);
+      _pending.discard(_cursor);
       _cursor = 0;
     }
   }

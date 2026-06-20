@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../util/stream_compressor.dart';
 import '../util/xxh64.dart';
 import 'compressed_block_encoder.dart';
 import 'zstd_common.dart';
@@ -8,21 +9,23 @@ import 'zstd_common.dart';
 /// Stateful, single-frame Zstd encoder for streaming compression.
 ///
 /// Emits one window-descriptor frame (no baked-in content size) whose blocks
-/// share a 64 KB history, so matches reference prior chunks across block
+/// share up to 128 KB of history, so matches reference prior chunks across block
 /// boundaries — better ratio than an independent frame per chunk. Each chunk is
-/// split into <=64 KB blocks; each block is matched against `history + block`
-/// (combined <= the 128 KB declared window), so absolute offsets stay within
+/// split into <=128 KB blocks; each block is matched against `history + block`
+/// (combined <= the 256 KB declared window), so absolute offsets stay within
 /// the window. The content checksum (XXH64 low 32 bits) is streamed.
-class StreamingZstdEncoder {
+class StreamingZstdEncoder implements StreamCompressor {
   StreamingZstdEncoder({this.level = 3, this.checksum = false, this.validate = false});
 
   final int level;
   final bool checksum;
   final bool validate;
 
-  // Declared window is 128 KB (combined history + block stays within it).
-  static const int _windowByte = 56; // encodes 128 KB (exponent 7, mantissa 0)
-  static const int _blockInput = 1 << 16; // 64 KB max block input
+  // Declared window is 256 KB so `history (<=128 KB) + block (<=128 KB)` stays
+  // within it; larger blocks mean fewer FSE/Huffman table builds and better
+  // ratio than 64 KB blocks.
+  static const int _windowByte = 64; // encodes 256 KB (exponent 8, mantissa 0)
+  static const int _blockInput = zstdMaxBlockSize; // 128 KB max block input
 
   late final CompressedBlockEncoder _encoder = CompressedBlockEncoder(
     searchDepth: _searchDepth(level),
@@ -34,6 +37,7 @@ class StreamingZstdEncoder {
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input
 
   /// Frame header: magic + descriptor + window descriptor (no content size).
+  @override
   Uint8List header() {
     final descriptor = checksum ? 0x04 : 0x00; // FCS=0, not single-segment
     return Uint8List.fromList([
@@ -45,6 +49,7 @@ class StreamingZstdEncoder {
 
   /// Compresses [data] (split into <=64 KB linked blocks) and returns the
   /// frame block bytes produced.
+  @override
   Uint8List addChunk(final Uint8List data) {
     final out = BytesBuilder(copy: false);
     var off = 0;
@@ -57,6 +62,7 @@ class StreamingZstdEncoder {
   }
 
   /// Writes the final (empty) block and the optional content checksum.
+  @override
   Uint8List finish() {
     final out = BytesBuilder(copy: false);
     out.add(_blockHeader(last: true, type: 0, size: 0)); // empty raw, last

@@ -1,14 +1,15 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'stream_pump.dart';
+
 /// A push-based, memory-bounded incremental decompressor.
 ///
-/// Unlike the frame-buffering [StreamDecompressTransformer] (which holds a
-/// whole compressed frame and its whole decompressed output), an
-/// [IncrementalDecoder] is fed compressed bytes via [add] as they arrive and
+/// An [IncrementalDecoder] is fed compressed bytes via [add] as they arrive and
 /// emits decompressed output via the `emit` callback as soon as a unit (block)
-/// is ready, retaining only bounded internal state. [close] flushes any tail
-/// and validates trailers.
+/// is ready, retaining only bounded internal state — rather than buffering a
+/// whole frame and inflating it at once. [close] flushes any tail and validates
+/// trailers.
 abstract class IncrementalDecoder {
   /// Consumes [input], emitting any decompressed output now available.
   void add(Uint8List input, void Function(Uint8List) emit);
@@ -27,39 +28,11 @@ class IncrementalDecompressTransformer
 
   @override
   Stream<Uint8List> bind(final Stream<Uint8List> stream) {
-    final controller = StreamController<Uint8List>();
     final decoder = create();
-    late StreamSubscription<Uint8List> subscription;
-
-    void emit(final Uint8List output) {
-      if (output.isNotEmpty) controller.add(output);
-    }
-
-    subscription = stream.listen(
-      (chunk) {
-        try {
-          decoder.add(chunk, emit);
-        } catch (e, st) {
-          controller.addError(e, st);
-          subscription.cancel();
-        }
-      },
-      onError: (Object e, StackTrace st) {
-        controller.addError(e, st);
-        subscription.cancel();
-      },
-      onDone: () {
-        try {
-          decoder.close(emit);
-        } catch (e, st) {
-          controller.addError(e, st);
-        }
-        controller.close();
-      },
-      cancelOnError: true,
+    return pumpBytes(
+      stream,
+      onData: decoder.add,
+      onDone: decoder.close,
     );
-
-    controller.onCancel = subscription.cancel;
-    return controller.stream;
   }
 }

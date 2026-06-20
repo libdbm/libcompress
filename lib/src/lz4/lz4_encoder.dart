@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../util/byte_utils.dart';
 import '../util/lz77_common.dart';
+import '../util/stream_compressor.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
 
@@ -313,7 +314,7 @@ class Lz4Encoder {
 /// so each block's matches can reference the previous 64 KB of output across
 /// chunk boundaries — better ratio than an independent frame per chunk. Carries
 /// the last 64 KB as a window; peak input memory is ~64 KB plus one block.
-class StreamingLz4Encoder {
+class StreamingLz4Encoder implements StreamCompressor {
   StreamingLz4Encoder({
     this.level = 1,
     this.contentChecksum = true,
@@ -329,6 +330,7 @@ class StreamingLz4Encoder {
 
   /// The 7-byte LZ4 frame header (magic + FLG/BD + header checksum), with the
   /// independent-blocks flag cleared (blocks are linked).
+  @override
   Uint8List header() {
     var flag = 0x40; // version 01; bit 0x20 (independent blocks) cleared
     if (contentChecksum) flag |= 0x04;
@@ -343,6 +345,7 @@ class StreamingLz4Encoder {
 
   /// Compresses [data] (split into <=blockSize linked blocks) and returns the
   /// frame block bytes produced.
+  @override
   Uint8List addChunk(final Uint8List data) {
     final out = BytesBuilder(copy: false);
     var off = 0;
@@ -355,6 +358,7 @@ class StreamingLz4Encoder {
   }
 
   /// Writes the end mark and (optional) content checksum.
+  @override
   Uint8List finish() {
     final out = BytesBuilder(copy: false);
     out.add(_u32le(0)); // end mark
