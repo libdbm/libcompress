@@ -77,8 +77,14 @@ class CompressedBlockEncoder {
       lastValidationError = null;
 
       return output;
-    } catch (_) {
-      // Fall back to raw block when compressed encoding fails
+    } catch (e, st) {
+      // Compressed encoding failed unexpectedly. Fall back to a raw block so
+      // the stream stays valid, but do not hide the failure: record it (so the
+      // silent ratio collapse is at least inspectable) and surface it loudly
+      // when validation is enabled.
+      lastValidationError = 'Compressed block encoding failed: $e';
+      lastValidationStack = st.toString();
+      if (validate) rethrow;
       return Uint8List(0);
     }
   }
