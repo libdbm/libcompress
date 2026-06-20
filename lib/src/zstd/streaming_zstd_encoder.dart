@@ -23,7 +23,7 @@ class StreamingZstdEncoder implements StreamCompressor {
 
   // Declared window is 256 KB so `history (<=128 KB) + block (<=128 KB)` stays
   // within it; larger blocks mean fewer FSE/Huffman table builds and better
-  // ratio than 64 KB blocks.
+  // ratio than smaller blocks.
   static const int _windowByte = 64; // encodes 256 KB (exponent 8, mantissa 0)
   static const int _blockInput = zstdMaxBlockSize; // 128 KB max block input
 
@@ -33,7 +33,7 @@ class StreamingZstdEncoder implements StreamCompressor {
     validate: validate,
   );
 
-  Uint8List _history = Uint8List(0); // last <=64 KB of input (match window)
+  Uint8List _history = Uint8List(0); // last <=128 KB of input (match window)
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input
 
   /// Frame header: magic + descriptor + window descriptor (no content size).
@@ -47,7 +47,7 @@ class StreamingZstdEncoder implements StreamCompressor {
     ]);
   }
 
-  /// Compresses [data] (split into <=64 KB linked blocks) and returns the
+  /// Compresses [data] (split into <=128 KB linked blocks) and returns the
   /// frame block bytes produced.
   @override
   Uint8List addChunk(final Uint8List data) {
@@ -84,7 +84,7 @@ class StreamingZstdEncoder implements StreamCompressor {
       out.add(_blockHeader(last: false, type: 0, size: piece.length));
       out.add(piece);
     }
-    // Retain the last 64 KB as the window for the next block's matches.
+    // Retain the last 128 KB as the window for the next block's matches.
     _history = _tail(combined, _blockInput);
     return out.takeBytes();
   }

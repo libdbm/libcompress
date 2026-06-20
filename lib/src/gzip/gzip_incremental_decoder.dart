@@ -118,6 +118,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       throw GzipFormatException('Unsupported compression method: ${_pending[p + 2]}');
     }
     final flags = _pending[p + 3];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+    }
     p += 10; // magic(2) + cm(1) + flg(1) + mtime(4) + xfl(1) + os(1)
 
     if ((flags & GzipFrame.fextra) != 0) {

@@ -53,6 +53,9 @@ class Lz4Decoder {
     final contentChecksumFlag = (flag & 0x04) != 0;
     final dictIdFlag = (flag & 0x01) != 0;
     final bd = reader.readByte();
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
     final blockMaxSizeCode = (bd >> 4) & 0x07;
     final blockMaxSize = blockSizeFromCode(blockMaxSizeCode);
     // Both independent and linked (dependent) blocks decode correctly: a single
@@ -260,6 +263,9 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
     }
     final bd = _pending[base + 5];
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
     final contentSizeFlag = (flag & 0x08) != 0;
     final dictIdFlag = (flag & 0x01) != 0;
     final needed = 6 + (contentSizeFlag ? 8 : 0) + (dictIdFlag ? 4 : 0) + 1;

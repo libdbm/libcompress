@@ -180,6 +180,9 @@ class GzipFrame {
 
     // Read flags
     final flags = data[offset++];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+    }
 
     // Skip modification time (4 bytes)
     offset += 4;

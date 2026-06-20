@@ -150,11 +150,32 @@ void main() {
       expect(out, orderedEquals(payload));
     });
 
+    test('LZ4 verified emits nothing when the content checksum is corrupted',
+        () async {
+      final comp = Uint8List.fromList(Lz4Codec().compress(payload));
+      comp[comp.length - 1] ^= 0xFF; // flip a content-checksum byte
+      final (out, err) = await decodeCollect(Lz4StreamCodec(verified: true), comp);
+      expect(err, isA<CompressionFormatException>());
+      expect(out, isEmpty);
+    });
+
     test('LZ4 verified round-trips valid data', () async {
       final comp = Lz4Codec().compress(payload);
       final (out, err) = await decodeCollect(Lz4StreamCodec(verified: true), comp);
       expect(err, isNull);
       expect(out, orderedEquals(payload));
+    });
+  });
+
+  group('Block decoder size limits', () {
+    final payload = _bytes(List.generate(50000, (i) => (i * 13 + 5) % 256));
+
+    test('LZ4 block decoder enforces maxDecompressedSize', () {
+      final comp = Lz4Codec().compress(payload);
+      expect(
+        () => Lz4Codec(maxDecompressedSize: 1000).decompress(comp),
+        throwsA(isA<CompressionFormatException>()),
+      );
     });
   });
 }

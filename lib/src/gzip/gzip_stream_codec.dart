@@ -29,9 +29,6 @@ class GzipStreamCodec extends CompressionStreamCodec {
   /// Maximum buffer size for compressed data before rejecting
   final int maxBufferSize;
 
-  /// Chunk size for buffering input during compression
-  final int chunkSize;
-
   /// When true, each member's decompressed output is withheld until its CRC32
   /// and ISIZE trailer validate, then released — so a consumer never receives
   /// bytes from a member that later fails integrity (at the cost of buffering
@@ -47,7 +44,6 @@ class GzipStreamCodec extends CompressionStreamCodec {
     this.level = 6,
     this.maxSize = gzipDefaultMaxDecompressedSize,
     this.maxBufferSize = defaultMaxBufferSize,
-    this.chunkSize = 1024 * 1024, // 1MB default
     this.verified = false,
   });
 
