@@ -1,3 +1,4 @@
+import '../exceptions.dart';
 import '../util/huffman.dart';
 
 /// Huffman decoder using lookup tables
@@ -17,8 +18,16 @@ class HuffmanDecoder {
   }
 }
 
-/// Builds a Huffman decoder from code lengths
+/// Builds a Huffman decoder from code lengths.
+///
+/// Rejects an *over-subscribed* length set (RFC 1951 §3.2.2) — one whose codes
+/// would overflow the code space and alias two symbols onto one code, silently
+/// mis-decoding. Incomplete sets are permitted (the RFC fixed distance table is
+/// itself incomplete); an unused/unreachable code surfaces as a decode-time
+/// "Invalid Huffman code" error rather than silent corruption.
 HuffmanDecoder buildDecoder(List<int> lengths) {
+  _validateCodeLengths(lengths);
+
   // Generate canonical codes
   final codes = HuffmanTreeBuilder.generateCanonicalCodes(lengths);
 
@@ -32,6 +41,30 @@ HuffmanDecoder buildDecoder(List<int> lengths) {
   }
 
   return HuffmanDecoder(codeToSymbol);
+}
+
+void _validateCodeLengths(List<int> lengths) {
+  final counts = List<int>.filled(16, 0);
+  var numSymbols = 0;
+  for (final len in lengths) {
+    if (len < 0 || len > 15) {
+      throw DeflateFormatException('Invalid Huffman code length: $len');
+    }
+    if (len > 0) {
+      counts[len]++;
+      numSymbols++;
+    }
+  }
+  if (numSymbols == 0) return; // empty table (e.g. no distance codes) is allowed
+
+  // Kraft inequality: the codes must not overflow the 2^len code space.
+  var left = 1;
+  for (var len = 1; len <= 15; len++) {
+    left = (left << 1) - counts[len];
+    if (left < 0) {
+      throw DeflateFormatException('Over-subscribed Huffman code');
+    }
+  }
 }
 
 /// Shared fixed-Huffman decoders.

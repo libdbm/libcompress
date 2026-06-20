@@ -23,6 +23,33 @@ class ByteUtils {
     return (low + (high & 0xFFFF) * 0x10000) % 0x100000000;
   }
 
+  /// Reads a [count]-byte little-endian unsigned integer using multiplication,
+  /// so it is exact and non-negative on both the VM and dart2js (unlike
+  /// `byte << 56`, which truncates/signs on JS).
+  ///
+  /// Sizes that need more than 6 bytes (>= 2^48, ~281 TB) cannot be a
+  /// legitimate decompressed-size field and exceed any sane limit, so the top
+  /// bytes are required to be zero — otherwise a [FormatException] is thrown
+  /// (rather than silently producing a wrong or negative value that could slip
+  /// past a maxSize check).
+  static int readUintLE(Uint8List data, int offset, int count) {
+    var value = 0;
+    var multiplier = 1;
+    final exact = count < 6 ? count : 6;
+    for (var i = 0; i < exact; i++) {
+      value += data[offset + i] * multiplier;
+      multiplier *= 256;
+    }
+    for (var i = exact; i < count; i++) {
+      if (data[offset + i] != 0) {
+        throw const FormatException(
+          'Multi-byte size field exceeds the supported range (2^48)',
+        );
+      }
+    }
+    return value;
+  }
+
   /// Reads a 32-bit unsigned integer in little-endian byte order
   ///
   /// Uses multiplication instead of bit shifts to avoid signed integer issues

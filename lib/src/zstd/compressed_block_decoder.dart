@@ -600,8 +600,14 @@ class CompressedBlockDecoder {
       );
     }
 
-    // First 4 bits encode the accuracy log (value 0-6 for weights, +5 gives 5-11)
+    // First 4 bits encode the accuracy log. The Huffman-weight FSE table is
+    // capped at accuracy log 6 (RFC 8878); reject larger before allocating.
     final accuracyLog = (data[offset] & 0x0F) + 5;
+    if (accuracyLog > 6) {
+      throw ZstdFormatException(
+        'Huffman weight FSE accuracy log $accuracyLog exceeds maximum 6',
+      );
+    }
 
     // Decode the FSE distribution (normalized counters) - uses forward reading
     // Start from the same byte but skip the first 4 bits (accuracy log)
@@ -979,7 +985,11 @@ class CompressedBlockDecoder {
     int maxSymbolValue,
     SequenceComponent component,
   ) {
-    final countsResult = _readNormalizedCounts(data, offset, blockEnd, maxSymbolValue);
+    // RFC 8878 caps the FSE accuracy log per component (LL/ML 9, OF 8); reject
+    // anything larger before a 1<<tableLog table is allocated.
+    final maxTableLog = component == SequenceComponent.offset ? 8 : 9;
+    final countsResult =
+        _readNormalizedCounts(data, offset, blockEnd, maxSymbolValue, maxTableLog);
     final decoder = FseDecoder();
     decoder.buildTable(countsResult.counts, countsResult.tableLog);
     final table = SequenceCodingTable.fromFse(
@@ -995,10 +1005,16 @@ class CompressedBlockDecoder {
     int offset,
     int blockEnd,
     int maxSymbolValue,
+    int maxTableLog,
   ) {
     final reader = _ForwardBitReader(data, offset, blockEnd);
 
     final tableLog = reader.readBits(4) + 5; // FSE_MIN_TABLELOG
+    if (tableLog > maxTableLog) {
+      throw ZstdFormatException(
+        'FSE accuracy log $tableLog exceeds maximum $maxTableLog',
+      );
+    }
     var remaining = (1 << tableLog) + 1;
     var threshold = 1 << tableLog;
     var nbBits = tableLog + 1;

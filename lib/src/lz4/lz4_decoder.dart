@@ -63,10 +63,7 @@ class Lz4Decoder {
     if (contentSizeFlag) {
       final sizeBytes = reader.readBytes(8);
       headerBytes.addAll(sizeBytes);
-      var contentSize = 0;
-      for (var i = 0; i < 8; i++) {
-        contentSize |= sizeBytes[i] << (8 * i);
-      }
+      final contentSize = ByteUtils.readUintLE(sizeBytes, 0, 8);
       expectedContentSize = contentSize;
 
       // Validate declared content size against limit early
@@ -272,12 +269,10 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     var p = base + 6;
     int? expectedContentSize;
     if (contentSizeFlag) {
-      var size = 0;
       for (var i = 0; i < 8; i++) {
-        final b = _pending[p + i];
-        headerBytes.add(b);
-        size |= b << (8 * i);
+        headerBytes.add(_pending[p + i]);
       }
+      final size = ByteUtils.readUintLE(_pending.bytes, p, 8);
       p += 8;
       expectedContentSize = size;
       final budget = _limit.remaining;

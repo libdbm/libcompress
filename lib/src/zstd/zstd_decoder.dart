@@ -323,10 +323,8 @@ class ZstdDecoder {
         if (pos + sizeBytes > data.length) {
           throw ZstdFormatException('Missing frame content size');
         }
-        var size = 0;
-        for (var i = 0; i < sizeBytes; i++) {
-          size |= data[pos++] << (i * 8);
-        }
+        var size = ByteUtils.readUintLE(data, pos, sizeBytes);
+        pos += sizeBytes;
         // Apply 256 offset for FCS flag 1 (2-byte encoding)
         // This encoding covers values 256-65791
         if (descriptor.contentSizeFlag == 1) {
@@ -516,10 +514,8 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     }
     int? contentSize;
     if (fcsBytes > 0) {
-      var size = 0;
-      for (var i = 0; i < fcsBytes; i++) {
-        size |= _pending[p++] << (i * 8);
-      }
+      var size = ByteUtils.readUintLE(_pending.bytes, p, fcsBytes);
+      p += fcsBytes;
       if (descriptor.contentSizeFlag == 1) size += 256;
       contentSize = size;
     }
