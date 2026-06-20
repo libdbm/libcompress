@@ -5,9 +5,19 @@ import 'dart:typed_data';
 /// Bits are written from a value's LSB to MSB, and packed into bytes
 /// starting from the LSB of each byte.
 class BitStreamWriter {
-  final _builder = BytesBuilder();
+  Uint8List _bytes = Uint8List(256);
+  int _length = 0;
   int _bitBuffer = 0;
   int _bitCount = 0;
+
+  void _push(final int byte) {
+    if (_length == _bytes.length) {
+      final grown = Uint8List(_bytes.length * 2);
+      grown.setRange(0, _length, _bytes);
+      _bytes = grown;
+    }
+    _bytes[_length++] = byte;
+  }
 
   /// Writes a value with a specific number of bits to the stream.
   void writeBits(int value, int bitCount) {
@@ -18,7 +28,7 @@ class BitStreamWriter {
     _bitCount += bitCount;
 
     while (_bitCount >= 8) {
-      _builder.addByte(_bitBuffer & 0xFF);
+      _push(_bitBuffer & 0xFF);
       _bitBuffer >>= 8;
       _bitCount -= 8;
     }
@@ -28,7 +38,7 @@ class BitStreamWriter {
   /// writer to the next byte boundary.
   void flushToByte() {
     if (_bitCount > 0) {
-      _builder.addByte(_bitBuffer & 0xFF);
+      _push(_bitBuffer & 0xFF);
       _bitBuffer = 0;
       _bitCount = 0;
     }
@@ -37,18 +47,20 @@ class BitStreamWriter {
   /// Returns and clears the complete bytes written so far, preserving any
   /// pending sub-byte bits. Lets a streaming writer drain finished bytes
   /// between bit-packed blocks without disturbing the in-progress byte.
-  Uint8List takeBytes() => _builder.takeBytes();
+  Uint8List takeBytes() {
+    final result = Uint8List.fromList(Uint8List.sublistView(_bytes, 0, _length));
+    _length = 0;
+    return result;
+  }
 
   /// Returns the written bits as a byte list, flushing any remaining bits.
   Uint8List toBytes() {
-    if (_bitCount == 0) {
-      return _builder.toBytes();
+    if (_bitCount != 0) {
+      _push(_bitBuffer & 0xFF);
+      _bitBuffer = 0;
+      _bitCount = 0;
     }
-    // Add pending bits and return
-    _builder.addByte(_bitBuffer & 0xFF);
-    final result = _builder.toBytes();
-    // Note: This modifies _builder state, so toBytes() is not idempotent
-    return result;
+    return Uint8List.fromList(Uint8List.sublistView(_bytes, 0, _length));
   }
 }
 
