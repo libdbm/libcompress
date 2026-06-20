@@ -167,6 +167,32 @@ void main() {
     });
   });
 
+  group('Format strictness', () {
+    test('GZIP rejects reserved FLG bits', () {
+      final data = _bytes([
+        0x1f, 0x8b, 0x08, 0xE0, // magic, CM, FLG with reserved bits set
+        0, 0, 0, 0, 0, 3, // mtime, xfl, os
+        0x03, 0x00,
+      ]);
+      expect(() => GzipCodec().decompress(data),
+          throwsA(isA<CompressionFormatException>()));
+      expect(_decodeStream(GzipStreamCodec(), data),
+          throwsA(isA<CompressionFormatException>()));
+    });
+
+    test('Snappy rejects a framed stream without the leading identifier', () {
+      // A lone padding chunk (type 0xfe), no stream identifier.
+      final noId = _bytes([0xfe, 0x01, 0x00, 0x00, 0x00]);
+      expect(() => SnappyCodec(framing: true).decompress(noId),
+          throwsA(isA<CompressionFormatException>()));
+      expect(_decodeStream(SnappyStreamCodec(), noId),
+          throwsA(isA<CompressionFormatException>()));
+      // Empty framed input is likewise not a valid stream.
+      expect(_decodeStream(SnappyStreamCodec(), Uint8List(0)),
+          throwsA(isA<CompressionFormatException>()));
+    });
+  });
+
   group('Block decoder size limits', () {
     final payload = _bytes(List.generate(50000, (i) => (i * 13 + 5) % 256));
 

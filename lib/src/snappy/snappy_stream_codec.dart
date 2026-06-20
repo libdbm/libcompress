@@ -110,6 +110,9 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
     if (_avail != 0) {
       throw SnappyFormatException('Incomplete Snappy chunk at end of stream');
     }
+    if (!_decoder.seenIdentifier) {
+      throw SnappyFormatException('Stream missing required stream identifier');
+    }
   }
 }
 

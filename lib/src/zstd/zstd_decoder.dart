@@ -168,12 +168,11 @@ class ZstdDecoder {
 
     var lastBlock = false;
     while (!lastBlock) {
+      // A well-formed frame always has at least one block (an empty frame is a
+      // single raw last-block of size 0), so a frame body that ends before a
+      // block header is malformed — matching the streaming decoder, which
+      // requires a real last block.
       if (offset + 3 > data.length) {
-        final noBlockData = offset == data.length && output.length == 0;
-        if (noBlockData) {
-          lastBlock = true;
-          break;
-        }
         throw ZstdFormatException(
           'Unexpected end of frame while reading block header',
         );
