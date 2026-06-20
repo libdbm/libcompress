@@ -42,6 +42,9 @@ class ZstdEncoder {
     if (level < 1 || level > 22) {
       throw ArgumentError('Level must be between 1 and 22, got $level');
     }
+    if (blockSize <= 0) {
+      throw ArgumentError('Block size must be positive, got $blockSize');
+    }
     if (blockSize > zstdMaxBlockSize) {
       throw ArgumentError('Block size cannot exceed $zstdMaxBlockSize');
     }
@@ -83,6 +86,14 @@ class ZstdEncoder {
     if (input.isEmpty) {
       pos = _writeBlockHeader(output, pos, true, ZstdBlockType.raw, 0);
     } else {
+      // One encoder reused across blocks (its match finder owns large
+      // hash/chain tables that should be allocated once, not per block).
+      final compressedEncoder = CompressedBlockEncoder(
+        searchDepth: searchDepth,
+        minMatch: minMatchLen,
+        validate: validate,
+      );
+
       // Compress data in blocks
       var offset = 0;
       while (offset < input.length) {
@@ -99,10 +110,6 @@ class ZstdEncoder {
         } else {
           // Try compressed block encoding with FSE sequences
           // Falls back to raw if compression doesn't help
-          final compressedEncoder = CompressedBlockEncoder(
-            searchDepth: searchDepth,
-            validate: validate,
-          );
           final compressed = compressedEncoder.encodeBlock(chunk);
           if (compressed.length < chunk.length && compressed.isNotEmpty) {
             pos = _writeCompressedBlock(output, pos, compressed, isLastBlock);
@@ -118,7 +125,7 @@ class ZstdEncoder {
     // Write checksum if enabled
     if (enableChecksum) {
       // Per RFC 8878: content checksum is low 32 bits of XXH64
-      final checksum = XXH64.hash(input) & 0xFFFFFFFF;
+      final checksum = XXH64.hashLow32(input);
       ByteUtils.writeUint32LEAt(output, pos, checksum);
       pos += 4;
     }

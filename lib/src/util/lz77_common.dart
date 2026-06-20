@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'byte_utils.dart';
+
 /// Common utilities for LZ77-based compression algorithms
 ///
 /// LZ77 is a sliding window compression algorithm used by GZIP, LZ4, Snappy,
@@ -51,7 +53,7 @@ class LZ77Hash {
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return ((value * lz4Multiplier) >> shift) & 0xFFFF;
+    return (_mul32(value, lz4Multiplier) >> shift) & 0xFFFF;
   }
 
   /// Computes Snappy-style hash of 4 bytes
@@ -63,7 +65,7 @@ class LZ77Hash {
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return ((value * snappyMultiplier) >> 16) & 0x3FFF;
+    return (_mul32(value, snappyMultiplier) >> 16) & 0x3FFF;
   }
 
   /// Computes GZIP/DEFLATE-style hash of 3 bytes
@@ -77,6 +79,8 @@ class LZ77Hash {
     return hash & ((1 << tableSizeBits) - 1);
   }
 }
+
+int _mul32(int left, int right) => ByteUtils.mul32(left, right);
 
 /// Constants for LZ77-based algorithms
 class LZ77Constants {

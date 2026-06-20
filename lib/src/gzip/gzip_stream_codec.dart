@@ -1,13 +1,13 @@
 import 'dart:typed_data';
 
 import '../compression_stream_codec.dart';
-import '../util/bit_stream.dart';
-import '../util/stream_compress_transformer.dart';
-import '../util/stream_decompress_transformer.dart';
-import 'deflate_common.dart';
+import '../util/crc32.dart';
+import '../util/incremental_decompress_transformer.dart';
+import '../util/stream_compressor.dart';
 import 'gzip_codec.dart';
 import 'gzip_frame.dart';
-import 'huffman_tables.dart';
+import 'gzip_incremental_decoder.dart';
+import 'streaming_deflate_encoder.dart';
 
 /// Default maximum buffer size for stream decoders (64MB)
 const int defaultMaxBufferSize = 64 * 1024 * 1024;
@@ -44,274 +44,70 @@ class GzipStreamCodec extends CompressionStreamCodec {
 
   @override
   Stream<Uint8List> compress(final Stream<Uint8List> input) {
-    return StreamCompressTransformer(
-      chunkSize: chunkSize,
-      compress: (data) => GzipFrame.compress(data, level: level),
-    ).bind(input);
+    // Stateful single-member compression: one GZIP header, one DEFLATE stream
+    // whose matches span chunk boundaries (history is preserved), one trailer
+    // with the streamed CRC32 + ISIZE. Backpressure + error boundary come from
+    // the shared base.
+    return compressStream(input, _GzipStreamCompressor(level));
   }
 
   @override
   Stream<Uint8List> decompress(final Stream<Uint8List> input) {
-    return _GzipDecompressTransformer(
-      maxSize: maxSize,
-      maxBufferSize: maxBufferSize,
+    // Incremental, memory-bounded: decodes the DEFLATE stream as bytes arrive
+    // and emits output retaining only a 32 KB window, instead of buffering the
+    // whole member and inflating it at once.
+    return IncrementalDecompressTransformer(
+      () => GzipIncrementalDecoder(
+        maxSize: maxSize,
+        maxBufferSize: maxBufferSize,
+      ),
     ).bind(input);
   }
 }
 
-/// Transformer for GZIP decompression
-class _GzipDecompressTransformer
-    extends StreamDecompressTransformer<GzipFormatException> {
-  _GzipDecompressTransformer({
-    super.maxSize,
-    required super.maxBufferSize,
-  });
+/// Wraps [StreamingDeflateEncoder] with the GZIP member framing (single header,
+/// streamed CRC32 + ISIZE trailer).
+class _GzipStreamCompressor implements StreamCompressor {
+  _GzipStreamCompressor(this._level)
+      : _deflate = StreamingDeflateEncoder(level: _level);
+
+  final int _level;
+  final StreamingDeflateEncoder _deflate;
+  int _crc = 0xFFFFFFFF;
+  int _isize = 0;
 
   @override
-  int get minFrameSize => 10;
-
-  @override
-  bool isValidStart(final List<int> buffer, final int offset) =>
-      buffer[offset] == GzipFrame.id1 && buffer[offset + 1] == GzipFrame.id2;
-
-  @override
-  FrameParseResult? tryParseFrame(final List<int> buffer, final int offset) =>
-      _tryParseMember(buffer, offset);
-
-  @override
-  Uint8List decompress(final Uint8List frame) =>
-      GzipFrame.decompress(frame, maxSize: maxSize);
-
-  @override
-  GzipFormatException createBufferError() => GzipFormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
-        'frame too large or malformed',
-      );
-
-  @override
-  GzipFormatException createMagicError(final List<int> buffer, final int offset) =>
-      GzipFormatException('Invalid GZIP magic number at offset $offset');
-
-  @override
-  GzipFormatException createIncompleteError() =>
-      GzipFormatException('Incomplete GZIP member at end of stream');
-
-  /// Try to parse a complete GZIP member at offset, return null if incomplete
-  ///
-  /// Uses efficient boundary detection by parsing DEFLATE block headers
-  /// to find where the stream ends, rather than re-decompressing.
-  FrameParseResult? _tryParseMember(final List<int> buffer, final int offset) {
-    if (buffer.length - offset < 10) return null;
-
-    var pos = offset;
-
-    // Magic
-    if (buffer[pos++] != GzipFrame.id1 || buffer[pos++] != GzipFrame.id2) {
-      return null;
-    }
-
-    // Compression method
-    pos++;
-
-    // Flags
-    final flags = buffer[pos++];
-
-    // Skip MTIME, XFL, OS
-    pos += 6;
-
-    // FEXTRA
-    if ((flags & GzipFrame.fextra) != 0) {
-      if (buffer.length < pos + 2) return null;
-      final xlen = buffer[pos] | (buffer[pos + 1] << 8);
-      pos += 2;
-      if (buffer.length < pos + xlen) return null;
-      pos += xlen;
-    }
-
-    // FNAME (null-terminated)
-    if ((flags & GzipFrame.fname) != 0) {
-      while (pos < buffer.length && buffer[pos] != 0) {
-        pos++;
-      }
-      if (pos >= buffer.length) return null;
-      pos++; // Skip null terminator
-    }
-
-    // FCOMMENT (null-terminated)
-    if ((flags & GzipFrame.fcomment) != 0) {
-      while (pos < buffer.length && buffer[pos] != 0) {
-        pos++;
-      }
-      if (pos >= buffer.length) return null;
-      pos++; // Skip null terminator
-    }
-
-    // FHCRC
-    if ((flags & GzipFrame.fhcrc) != 0) {
-      if (buffer.length < pos + 2) return null;
-      pos += 2;
-    }
-
-    // Find DEFLATE stream end by parsing block headers
-    final deflateStart = pos;
-    final end = _findDeflateEnd(buffer, deflateStart);
-    if (end == null) return null;
-
-    // Need 8 more bytes for trailer (CRC32 + ISIZE)
-    final memberEnd = end + 8;
-    if (buffer.length < memberEnd) return null;
-
-    final length = memberEnd - offset;
-    final frame = Uint8List.fromList(buffer.sublist(offset, memberEnd));
-    return FrameParseResult(frame, length);
+  Uint8List header() {
+    final xfl = _level >= 9 ? 2 : (_level <= 1 ? 4 : 0);
+    return Uint8List.fromList([
+      GzipFrame.id1, GzipFrame.id2, GzipFrame.cmDeflate, 0, // magic, CM, FLG
+      0, 0, 0, 0, // MTIME = 0
+      xfl, GzipFrame.osUnix,
+    ]);
   }
 
-  /// Find the end of a DEFLATE stream by parsing block headers
-  ///
-  /// Returns byte position after the final block, or null if incomplete.
-  /// This parses block structure without fully decompressing.
-  int? _findDeflateEnd(final List<int> buffer, final int start) {
-    try {
-      final data = Uint8List.fromList(buffer.sublist(start));
-      final input = BitStreamReader(data);
-
-      var final_ = false;
-      while (!final_) {
-        // Need at least 3 bits for block header
-        if (input.isEndOfStream) return null;
-
-        try {
-          final_ = input.readBits(1) == 1;
-          final type = input.readBits(2);
-
-          switch (type) {
-            case 0: // Stored block
-              input.flushToByte();
-              final len = input.readBits(16);
-              input.readBits(16); // NLEN
-              // Skip literal data
-              for (var i = 0; i < len; i++) {
-                input.readBits(8);
-              }
-              break;
-
-            case 1: // Fixed Huffman
-              _skipHuffmanBlock(input, true);
-              break;
-
-            case 2: // Dynamic Huffman
-              _skipHuffmanBlock(input, false);
-              break;
-
-            default:
-              return null; // Invalid block type
-          }
-        } catch (_) {
-          return null; // Incomplete data
-        }
-      }
-
-      // Align to byte boundary after final block
-      input.flushToByte();
-
-      // Return byte position after final block
-      return start + input.bytePosition;
-    } catch (_) {
-      return null;
-    }
+  @override
+  Uint8List addChunk(final Uint8List data) {
+    _crc = Crc32.update(data, _crc);
+    _isize = (_isize + data.length) & 0xFFFFFFFF;
+    return _deflate.addChunk(data);
   }
 
-  /// Skip over a Huffman-encoded block without fully decoding
-  void _skipHuffmanBlock(final BitStreamReader input, final bool fixed) {
-    HuffmanDecoder literalDecoder;
-    HuffmanDecoder distanceDecoder;
-
-    if (fixed) {
-      literalDecoder = buildFixedLiteralDecoder();
-      distanceDecoder = buildFixedDistanceDecoder();
-    } else {
-      // Parse dynamic tables
-      final hlit = input.readBits(5) + 257;
-      final hdist = input.readBits(5) + 1;
-      final hclen = input.readBits(4) + 4;
-
-      // Read code length code lengths
-      final clLengths = List<int>.filled(19, 0);
-      for (var i = 0; i < hclen; i++) {
-        clLengths[codeLengthOrder[i]] = input.readBits(3);
-      }
-
-      final clDecoder = buildDecoder(clLengths);
-
-      // Decode literal/length and distance code lengths
-      final codeLengths = <int>[];
-      while (codeLengths.length < hlit + hdist) {
-        final symbol = _decodeSymbol(input, clDecoder);
-
-        if (symbol < 16) {
-          codeLengths.add(symbol);
-        } else if (symbol == 16) {
-          if (codeLengths.isEmpty) throw FormatException('Invalid repeat');
-          final previous = codeLengths.last;
-          final repeat = input.readBits(2) + 3;
-          for (var i = 0; i < repeat; i++) {
-            codeLengths.add(previous);
-          }
-        } else if (symbol == 17) {
-          final repeat = input.readBits(3) + 3;
-          for (var i = 0; i < repeat; i++) {
-            codeLengths.add(0);
-          }
-        } else if (symbol == 18) {
-          final repeat = input.readBits(7) + 11;
-          for (var i = 0; i < repeat; i++) {
-            codeLengths.add(0);
-          }
-        }
-      }
-
-      literalDecoder = buildDecoder(codeLengths.sublist(0, hlit));
-      distanceDecoder = buildDecoder(codeLengths.sublist(hlit, hlit + hdist));
-    }
-
-    // Decode symbols until end-of-block
-    while (true) {
-      final symbol = _decodeSymbol(input, literalDecoder);
-
-      if (symbol < 256) {
-        // Literal - just skip
-        continue;
-      } else if (symbol == endBlock) {
-        break;
-      } else if (symbol <= 285) {
-        // Length code - read extra bits
-        final code = symbol - 257;
-        final extra = lengthExtraBits[code];
-        if (extra > 0) input.readBits(extra);
-
-        // Distance code
-        final distCode = _decodeSymbol(input, distanceDecoder);
-        if (distCode < 30) {
-          final distExtra = distanceExtraBits[distCode];
-          if (distExtra > 0) input.readBits(distExtra);
-        }
-      }
-    }
-  }
-
-  int _decodeSymbol(final BitStreamReader input, final HuffmanDecoder decoder) {
-    var code = 0;
-    var bits = 0;
-
-    while (bits < 15) {
-      final bit = input.readBits(1);
-      code = (code << 1) | bit;
-      bits++;
-
-      final symbol = decoder.decode(code, bits);
-      if (symbol != null) return symbol;
-    }
-
-    throw FormatException('Invalid Huffman code');
+  @override
+  Uint8List finish() {
+    final tail = _deflate.finish();
+    final crc = _crc ^ 0xFFFFFFFF;
+    final out = Uint8List(tail.length + 8);
+    out.setRange(0, tail.length, tail);
+    var p = tail.length;
+    out[p++] = crc & 0xFF;
+    out[p++] = (crc >> 8) & 0xFF;
+    out[p++] = (crc >> 16) & 0xFF;
+    out[p++] = (crc >> 24) & 0xFF;
+    out[p++] = _isize & 0xFF;
+    out[p++] = (_isize >> 8) & 0xFF;
+    out[p++] = (_isize >> 16) & 0xFF;
+    out[p++] = (_isize >> 24) & 0xFF;
+    return out;
   }
 }

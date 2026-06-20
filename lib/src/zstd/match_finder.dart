@@ -25,60 +25,82 @@ class MatchFinder {
   static const int _hashMask = _hashTableSize - 1;
   static const int _chainMask = 0xFFFF; // 64K chain table
   static const int _chainSize = 1 << 16;
-  static const int _minMatch = 3; // Zstd minimum match
   static const int _maxOffset = 1 << 22; // ~4MB max offset for Zstd
 
   final int searchDepth;
   final int maxMatch;
 
+  /// Minimum match length to emit (level-derived; 3 or 4).
+  final int minMatch;
+
   MatchFinder({
     this.searchDepth = 32,
     this.maxMatch = 65536,
+    this.minMatch = 3,
   });
+
+  // Reused across blocks: a fresh MatchFinder per block would reallocate
+  // these ~192K entries every time. Reset (not reallocated) per findMatches.
+  late final List<int> _hashTable = List<int>.filled(_hashTableSize, -1);
+  late final List<int> _chainTable = List<int>.filled(_chainSize, -1);
 
   /// Hash function for match finding
   int _hash(final Uint8List data, final int pos) {
     if (pos + 3 >= data.length) return 0;
     final v = ByteUtils.readUint32LE(data, pos);
-    return ((v * 2654435761) >> (32 - _hashLog)) & _hashMask;
+    final product = ByteUtils.mul32(v, 2654435761);
+    return (product >> (32 - _hashLog)) & _hashMask;
   }
 
   /// Find all matches in the input data using hash chains
   ///
   /// Returns a list of matches and the trailing literals.
   /// Note: Repeat offset optimization is handled by SequenceEncoder.
-  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input) {
-    if (input.length < _minMatch) {
-      return (<ZstdMatch>[], input);
+  /// Finds matches in `input[from..]`. Positions in `[0, from)` are a history
+  /// prefix: they seed the hash so matches in the new region can reference them
+  /// (cross-chunk back-references), but no tokens are emitted for them. With
+  /// the default `from == 0` this is plain whole-buffer matching.
+  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input, {final int from = 0}) {
+    if (input.length - from < minMatch) {
+      return (<ZstdMatch>[], Uint8List.sublistView(input, from));
     }
 
     final matches = <ZstdMatch>[];
-    final hashTable = List<int>.filled(_hashTableSize, -1);
-    final chainTable = List<int>.filled(_chainSize, -1);
+    final hashTable = _hashTable..fillRange(0, _hashTableSize, -1);
+    final chainTable = _chainTable..fillRange(0, _chainSize, -1);
 
-    var pos = 0;
-    var anchor = 0;
+    // Seed the hash with the history prefix.
+    for (var i = 0; i < from; i++) {
+      _update(input, i, hashTable, chainTable);
+    }
+
+    var pos = from;
+    var anchor = from;
     final end = input.length;
-    final limit = end - _minMatch;
+    final limit = end - minMatch;
 
     while (pos <= limit) {
+      // Hash this position once and reuse it for the chain search and the
+      // table update (it was computed twice per position before).
+      final hash = _hash(input, pos);
+
       // Find best match using hash chain
       final (bestLen, bestOffset) = _findBestMatch(
         input,
         pos,
+        hash,
         hashTable,
         chainTable,
       );
 
       // Update hash table and chain
-      final hash = _hash(input, pos);
       final prev = hashTable[hash];
       if (prev >= 0 && pos - prev < _chainSize) {
         chainTable[pos & _chainMask] = prev;
       }
       hashTable[hash] = pos;
 
-      if (bestLen >= _minMatch) {
+      if (bestLen >= minMatch) {
         // Emit match
         final litLen = pos - anchor;
         matches.add(ZstdMatch(
@@ -89,12 +111,7 @@ class MatchFinder {
 
         // Update hash table for positions we're skipping
         for (var i = 1; i < bestLen && pos + i <= limit; i++) {
-          final h = _hash(input, pos + i);
-          final p = hashTable[h];
-          if (p >= 0 && (pos + i) - p < _chainSize) {
-            chainTable[(pos + i) & _chainMask] = p;
-          }
-          hashTable[h] = pos + i;
+          _update(input, pos + i, hashTable, chainTable);
         }
 
         pos += bestLen;
@@ -109,12 +126,23 @@ class MatchFinder {
     return (matches, trailing);
   }
 
+  void _update(final Uint8List input, final int pos, final List<int> hashTable,
+      final List<int> chainTable) {
+    final h = _hash(input, pos);
+    final prev = hashTable[h];
+    if (prev >= 0 && pos - prev < _chainSize) {
+      chainTable[pos & _chainMask] = prev;
+    }
+    hashTable[h] = pos;
+  }
+
   /// Find the best match at current position using hash chain
   ///
   /// Returns (matchLength, offset)
   (int, int) _findBestMatch(
     final Uint8List input,
     final int pos,
+    final int hash,
     final List<int> hashTable,
     final List<int> chainTable,
   ) {
@@ -123,7 +151,6 @@ class MatchFinder {
     final end = input.length;
 
     // Search hash chain for best match
-    final hash = _hash(input, pos);
     var candidate = hashTable[hash];
     var depth = 0;
 
@@ -188,19 +215,28 @@ class MatchFinder {
   Uint8List extractLiterals(
     final Uint8List input,
     final List<ZstdMatch> matches,
-    final Uint8List trailing,
-  ) {
-    final literals = <int>[];
-    var pos = 0;
-
+    final Uint8List trailing, {
+    final int from = 0,
+  }) {
+    var total = trailing.length;
     for (final match in matches) {
-      if (match.literalLength > 0) {
-        literals.addAll(input.sublist(pos, pos + match.literalLength));
-      }
-      pos += match.literalLength + match.length;
+      total += match.literalLength;
     }
 
-    literals.addAll(trailing);
-    return Uint8List.fromList(literals);
+    // Single typed allocation with bulk copies, rather than per-match
+    // sublist + growable addAll + a final fromList (three copies of the data).
+    final literals = Uint8List(total);
+    var src = from; // read cursor into input (history prefix is skipped)
+    var dst = 0; // write cursor into literals
+    for (final match in matches) {
+      final len = match.literalLength;
+      if (len > 0) {
+        literals.setRange(dst, dst + len, input, src);
+        dst += len;
+      }
+      src += len + match.length;
+    }
+    literals.setRange(dst, dst + trailing.length, trailing);
+    return literals;
   }
 }

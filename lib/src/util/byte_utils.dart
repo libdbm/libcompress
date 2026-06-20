@@ -10,6 +10,19 @@ class ByteUtils {
     return data[offset] | (data[offset + 1] << 8);
   }
 
+  /// Returns the low 32 bits of `left * right`, treating both as unsigned
+  /// 32-bit values, without allocating.
+  ///
+  /// A full 32x32 product is up to 2^64 and loses precision on JavaScript
+  /// (doubles are exact only below 2^53). This splits `left` into 16-bit
+  /// halves so every intermediate stays below 2^53, giving the exact result
+  /// on both native and dart2js without the cost of [BigInt].
+  static int mul32(final int left, final int right) {
+    final low = (left & 0xFFFF) * right;
+    final high = ((left >> 16) & 0xFFFF) * right;
+    return (low + (high & 0xFFFF) * 0x10000) % 0x100000000;
+  }
+
   /// Reads a 32-bit unsigned integer in little-endian byte order
   ///
   /// Uses multiplication instead of bit shifts to avoid signed integer issues

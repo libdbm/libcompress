@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 import '../util/bit_stream.dart';
+import '../util/growable_buffer.dart';
 import 'deflate_common.dart';
 import 'huffman_tables.dart';
 
@@ -32,8 +33,22 @@ class DeflateDecoder {
   /// This is useful for GZIP concatenated members where you need to know
   /// where the next member starts.
   (Uint8List, int) decompressWithPosition(Uint8List data) {
+    try {
+      return _decode(data);
+    } on DeflateFormatException {
+      rethrow;
+    } on StateError catch (e) {
+      throw DeflateFormatException('Malformed DEFLATE stream: ${e.message}');
+    } on RangeError catch (e) {
+      throw DeflateFormatException('Malformed DEFLATE stream: $e');
+    }
+  }
+
+  (Uint8List, int) _decode(Uint8List data) {
     final input = BitStreamReader(data);
-    final output = <int>[];
+    // Uint8List-backed (doubling) buffer instead of a boxed growable <int>;
+    // back-references use copyFromHistory rather than sublist allocations.
+    final output = GrowableBuffer();
 
     var isFinal = false;
 
@@ -60,11 +75,11 @@ class DeflateDecoder {
     // Align to byte boundary to get accurate consumed count
     input.flushToByte();
 
-    return (Uint8List.fromList(output), input.bytePosition);
+    return (output.toBytes(), input.bytePosition);
   }
 
   /// Check output size limit and throw if exceeded
-  void _checkLimit(final List<int> output) {
+  void _checkLimit(final GrowableBuffer output) {
     final limit = maxSize;
     if (limit != null && output.length > limit) {
       throw DeflateFormatException(
@@ -74,7 +89,7 @@ class DeflateDecoder {
   }
 
   /// Reads a stored (uncompressed) block
-  void _readStoredBlock(final BitStreamReader input, final List<int> output) {
+  void _readStoredBlock(final BitStreamReader input, final GrowableBuffer output) {
     // Skip to byte boundary
     input.flushToByte();
 
@@ -96,26 +111,23 @@ class DeflateDecoder {
 
     // Read literal bytes
     for (var i = 0; i < len; i++) {
-      output.add(input.readBits(8));
+      output.addByte(input.readBits(8));
     }
   }
 
   /// Reads a block compressed with fixed Huffman codes
   void _readFixedHuffmanBlock(
     final BitStreamReader input,
-    final List<int> output,
+    final GrowableBuffer output,
   ) {
-    // Build fixed Huffman decode tables
-    final litLenDecoder = buildFixedLiteralDecoder();
-    final distDecoder = buildFixedDistanceDecoder();
-
-    _decodeHuffmanBlock(input, output, litLenDecoder, distDecoder);
+    // Reuse the shared fixed Huffman decode tables (RFC 1951 constants)
+    _decodeHuffmanBlock(input, output, fixedLiteralDecoder, fixedDistanceDecoder);
   }
 
   /// Reads a block compressed with dynamic Huffman codes
   void _readDynamicHuffmanBlock(
     final BitStreamReader input,
-    final List<int> output,
+    final GrowableBuffer output,
   ) {
     // Read tree descriptions
     final hlit = input.readBits(5) + 257;
@@ -184,7 +196,7 @@ class DeflateDecoder {
   /// Decodes a Huffman-coded block
   void _decodeHuffmanBlock(
     final BitStreamReader input,
-    final List<int> output,
+    final GrowableBuffer output,
     final HuffmanDecoder literalDecoder,
     final HuffmanDecoder distanceDecoder,
   ) {
@@ -198,7 +210,7 @@ class DeflateDecoder {
 
       if (symbol < 256) {
         // Literal byte
-        output.add(symbol);
+        output.addByte(symbol);
 
         // Periodic size check
         if (output.length >= nextCheck) {
@@ -247,16 +259,8 @@ class DeflateDecoder {
           );
         }
 
-        final start = output.length - distance;
-        // Use bulk copy for non-overlapping matches (distance >= length)
-        if (distance >= length) {
-          output.addAll(output.sublist(start, start + length));
-        } else {
-          // Overlapping copy: must copy byte-by-byte
-          for (var i = 0; i < length; i++) {
-            output.add(output[start + i]);
-          }
-        }
+        // Copy from history (handles overlapping copies internally).
+        output.copyFromHistory(distance, length);
       } else {
         throw DeflateFormatException('Invalid literal/length symbol: $symbol');
       }

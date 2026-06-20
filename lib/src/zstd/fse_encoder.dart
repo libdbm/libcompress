@@ -103,6 +103,10 @@ class FseEncoder {
   late int tableLog;
   late int maxSymbol;
 
+  // Cached header bytes: encodeHeader is called once to measure the size and
+  // again to emit; the result is deterministic from normalized + tableLog.
+  Uint8List? _header;
+
   /// Gather statistics from symbol occurrences
   static SymbolStats stats(final List<int> symbols, final int maxSym) {
     final counts = List<int>.filled(maxSym + 1, 0);
@@ -217,6 +221,9 @@ class FseEncoder {
   /// - 4 bits: Accuracy_Log - 5
   /// - Variable bits per symbol: count encoding with optional zero runs
   Uint8List encodeHeader() {
+    final cached = _header;
+    if (cached != null) return cached;
+
     final writer = ForwardBitWriter();
 
     // Write accuracy log (tableLog - 5)
@@ -292,7 +299,7 @@ class FseEncoder {
       symbol++;
     }
 
-    return writer.finish();
+    return _header = writer.finish();
   }
 
   /// Check if encoding will be smaller than predefined

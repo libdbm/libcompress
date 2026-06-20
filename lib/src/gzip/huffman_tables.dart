@@ -34,6 +34,15 @@ HuffmanDecoder buildDecoder(List<int> lengths) {
   return HuffmanDecoder(codeToSymbol);
 }
 
+/// Shared fixed-Huffman decoders.
+///
+/// The RFC 1951 fixed literal/length and distance tables are constant, so the
+/// decoders are built once on first use and reused across all fixed blocks.
+final HuffmanDecoder fixedLiteralDecoder = buildFixedLiteralDecoder();
+
+/// See [fixedLiteralDecoder].
+final HuffmanDecoder fixedDistanceDecoder = buildFixedDistanceDecoder();
+
 /// Builds the fixed literal/length Huffman decoder
 HuffmanDecoder buildFixedLiteralDecoder() {
   final lengths = List<int>.filled(288, 0);

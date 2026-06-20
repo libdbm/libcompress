@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'byte_sink.dart';
+
 /// A growable byte buffer optimized for decompression operations
 ///
 /// Provides efficient appending of bytes and copying from history (for LZ77
@@ -7,7 +9,7 @@ import 'dart:typed_data';
 /// strategy to amortize allocation costs.
 ///
 /// Used by LZ4, Snappy, and GZIP decoders.
-class GrowableBuffer {
+class GrowableBuffer implements ByteSink {
   Uint8List _buffer;
   int _length = 0;
   final int? _maxCapacity;
@@ -22,6 +24,7 @@ class GrowableBuffer {
         _buffer = Uint8List(initialCapacity > 0 ? initialCapacity : 1024);
 
   /// The current number of bytes in the buffer
+  @override
   int get length => _length;
 
   /// Returns the buffer contents as a Uint8List
@@ -33,6 +36,7 @@ class GrowableBuffer {
   }
 
   /// Adds a single byte to the buffer
+  @override
   void addByte(int byte) {
     _ensureCapacity(_length + 1);
     _buffer[_length++] = byte;
@@ -44,6 +48,7 @@ class GrowableBuffer {
   /// If [length] is provided, only that many bytes are copied.
   ///
   /// Throws [RangeError] if offset/length are invalid or out of bounds.
+  @override
   void addBytes(List<int> bytes, [int? offset, int? length]) {
     final start = offset ?? 0;
     final count = length ?? (bytes.length - start);
@@ -89,6 +94,7 @@ class GrowableBuffer {
   /// buffer.addByte(65);  // 'A'
   /// buffer.copyFromHistory(1, 5);  // Copies 'A' 5 times: 'AAAAA'
   /// ```
+  @override
   void copyFromHistory(int distance, int length) {
     if (distance <= 0) {
       throw ArgumentError('Distance must be positive, got $distance');

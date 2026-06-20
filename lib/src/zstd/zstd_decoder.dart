@@ -1,5 +1,8 @@
 import 'dart:typed_data';
+import '../util/byte_pending.dart';
 import '../util/growable_buffer.dart';
+import '../util/incremental_decompress_transformer.dart';
+import '../util/window_buffer.dart';
 import '../util/xxh64.dart';
 import '../util/byte_utils.dart';
 import 'zstd_common.dart';
@@ -240,7 +243,7 @@ class ZstdDecoder {
       }
       final expectedChecksum = ByteUtils.readUint32LE(data, offset);
       offset += 4;
-      final actualChecksum = XXH64.hash(frameBytes) & 0xFFFFFFFF;
+      final actualChecksum = XXH64.hashLow32(frameBytes);
       if (actualChecksum != expectedChecksum) {
         throw ZstdFormatException(
           'Content checksum mismatch: '
@@ -372,5 +375,250 @@ class ZstdDecoder {
     }
 
     return offset + 1;
+  }
+}
+
+/// Incremental, memory-bounded Zstd frame decoder.
+///
+/// Decodes one block at a time, appending to a [WindowBuffer] sized to the
+/// frame window and draining emittable bytes, so peak retained output is the
+/// frame window (bounded for window-descriptor frames; equal to the content
+/// size for single-segment frames, which by definition declare they fit). The
+/// content checksum is streamed via [Xxh64Sink]. Supports skippable and
+/// concatenated frames.
+class ZstdIncrementalDecoder implements IncrementalDecoder {
+  ZstdIncrementalDecoder({this.maxSize, required this.maxBufferSize});
+
+  final int? maxSize;
+  final int maxBufferSize;
+
+  final BytePending _pending = BytePending();
+  int _cursor = 0;
+  int _total = 0; // decompressed bytes across completed frames
+
+  bool _inFrame = false;
+  bool _lastBlockSeen = false;
+  WindowBuffer? _output;
+  Xxh64Sink? _sink;
+  CompressedBlockDecoder? _blockDecoder;
+  List<int> _offsets = const [1, 4, 8];
+  bool _checksumFlag = false;
+  int? _frameWindowSize;
+  int? _frameContentSize;
+
+  int get _avail => _pending.length - _cursor;
+
+  int _u32(final int o) =>
+      _pending[o] +
+      _pending[o + 1] * 0x100 +
+      _pending[o + 2] * 0x10000 +
+      _pending[o + 3] * 0x1000000;
+
+  @override
+  void add(final Uint8List input, final void Function(Uint8List) emit) {
+    _pending.add(input);
+    if (_avail > maxBufferSize) {
+      throw ZstdFormatException(
+        'Stream buffer exceeded $maxBufferSize bytes - '
+        'frame too large or malformed',
+      );
+    }
+    _drive(emit);
+  }
+
+  @override
+  void close(final void Function(Uint8List) emit) {
+    _drive(emit);
+    if (_inFrame || _avail != 0) {
+      throw ZstdFormatException('Incomplete Zstd frame at end of stream');
+    }
+  }
+
+  void _drive(final void Function(Uint8List) emit) {
+    var progressed = true;
+    while (progressed) {
+      if (!_inFrame) {
+        progressed = _avail > 0 && _startFrame();
+      } else if (_lastBlockSeen) {
+        progressed = _finishFrame(emit);
+      } else {
+        progressed = _decodeNextBlock(emit);
+      }
+    }
+    _compact();
+  }
+
+  /// Reads a frame magic; skips skippable frames; parses a normal frame header.
+  bool _startFrame() {
+    if (_avail < 4) return false;
+    final magic = _u32(_cursor);
+
+    if ((magic & zstdSkippableFrameMagicMask) == zstdSkippableFrameMagicBase) {
+      if (_avail < 8) return false;
+      final size = _u32(_cursor + 4);
+      if (_avail < 8 + size) return false;
+      _cursor += 8 + size;
+      return true;
+    }
+
+    if (magic != zstdMagicNumber) {
+      throw ZstdFormatException(
+        'Invalid Zstd magic number: 0x${magic.toRadixString(16)}',
+      );
+    }
+
+    if (_avail < 5) return false; // magic + descriptor
+    final descriptor = ZstdFrameHeaderDescriptor.parse(_pending[_cursor + 4]);
+    final windowBytes = descriptor.singleSegment ? 0 : 1;
+    final dictIdBytes =
+        descriptor.dictionaryIdFlag > 0 ? 1 << (descriptor.dictionaryIdFlag - 1) : 0;
+    final fcsBytes = descriptor.singleSegment
+        ? const [1, 2, 4, 8][descriptor.contentSizeFlag]
+        : const [0, 2, 4, 8][descriptor.contentSizeFlag];
+    final headerLen = 1 + windowBytes + dictIdBytes + fcsBytes;
+    if (_avail < 4 + headerLen) return false;
+
+    var p = _cursor + 5; // past magic + descriptor
+    int? windowSize;
+    if (!descriptor.singleSegment) {
+      final windowByte = _pending[p++];
+      final exponent = windowByte >> 3;
+      final mantissa = windowByte & 0x07;
+      final base = 1 << (10 + exponent);
+      windowSize = base + (base ~/ 8) * mantissa;
+    }
+    if (descriptor.dictionaryIdFlag > 0) {
+      var dictId = 0;
+      for (var i = 0; i < dictIdBytes; i++) {
+        dictId |= _pending[p++] << (i * 8);
+      }
+      if (dictId != 0) {
+        throw ZstdFormatException(
+          'Dictionary compression (id=$dictId) is not supported',
+        );
+      }
+    }
+    int? contentSize;
+    if (fcsBytes > 0) {
+      var size = 0;
+      for (var i = 0; i < fcsBytes; i++) {
+        size |= _pending[p++] << (i * 8);
+      }
+      if (descriptor.contentSizeFlag == 1) size += 256;
+      contentSize = size;
+    }
+
+    final frameLimit = maxSize != null ? maxSize! - _total : null;
+    if (frameLimit != null && contentSize != null && contentSize > frameLimit) {
+      throw ZstdFormatException(
+        'Declared content size $contentSize exceeds maximum allowed size $maxSize',
+      );
+    }
+
+    // The window bounds the largest back-reference: windowSize if present,
+    // else the content size (single-segment), else the remaining limit.
+    var window = windowSize ?? contentSize ?? (frameLimit ?? (1 << 27));
+    if (frameLimit != null && window > frameLimit) window = frameLimit;
+    if (window < 1) window = 1;
+
+    _cursor += 4 + headerLen;
+    _inFrame = true;
+    _lastBlockSeen = false;
+    _checksumFlag = descriptor.checksumFlag;
+    _frameWindowSize = windowSize;
+    _frameContentSize = contentSize;
+    _offsets = [1, 4, 8];
+    _output = WindowBuffer(window, maxSize: frameLimit);
+    _sink = descriptor.checksumFlag ? Xxh64Sink() : null;
+    _blockDecoder = CompressedBlockDecoder()..reset();
+    return true;
+  }
+
+  bool _decodeNextBlock(final void Function(Uint8List) emit) {
+    if (_avail < 3) return false;
+    final header = ZstdBlockHeader.parse(
+      Uint8List.fromList(
+          [_pending[_cursor], _pending[_cursor + 1], _pending[_cursor + 2]]),
+      0,
+    );
+    if (header.blockSize > zstdMaxBlockSize) {
+      throw ZstdFormatException(
+        'Block size ${header.blockSize} exceeds maximum $zstdMaxBlockSize bytes',
+      );
+    }
+    final content = header.blockType == ZstdBlockType.rle ? 1 : header.blockSize;
+    if (_avail < 3 + content) return false;
+
+    final output = _output!;
+    final start = _cursor + 3;
+    switch (header.blockType) {
+      case ZstdBlockType.raw:
+        output.addBytes(_pending.bytes, start, header.blockSize);
+        break;
+      case ZstdBlockType.rle:
+        final byte = _pending[start];
+        for (var i = 0; i < header.blockSize; i++) {
+          output.addByte(byte);
+        }
+        break;
+      case ZstdBlockType.compressed:
+        final block = _pending.slice(start, start + header.blockSize);
+        _blockDecoder!.decodeBlock(
+          block,
+          0,
+          header.blockSize,
+          output,
+          _offsets,
+          windowSize: _frameWindowSize,
+        );
+        break;
+      case ZstdBlockType.reserved:
+        throw ZstdFormatException('Reserved block type encountered');
+    }
+
+    _cursor = start + content;
+    _flush(output.drain(), emit);
+    if (header.lastBlock) _lastBlockSeen = true;
+    return true;
+  }
+
+  bool _finishFrame(final void Function(Uint8List) emit) {
+    final output = _output!;
+    _flush(output.finish(), emit);
+
+    if (_checksumFlag) {
+      if (_avail < 4) return false;
+      final expected = _u32(_cursor);
+      if (expected != _sink!.digestLow32()) {
+        throw ZstdFormatException('Content checksum mismatch');
+      }
+      _cursor += 4;
+    }
+    if (_frameContentSize != null && output.length != _frameContentSize) {
+      throw ZstdFormatException(
+        'Content size mismatch: expected $_frameContentSize, got ${output.length}',
+      );
+    }
+
+    _total += output.length;
+    _inFrame = false;
+    _lastBlockSeen = false;
+    _output = null;
+    _sink = null;
+    _blockDecoder = null;
+    return true;
+  }
+
+  void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
+    if (bytes.isEmpty) return;
+    _sink?.add(bytes);
+    emit(bytes);
+  }
+
+  void _compact() {
+    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
+      _pending.discard(_cursor);
+      _cursor = 0;
+    }
   }
 }

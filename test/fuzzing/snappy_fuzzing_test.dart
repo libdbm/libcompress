@@ -34,10 +34,7 @@ void main() {
         );
         expect(
           () => codec.decompress(noise),
-          throwsA(anyOf(
-            isA<SnappyFormatException>(),
-            isA<FormatException>(), // Varint decoder throws FormatException
-          )),
+          throwsA(isA<SnappyFormatException>()),
           reason: 'Short random data ($length bytes) should be rejected',
         );
       }
@@ -68,10 +65,7 @@ void main() {
         final truncated = Uint8List.sublistView(validCompressed, 0, cutoff);
         expect(
           () => codec.decompress(truncated),
-          throwsA(anyOf(
-            isA<SnappyFormatException>(),
-            isA<FormatException>(), // Varint decoder throws FormatException
-          )),
+          throwsA(isA<SnappyFormatException>()),
           reason: 'Truncated at $cutoff should be rejected',
         );
       }
@@ -97,10 +91,7 @@ void main() {
       final incomplete = Uint8List.fromList([0x80]);
       expect(
         () => SnappyDecoder.decompress(incomplete),
-        throwsA(anyOf(
-          isA<SnappyFormatException>(),
-          isA<FormatException>(), // Varint decoder throws FormatException
-        )),
+        throwsA(isA<SnappyFormatException>()),
       );
     });
 
@@ -113,10 +104,7 @@ void main() {
       ]);
       expect(
         () => SnappyDecoder.decompress(tooLong),
-        throwsA(anyOf(
-          isA<SnappyFormatException>(),
-          isA<FormatException>(), // Varint decoder throws FormatException
-        )),
+        throwsA(isA<SnappyFormatException>()),
       );
     });
   });

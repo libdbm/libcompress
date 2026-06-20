@@ -8,20 +8,29 @@ import 'zstd_common.dart';
 /// - Bits are loaded as little-endian 64-bit values from the end of data
 /// - Bits are consumed from MSB toward LSB using bitsConsumed counter
 /// - The load() method should be called at the start of each sequence
+///
+/// The 64-bit window is held as two 32-bit halves (`_hi`, `_lo`) rather than a
+/// [BigInt], so the per-sequence peek/read math uses only native int ops that
+/// stay below 2^53 — exact on both the VM and dart2js, and far faster than
+/// allocating BigInts on the hot path.
 class SequenceBitReader {
   final Uint8List data;
   final int _startAddress;
+  final int _endAddress;
   int _currentAddress;
-  int _bits;
+  int _hi; // high 32 bits of the 64-bit window
+  int _lo; // low 32 bits
   int _bitsConsumed;
   bool _overflow;
 
   SequenceBitReader(this.data, int endOffset, {int startOffset = 0})
-    : _startAddress = startOffset,
-      _currentAddress = 0,
-      _bits = 0,
-      _bitsConsumed = 0,
-      _overflow = false {
+      : _startAddress = startOffset,
+        _endAddress = endOffset,
+        _currentAddress = 0,
+        _hi = 0,
+        _lo = 0,
+        _bitsConsumed = 0,
+        _overflow = false {
     if (endOffset <= startOffset) {
       throw ZstdFormatException('Empty bitstream');
     }
@@ -40,10 +49,10 @@ class SequenceBitReader {
     final inputSize = endOffset - startOffset;
     if (inputSize >= 8) {
       _currentAddress = endOffset - 8;
-      _bits = _loadLittleEndian64(_currentAddress);
+      _load64(_currentAddress);
     } else {
       _currentAddress = startOffset;
-      _bits = _loadTail(startOffset, inputSize);
+      _load64(startOffset);
       _bitsConsumed += (8 - inputSize) * 8;
     }
   }
@@ -53,18 +62,23 @@ class SequenceBitReader {
     return value.bitLength - 1;
   }
 
-  int _loadLittleEndian64(int offset) {
-    int result = 0;
-    for (var i = 0; i < 8 && offset + i < data.length; i++) {
-      result |= data[offset + i] << (8 * i);
-    }
-    return result;
+  /// Loads up to 8 little-endian bytes at [offset] into the `_hi`/`_lo` window.
+  /// Bytes past the end of [data] read as zero (matching the original
+  /// BigInt loader), built with multiplication to stay dart2js-safe.
+  void _load64(int offset) {
+    _lo = _read4(offset);
+    _hi = _read4(offset + 4);
   }
 
-  int _loadTail(int offset, int size) {
-    int result = 0;
-    for (var i = 0; i < size; i++) {
-      result |= data[offset + i] << (8 * i);
+  int _read4(int offset) {
+    var result = 0;
+    var multiplier = 1;
+    for (var i = 0; i < 4; i++) {
+      final p = offset + i;
+      if (p >= 0 && p < _endAddress) {
+        result += data[p] * multiplier;
+      }
+      multiplier *= 256;
     }
     return result;
   }
@@ -85,19 +99,19 @@ class SequenceBitReader {
     if (_currentAddress >= _startAddress + 8) {
       if (bytes > 0) {
         _currentAddress -= bytes;
-        _bits = _loadLittleEndian64(_currentAddress);
+        _load64(_currentAddress);
       }
       _bitsConsumed &= 7;
     } else if (_currentAddress - bytes < _startAddress) {
       final actualBytes = _currentAddress - _startAddress;
       _currentAddress = _startAddress;
       _bitsConsumed -= actualBytes * 8;
-      _bits = _loadLittleEndian64(_startAddress);
+      _load64(_startAddress);
       return true;
     } else {
       _currentAddress -= bytes;
       _bitsConsumed -= bytes * 8;
-      _bits = _loadLittleEndian64(_currentAddress);
+      _load64(_currentAddress);
     }
 
     return false;
@@ -105,15 +119,40 @@ class SequenceBitReader {
 
   bool get isOverflow => _overflow;
 
-  /// Peek bits from MSB end without consuming
+  /// Peek bits from MSB end without consuming.
+  ///
+  /// Equivalent to `((bits << bitsConsumed) >>> (64 - numBits))` on a 64-bit
+  /// window, i.e. the [numBits] bits starting `bitsConsumed` from the MSB.
+  /// Bits beyond what remains in the window read as zero.
   int peekBits(int numBits) {
-    // Java formula: (((bits << bitsConsumed) >>> 1) >>> (63 - numberOfBits))
-    // Handle Dart's signed arithmetic carefully
     if (numBits == 0) return 0;
-    final shifted = (_bits << _bitsConsumed) & 0xFFFFFFFFFFFFFFFF;
-    // Unsigned right shift simulation
-    final step1 = (shifted >> 1) & 0x7FFFFFFFFFFFFFFF;
-    return (step1 >> (63 - numBits)) & ((1 << numBits) - 1);
+    final consumed = _bitsConsumed;
+    final available = 64 - consumed;
+    if (available <= 0) return 0;
+
+    if (available >= numBits) {
+      // shift = 64 - consumed - numBits, the right-shift into the window.
+      final shift = available - numBits;
+      if (shift >= 32) {
+        return (_hi >> (shift - 32)) & _mask[numBits];
+      } else if (shift + numBits <= 32) {
+        return (_lo >> shift) & _mask[numBits];
+      } else {
+        // The field straddles the 32-bit boundary.
+        final lowCount = 32 - shift;
+        final lowPart = _lo >> shift; // top `lowCount` bits of _lo
+        final highCount = numBits - lowCount;
+        final highPart = _hi & _mask[highCount];
+        return lowPart + highPart * _pow2[lowCount];
+      }
+    }
+
+    // Fewer than numBits remain: the unconsumed bits are the low `available`
+    // bits of the window (bits are consumed from the MSB down). Place them
+    // MSB-aligned in the result, low bits zero. available < numBits <= 32, so
+    // they all live in _lo.
+    final lowBits = _lo & _mask[available];
+    return (lowBits * _pow2[numBits - available]) & _mask[numBits];
   }
 
   /// Read specified number of bits (consumes them)
@@ -155,4 +194,19 @@ class SequenceBitReader {
     final bitsRemaining = 64 - _bitsConsumed;
     return bytesRemaining + (bitsRemaining > 0 ? 1 : 0);
   }
+}
+
+/// `_pow2[i] == 2^i` and `_mask[i] == 2^i - 1` for i in 0..32. All values are
+/// <= 2^32, exact as doubles on dart2js.
+final List<int> _pow2 = _buildPow2();
+final List<int> _mask = List<int>.generate(33, (i) => _pow2[i] - 1);
+
+List<int> _buildPow2() {
+  final result = List<int>.filled(33, 0);
+  var value = 1;
+  for (var i = 0; i <= 32; i++) {
+    result[i] = value;
+    value *= 2;
+  }
+  return result;
 }
