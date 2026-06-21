@@ -197,7 +197,9 @@ class SnappyStreamDecoder {
 
     var cursor = 0;
     var total = 0;
-    final output = <int>[];
+    // Typed accumulator (no per-byte boxing / final fromList copy) for large
+    // framed streams.
+    final output = BytesBuilder(copy: false);
 
     while (cursor < data.length) {
       final chunk = _readChunk(data, cursor);
@@ -210,7 +212,7 @@ class SnappyStreamDecoder {
           'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
         );
       }
-      output.addAll(decompressed);
+      output.add(decompressed);
       cursor += chunk.totalSize;
     }
 
@@ -218,7 +220,7 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Stream missing required stream identifier');
     }
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Read a chunk from the stream at the specified offset
