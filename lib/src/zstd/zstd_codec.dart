@@ -8,7 +8,11 @@ import 'zstd_decoder.dart';
 
 /// Zstandard (Zstd) compression codec
 ///
-/// Pure Dart implementation of Zstandard compression per RFC 8878.
+/// Pure Dart implementation of a practical **subset** of Zstandard (RFC 8878) —
+/// not a full decoder. In particular **dictionary-compressed frames are
+/// rejected**: a `.zst` produced with `zstd -D <dict>` (or any frame carrying a
+/// Dictionary_ID) throws a [ZstdFormatException] on decode, so don't assume
+/// arbitrary `.zst` files will decode. See Supported / Not implemented below.
 ///
 /// Supported features:
 /// - Full frame format parsing with magic number validation
@@ -25,8 +29,9 @@ import 'zstd_decoder.dart';
 /// - Dictionary compression
 /// - Window sizes larger than frame content
 ///
-/// CLI compatibility: Files produced by this codec decompress correctly
-/// with the standard `zstd` CLI tool.
+/// CLI compatibility: Files produced by this codec decompress correctly with
+/// the standard `zstd` CLI tool, and non-dictionary `.zst` files from the CLI
+/// decode here. Dictionary frames (`zstd -D`) are the exception — they fail.
 class ZstdCodec extends CompressionCodec {
   /// Compression level (1-9)
   final int level;
