@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../compression_options.dart';
 import '../compression_stream_codec.dart';
 import '../util/byte_pending.dart';
 import '../util/incremental_decompress_transformer.dart';
@@ -32,7 +33,11 @@ class SnappyStreamCodec extends CompressionStreamCodec {
     this.maxSize = SnappyDecoder.defaultMaxSize,
     this.maxBufferSize = snappyDefaultMaxBufferSize,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
-  });
+  }) {
+    validatePositive(maxSize, 'maxSize');
+    validatePositive(maxBufferSize, 'maxBufferSize');
+    validateRange(chunkSize, 1, SnappyStreamEncoder.maxChunkSize, 'chunkSize');
+  }
 
   @override
   String get name => 'SNAPPY';

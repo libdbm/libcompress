@@ -74,7 +74,13 @@ abstract class CompressionCodec {
   /// Decompress data synchronously
   ///
   /// Takes compressed data and returns the original uncompressed bytes.
-  /// Throws an exception if the data is corrupted or in an invalid format.
+  /// Throws a [CompressionFormatException] if the data is corrupted or in an
+  /// invalid format.
+  ///
+  /// This materializes the entire output (up to the codec's
+  /// `maxDecompressedSize`) before validating the trailer/checksum, so for
+  /// untrusted or large input prefer the streaming codec, which is incremental
+  /// and bounded (`CompressionStreamCodec`, e.g. via `CodecFactory.streaming`).
   Uint8List decompress(Uint8List data);
 
   /// Compress data asynchronously

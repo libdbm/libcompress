@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../compression_options.dart';
 import '../compression_stream_codec.dart';
 import '../util/incremental_decompress_transformer.dart';
 import '../util/stream_compressor.dart';
@@ -50,7 +51,12 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     this.maxBufferSize = zstdDefaultMaxBufferSize,
     this.validate = false,
     this.verified = false,
-  });
+  }) {
+    validateLevel(level, 1, 22);
+    validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
+    validateOptionalPositive(maxSize, 'maxSize');
+    validatePositive(maxBufferSize, 'maxBufferSize');
+  }
 
   @override
   String get name => 'ZSTD';
@@ -61,7 +67,12 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     // chunk boundaries. Backpressure + error boundary come from the base.
     return compressStream(
       input,
-      StreamingZstdEncoder(level: level, checksum: checksum, validate: validate),
+      StreamingZstdEncoder(
+        level: level,
+        checksum: checksum,
+        validate: validate,
+        blockSize: blockSize,
+      ),
     );
   }
 

@@ -18,12 +18,16 @@ T gzipBoundary<T>(T Function() body) {
   } on GzipFormatException {
     rethrow;
   } on CompressionFormatException catch (e) {
+    // DEFLATE-level (or other) format errors surface under the GZIP contract.
     throw GzipFormatException(e.message);
+  } on FormatException catch (e) {
+    throw GzipFormatException(e.message.toString());
+  } on ArgumentError catch (e) {
+    throw GzipFormatException(e.message?.toString() ?? e.toString());
   } on StateError catch (e) {
     throw GzipFormatException(e.message);
-  } catch (e) {
-    throw GzipFormatException(e.toString());
   }
+  // Other errors (library bugs) propagate unchanged — see [guardFormat].
 }
 
 /// GZIP file format implementation (RFC 1952)

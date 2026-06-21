@@ -36,7 +36,18 @@ class CodecFactory {
   /// All supported codec types
   static const types = CodecType.values;
 
-  /// Get a block-based codec for the given type
+  /// Get a block-based (whole-buffer) codec for the given type.
+  ///
+  /// Block codecs operate on a complete byte array: decompression materializes
+  /// the entire output (up to the codec's `maxDecompressedSize`) and verifies
+  /// trailers/checksums only at the end, so corrupt or adversarial data can
+  /// allocate and burn CPU up to that cap before being rejected; compression
+  /// likewise allocates an estimated full-output buffer. This is fine for small
+  /// or trusted data.
+  ///
+  /// For untrusted, large, or variable-size input prefer [streaming], which is
+  /// incremental and bounded (and supports `verified: true` for all-or-nothing
+  /// integrity). Configure limits via the individual codec constructors.
   ///
   /// Example:
   /// ```dart
@@ -53,7 +64,12 @@ class CodecFactory {
     };
   }
 
-  /// Get a stream-based codec for the given type
+  /// Get a stream-based codec for the given type.
+  ///
+  /// Preferred for untrusted, large, or variable-size input: decode is
+  /// incremental and memory-bounded, output limits are cumulative, and an
+  /// oversized input chunk is rejected before being buffered. See [codec] for
+  /// the block (whole-buffer) alternative.
   ///
   /// Example:
   /// ```dart
