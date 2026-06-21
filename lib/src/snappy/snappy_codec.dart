@@ -19,7 +19,7 @@ import 'snappy_stream_decoder.dart';
 /// For stream-based processing, use [SnappyStreamCodec] instead.
 class SnappyCodec extends CompressionCodec {
   /// Maximum allowed uncompressed size for decompression
-  final int maxSize;
+  final int? maxSize;
 
   /// Use framing format instead of raw block format
   ///
@@ -32,11 +32,11 @@ class SnappyCodec extends CompressionCodec {
   final int chunkSize;
 
   SnappyCodec({
-    this.maxSize = SnappyDecoder.defaultMaxSize,
+    this.maxSize = snappyDefaultMaxDecompressedSize,
     this.framing = false,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
   }) {
-    validatePositive(maxSize, 'maxSize');
+    validateOptionalPositive(maxSize, 'maxSize');
     validateRange(chunkSize, 1, SnappyStreamEncoder.maxChunkSize, 'chunkSize');
   }
 
@@ -95,7 +95,7 @@ class SnappyOptions extends CompressionOptions {
   ///
   /// Protects against decompression bombs. Defaults to 256MB.
   /// Set lower for untrusted input.
-  final int maxSize;
+  final int? maxSize;
 
   /// Use framing format instead of raw block format
   ///
@@ -116,7 +116,7 @@ class SnappyOptions extends CompressionOptions {
   SnappyOptions({
     super.level = 1, // Snappy has no levels - ignored
     super.checksum = true, // Only affects framing format
-    this.maxSize = SnappyDecoder.defaultMaxSize,
+    this.maxSize = snappyDefaultMaxDecompressedSize,
     this.framing = false,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
   });

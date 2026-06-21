@@ -7,6 +7,10 @@ import '../util/varint.dart';
 // Re-export exception from centralized location
 export '../exceptions.dart' show SnappyFormatException;
 
+/// Default decompression cap for the Snappy codecs, matching the other codecs'
+/// 256 MB default. `null` may be passed for unlimited (trusted input only).
+const int snappyDefaultMaxDecompressedSize = 256 * 1024 * 1024;
+
 /// Native Dart implementation of Snappy decompression
 /// Based on the Snappy format specification and jsnappy Java implementation
 class SnappyDecoder {
@@ -20,7 +24,7 @@ class SnappyDecoder {
   /// length to prevent memory exhaustion attacks. Defaults to 100MB.
   static Uint8List decompress(
     final Uint8List compressed, {
-    final int maxUncompressedSize = defaultMaxSize,
+    final int? maxUncompressedSize = defaultMaxSize,
     int? uncompressedLength,
   }) {
     if (compressed.isEmpty) {
@@ -47,7 +51,9 @@ class SnappyDecoder {
     }
 
     // Enforce maximum uncompressed size to prevent memory exhaustion
-    if (actualUncompressedLength > maxUncompressedSize) {
+    // (null = unlimited).
+    if (maxUncompressedSize != null &&
+        actualUncompressedLength > maxUncompressedSize) {
       throw SnappyFormatException(
         'Uncompressed size $actualUncompressedLength exceeds maximum $maxUncompressedSize',
       );

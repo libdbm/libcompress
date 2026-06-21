@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:libcompress/src/snappy/snappy_codec.dart';
-import 'package:libcompress/src/snappy/snappy_decoder.dart';
 import 'package:libcompress/src/snappy/snappy_stream_encoder.dart';
 import 'test_utils.dart';
 
@@ -213,7 +212,7 @@ void main() {
       final options = SnappyOptions();
       final codec = SnappyCodec.fromOptions(options);
       expect(codec.framing, false);
-      expect(codec.maxSize, SnappyDecoder.defaultMaxSize);
+      expect(codec.maxSize, 256 * 1024 * 1024); // aligned with other codecs
     });
   });
 }

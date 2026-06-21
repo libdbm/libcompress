@@ -27,7 +27,7 @@ class SnappyStreamDecoder {
   static const int chunkTypePadding = 0xfe;
 
   /// Maximum allowed uncompressed size per chunk
-  final int maxUncompressedSize;
+  final int? maxUncompressedSize;
 
   /// Whether we've seen a stream identifier (for incremental decoding)
   bool _seenIdentifier = false;
@@ -126,8 +126,9 @@ class SnappyStreamDecoder {
     // Decompress the data (after checksum), bounded by the 64 KB per-chunk
     // spec limit (and any smaller configured cap).
     final compressed = Uint8List.sublistView(chunk.data, 4);
-    final chunkLimit = maxUncompressedSize < _maxChunkUncompressed
-        ? maxUncompressedSize
+    final chunkLimit = (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
         : _maxChunkUncompressed;
     final decompressed = SnappyDecoder.decompress(
       compressed,
@@ -161,8 +162,9 @@ class SnappyStreamDecoder {
     final uncompressed = Uint8List.sublistView(chunk.data, 4);
 
     // Validate maximum size (the 64 KB per-chunk spec limit and any smaller cap)
-    final chunkLimit = maxUncompressedSize < _maxChunkUncompressed
-        ? maxUncompressedSize
+    final chunkLimit = (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
         : _maxChunkUncompressed;
     if (uncompressed.length > chunkLimit) {
       throw SnappyFormatException(
@@ -197,7 +199,9 @@ class SnappyStreamDecoder {
 
     var cursor = 0;
     var total = 0;
-    final output = <int>[];
+    // Typed accumulator (no per-byte boxing / final fromList copy) for large
+    // framed streams.
+    final output = BytesBuilder(copy: false);
 
     while (cursor < data.length) {
       final chunk = _readChunk(data, cursor);
@@ -205,12 +209,12 @@ class SnappyStreamDecoder {
       total += decompressed.length;
       // Cumulative cap across all chunks (each chunk alone is bounded by
       // maxUncompressedSize, but an unbounded number of chunks is not).
-      if (total > maxUncompressedSize) {
+      if (maxUncompressedSize != null && total > maxUncompressedSize!) {
         throw SnappyFormatException(
           'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
         );
       }
-      output.addAll(decompressed);
+      output.add(decompressed);
       cursor += chunk.totalSize;
     }
 
@@ -218,7 +222,7 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Stream missing required stream identifier');
     }
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Read a chunk from the stream at the specified offset
