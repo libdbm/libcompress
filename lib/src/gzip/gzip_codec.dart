@@ -53,6 +53,7 @@ class GzipCodec extends CompressionCodec {
       level: options.level,
       filename: options.filename,
       comment: options.comment,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -94,6 +95,7 @@ class GzipOptions extends CompressionOptions {
   GzipOptions({
     super.level = 6,
     super.checksum = true,
+    super.maxDecompressedSize,
     this.filename,
     this.comment,
   }) {

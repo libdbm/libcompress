@@ -41,6 +41,7 @@ class Lz4Codec extends CompressionCodec {
       level: options.level,
       blockSize: options.blockSize,
       enableContentChecksum: options.checksum,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -95,6 +96,7 @@ class Lz4Options extends CompressionOptions {
   Lz4Options({
     super.level = 1,
     super.checksum = true,
+    super.maxDecompressedSize,
     this.blockSize = lz4DefaultBlockSize,
   }) {
     if (level < 1 || level > 9) {

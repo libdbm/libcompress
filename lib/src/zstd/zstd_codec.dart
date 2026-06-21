@@ -67,6 +67,7 @@ class ZstdCodec extends CompressionCodec {
       blockSize: options.blockSize,
       enableChecksum: options.checksum,
       validate: options.validate,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -112,6 +113,7 @@ class ZstdOptions extends CompressionOptions {
   ZstdOptions({
     super.level = 3,
     super.checksum = false,
+    super.maxDecompressedSize,
     this.blockSize = 128 * 1024,
     this.validate = false,
   }) {

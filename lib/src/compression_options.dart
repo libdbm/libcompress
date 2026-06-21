@@ -23,17 +23,25 @@ abstract class CompressionOptions {
   /// checksums. Use codec-specific constructors for fine control.
   final bool checksum;
 
+  /// Maximum decompressed size enforced on decode, carried so `fromOptions`
+  /// factories preserve a tenant-configured safety limit instead of resetting
+  /// to the codec default. `null` means unlimited (trusted input only).
+  final int? maxDecompressedSize;
+
   /// Creates compression options with specified parameters
   ///
   /// Level validation is codec-specific - see subclass constructors.
-  /// Throws [ArgumentError] if level is less than 1.
+  /// Throws [ArgumentError] if level is less than 1 or [maxDecompressedSize]
+  /// is non-positive.
   CompressionOptions({
     this.level = 5,
     this.checksum = true,
+    this.maxDecompressedSize = 256 * 1024 * 1024,
   }) {
     if (level < 1) {
       throw ArgumentError.value(level, 'level', 'Must be at least 1');
     }
+    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
   }
 }
 
