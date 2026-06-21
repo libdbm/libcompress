@@ -61,7 +61,12 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     // chunk boundaries. Backpressure + error boundary come from the base.
     return compressStream(
       input,
-      StreamingZstdEncoder(level: level, checksum: checksum, validate: validate),
+      StreamingZstdEncoder(
+        level: level,
+        checksum: checksum,
+        validate: validate,
+        blockSize: blockSize,
+      ),
     );
   }
 

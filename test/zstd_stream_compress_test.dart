@@ -7,10 +7,11 @@ Uint8List _bytes(final Iterable<int> v) => Uint8List.fromList(v.toList());
 Future<Uint8List> _streamCompress(
   final List<Uint8List> chunks, {
   final bool checksum = false,
+  final int blockSize = 128 * 1024,
 }) async {
   final out = <int>[];
-  await for (final c
-      in ZstdStreamCodec(checksum: checksum).compress(Stream.fromIterable(chunks))) {
+  await for (final c in ZstdStreamCodec(checksum: checksum, blockSize: blockSize)
+      .compress(Stream.fromIterable(chunks))) {
     out.addAll(c);
   }
   return Uint8List.fromList(out);
@@ -30,6 +31,21 @@ Future<Uint8List> _streamDecompress(final Uint8List compressed) async {
 
 void main() {
   group('Zstd streaming compression (single window-descriptor frame)', () {
+    test('honours a non-default blockSize (window descriptor + round-trip)', () async {
+      final chunks = [
+        _bytes(List.generate(40000, (i) => (i * 31 + 7) % 251)),
+        _bytes(List.generate(40000, (i) => (i * 17 + 3) % 251)),
+      ];
+      final original = _bytes(chunks.expand((c) => c));
+      // 64 KB blocks -> 128 KB window -> descriptor byte 56; 16 KB -> 40 KB... 0x28.
+      for (final entry in {64 * 1024: 0x38, 16 * 1024: 0x28}.entries) {
+        final compressed = await _streamCompress(chunks, blockSize: entry.key);
+        expect(compressed[5], entry.value,
+            reason: 'window descriptor byte for blockSize ${entry.key}');
+        expect(ZstdCodec().decompress(compressed), orderedEquals(original));
+      }
+    });
+
     test('round-trips multi-chunk input', () async {
       final chunks = [
         _bytes(List.generate(5000, (i) => i % 256)),

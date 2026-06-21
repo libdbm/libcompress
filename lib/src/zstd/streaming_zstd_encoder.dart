@@ -9,23 +9,32 @@ import 'zstd_common.dart';
 /// Stateful, single-frame Zstd encoder for streaming compression.
 ///
 /// Emits one window-descriptor frame (no baked-in content size) whose blocks
-/// share up to 128 KB of history, so matches reference prior chunks across block
-/// boundaries — better ratio than an independent frame per chunk. Each chunk is
-/// split into <=128 KB blocks; each block is matched against `history + block`
-/// (combined <= the 256 KB declared window), so absolute offsets stay within
-/// the window. The content checksum (XXH64 low 32 bits) is streamed.
+/// share up to [blockSize] of history, so matches reference prior chunks across
+/// block boundaries — better ratio than an independent frame per chunk. Each
+/// chunk is split into <=[blockSize] blocks; each block is matched against
+/// `history + block` (combined <= the declared window, ~2x [blockSize]), so
+/// absolute offsets stay within the window. The content checksum (XXH64 low 32
+/// bits) is streamed.
 class StreamingZstdEncoder implements StreamCompressor {
-  StreamingZstdEncoder({this.level = 3, this.checksum = false, this.validate = false});
+  StreamingZstdEncoder({
+    this.level = 3,
+    this.checksum = false,
+    this.validate = false,
+    this.blockSize = zstdMaxBlockSize,
+  }) : assert(blockSize > 0 && blockSize <= zstdMaxBlockSize);
 
   final int level;
   final bool checksum;
   final bool validate;
 
-  // Declared window is 256 KB so `history (<=128 KB) + block (<=128 KB)` stays
-  // within it; larger blocks mean fewer FSE/Huffman table builds and better
-  // ratio than smaller blocks.
-  static const int _windowByte = 64; // encodes 256 KB (exponent 8, mantissa 0)
-  static const int _blockInput = zstdMaxBlockSize; // 128 KB max block input
+  /// Max input bytes per block (<= [zstdMaxBlockSize], default 128 KB). Smaller
+  /// blocks lower latency/memory; larger blocks improve ratio.
+  final int blockSize;
+
+  // Declared window = smallest power of two >= 2*blockSize, so the combined
+  // `history (<=blockSize) + block (<=blockSize)` always fits and absolute
+  // match offsets stay below it.
+  late final int _windowByte = _windowByteFor(blockSize);
 
   late final CompressedBlockEncoder _encoder = CompressedBlockEncoder(
     searchDepth: _searchDepth(level),
@@ -33,7 +42,7 @@ class StreamingZstdEncoder implements StreamCompressor {
     validate: validate,
   );
 
-  Uint8List _history = Uint8List(0); // last <=128 KB of input (match window)
+  Uint8List _history = Uint8List(0); // last <=blockSize bytes (match window)
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input
 
   /// Frame header: magic + descriptor + window descriptor (no content size).
@@ -47,14 +56,14 @@ class StreamingZstdEncoder implements StreamCompressor {
     ]);
   }
 
-  /// Compresses [data] (split into <=128 KB linked blocks) and returns the
+  /// Compresses [data] (split into <=[blockSize] linked blocks) and returns the
   /// frame block bytes produced.
   @override
   Uint8List addChunk(final Uint8List data) {
     final out = BytesBuilder(copy: false);
     var off = 0;
     while (off < data.length) {
-      final n = math.min(_blockInput, data.length - off);
+      final n = math.min(blockSize, data.length - off);
       out.add(_emitBlock(Uint8List.sublistView(data, off, off + n)));
       off += n;
     }
@@ -84,9 +93,21 @@ class StreamingZstdEncoder implements StreamCompressor {
       out.add(_blockHeader(last: false, type: 0, size: piece.length));
       out.add(piece);
     }
-    // Retain the last 128 KB as the window for the next block's matches.
-    _history = _tail(combined, _blockInput);
+    // Retain the last blockSize bytes as the window for the next block.
+    _history = _tail(combined, blockSize);
     return out.takeBytes();
+  }
+
+  /// Window-descriptor byte for the smallest power-of-two window >= 2*[block]
+  /// (mantissa 0). zstd's minimum window is 1 KB, so the exponent is clamped at
+  /// 0; with [block] <= 128 KB the exponent is at most 8 (256 KB window).
+  static int _windowByteFor(final int block) {
+    final target = 2 * block;
+    var exponent = 0;
+    while ((1 << (10 + exponent)) < target) {
+      exponent++;
+    }
+    return exponent << 3;
   }
 
   /// 3-byte little-endian block header: last(1) | type(2) | size(21).
