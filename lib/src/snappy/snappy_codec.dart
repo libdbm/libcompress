@@ -35,7 +35,10 @@ class SnappyCodec extends CompressionCodec {
     this.maxSize = SnappyDecoder.defaultMaxSize,
     this.framing = false,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
-  });
+  }) {
+    validatePositive(maxSize, 'maxSize');
+    validateRange(chunkSize, 1, SnappyStreamEncoder.maxChunkSize, 'chunkSize');
+  }
 
   /// Creates a Snappy codec from compression options
   factory SnappyCodec.fromOptions(final SnappyOptions options) {

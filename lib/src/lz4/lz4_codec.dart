@@ -29,7 +29,11 @@ class Lz4Codec extends CompressionCodec {
     this.blockSize = lz4DefaultBlockSize,
     this.enableContentChecksum = true,
     this.maxDecompressedSize = lz4DefaultMaxDecompressedSize,
-  });
+  }) {
+    validateLevel(level, 1, 9);
+    validateRange(blockSize, 1, lz4BlockSize4M, 'blockSize');
+    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
+  }
 
   /// Creates an LZ4 codec from compression options
   factory Lz4Codec.fromOptions(Lz4Options options) {

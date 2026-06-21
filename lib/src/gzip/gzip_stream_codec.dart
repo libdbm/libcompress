@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../compression_options.dart';
 import '../compression_stream_codec.dart';
 import '../util/crc32.dart';
 import '../util/incremental_decompress_transformer.dart';
@@ -45,7 +46,11 @@ class GzipStreamCodec extends CompressionStreamCodec {
     this.maxSize = gzipDefaultMaxDecompressedSize,
     this.maxBufferSize = defaultMaxBufferSize,
     this.verified = false,
-  });
+  }) {
+    validateLevel(level, 1, 9);
+    validateOptionalPositive(maxSize, 'maxSize');
+    validatePositive(maxBufferSize, 'maxBufferSize');
+  }
 
   @override
   String get name => 'GZIP';

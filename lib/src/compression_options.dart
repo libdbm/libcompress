@@ -37,6 +37,36 @@ abstract class CompressionOptions {
   }
 }
 
+/// Validates [level] is in `[min, max]`, throwing [ArgumentError] otherwise.
+/// Shared by codec constructors so they fail fast at the API boundary rather
+/// than later during the first compression.
+void validateLevel(int level, int min, int max) {
+  if (level < min || level > max) {
+    throw ArgumentError.value(level, 'level', 'Must be between $min and $max');
+  }
+}
+
+/// Validates [value] is in `[min, max]` (e.g. a block/chunk size).
+void validateRange(int value, int min, int max, String name) {
+  if (value < min || value > max) {
+    throw ArgumentError.value(value, name, 'Must be between $min and $max');
+  }
+}
+
+/// Validates [value] is `> 0`.
+void validatePositive(int value, String name) {
+  if (value <= 0) {
+    throw ArgumentError.value(value, name, 'Must be positive');
+  }
+}
+
+/// Validates a nullable limit is either null (unlimited) or `> 0`.
+void validateOptionalPositive(int? value, String name) {
+  if (value != null && value <= 0) {
+    throw ArgumentError.value(value, name, 'Must be positive, or null for unlimited');
+  }
+}
+
 /// Compression level presets for common use cases
 enum CompressionLevel {
   /// Fastest compression, prioritizes speed over ratio

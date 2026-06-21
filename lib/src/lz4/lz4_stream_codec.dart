@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../compression_options.dart';
 import '../compression_stream_codec.dart';
 import '../util/incremental_decompress_transformer.dart';
 import '../util/stream_compressor.dart';
@@ -46,7 +47,12 @@ class Lz4StreamCodec extends CompressionStreamCodec {
     this.maxSize = lz4DefaultMaxDecompressedSize,
     this.maxBufferSize = lz4DefaultMaxBufferSize,
     this.verified = false,
-  });
+  }) {
+    validateLevel(level, 1, 9);
+    validateRange(blockSize, 1, lz4BlockSize4M, 'blockSize');
+    validateOptionalPositive(maxSize, 'maxSize');
+    validatePositive(maxBufferSize, 'maxBufferSize');
+  }
 
   @override
   String get name => 'LZ4';
