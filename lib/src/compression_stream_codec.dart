@@ -62,7 +62,7 @@ import 'dart:typed_data';
 /// a single standard frame/member rather than one per chunk:
 /// - GZIP: one member; DEFLATE matches span chunk boundaries (32 KB window)
 /// - LZ4: one frame with linked blocks (64 KB window across blocks)
-/// - Zstd: one window-descriptor frame; blocks share a 64 KB history
+/// - Zstd: one window-descriptor frame; blocks share up to 128 KB of history
 /// - Snappy: independent ≤64 KB chunks (per the framing spec)
 ///
 /// Retained compression memory is roughly the window plus one chunk.

@@ -49,6 +49,23 @@ void main() {
         throwsA(isA<CompressionFormatException>()),
       );
     });
+
+    test('Snappy rejects many chunks exceeding the cumulative cap', () {
+      // ~400 KB -> multiple <=64 KB framing chunks, each under the 100 KB cap
+      // but cumulatively over it.
+      final big = _bytes(List.generate(400 * 1024, (i) => (i * 31 + 7) % 256));
+      final framed = SnappyCodec(framing: true).compress(big);
+      // streaming path
+      expect(
+        _decodeStream(SnappyStreamCodec(maxSize: 100 * 1024), framed),
+        throwsA(isA<CompressionFormatException>()),
+      );
+      // block multi-chunk path
+      expect(
+        () => SnappyCodec(framing: true, maxSize: 100 * 1024).decompress(framed),
+        throwsA(isA<CompressionFormatException>()),
+      );
+    });
   });
 
   group('GZIP streaming header CRC (#4)', () {
@@ -133,11 +150,81 @@ void main() {
       expect(out, orderedEquals(payload));
     });
 
+    test('LZ4 verified emits nothing when the content checksum is corrupted',
+        () async {
+      final comp = Uint8List.fromList(Lz4Codec().compress(payload));
+      comp[comp.length - 1] ^= 0xFF; // flip a content-checksum byte
+      final (out, err) = await decodeCollect(Lz4StreamCodec(verified: true), comp);
+      expect(err, isA<CompressionFormatException>());
+      expect(out, isEmpty);
+    });
+
     test('LZ4 verified round-trips valid data', () async {
       final comp = Lz4Codec().compress(payload);
       final (out, err) = await decodeCollect(Lz4StreamCodec(verified: true), comp);
       expect(err, isNull);
       expect(out, orderedEquals(payload));
+    });
+  });
+
+  group('Format strictness', () {
+    test('GZIP rejects reserved FLG bits', () {
+      final data = _bytes([
+        0x1f, 0x8b, 0x08, 0xE0, // magic, CM, FLG with reserved bits set
+        0, 0, 0, 0, 0, 3, // mtime, xfl, os
+        0x03, 0x00,
+      ]);
+      expect(() => GzipCodec().decompress(data),
+          throwsA(isA<CompressionFormatException>()));
+      expect(_decodeStream(GzipStreamCodec(), data),
+          throwsA(isA<CompressionFormatException>()));
+    });
+
+    test('Snappy rejects a framed stream without the leading identifier', () {
+      // A lone padding chunk (type 0xfe), no stream identifier.
+      final noId = _bytes([0xfe, 0x01, 0x00, 0x00, 0x00]);
+      expect(() => SnappyCodec(framing: true).decompress(noId),
+          throwsA(isA<CompressionFormatException>()));
+      expect(_decodeStream(SnappyStreamCodec(), noId),
+          throwsA(isA<CompressionFormatException>()));
+      // Empty framed input is likewise not a valid stream.
+      expect(_decodeStream(SnappyStreamCodec(), Uint8List(0)),
+          throwsA(isA<CompressionFormatException>()));
+    });
+  });
+
+  group('Stream buffer preflight (reject before allocation)', () {
+    test('an oversized input chunk is rejected before being buffered', () {
+      // Incompressible payload so the compressed blob stays well over the cap.
+      final comp = GzipCodec()
+          .compress(_bytes(List.generate(5000, (i) => (i * 131 + 7) % 256)));
+      expect(comp.length, greaterThan(64));
+      // Whole compressed blob arrives as ONE chunk, far over the tiny buffer cap.
+      final out = GzipStreamCodec(maxBufferSize: 64).decompress(Stream.value(comp));
+      expect(out.toList(), throwsA(isA<CompressionFormatException>()));
+    });
+  });
+
+  group('GZIP error boundary', () {
+    test('corrupt DEFLATE surfaces as GzipFormatException (block + stream)', () {
+      final good = Uint8List.fromList(GzipCodec().compress(_bytes(List.filled(300, 65))));
+      for (var i = 12; i < good.length - 8; i++) {
+        good[i] ^= 0xFF; // corrupt the DEFLATE body, leave header/trailer framing
+      }
+      expect(() => GzipCodec().decompress(good), throwsA(isA<GzipFormatException>()));
+      expect(_decodeStream(GzipStreamCodec(), good), throwsA(isA<GzipFormatException>()));
+    });
+  });
+
+  group('Block decoder size limits', () {
+    final payload = _bytes(List.generate(50000, (i) => (i * 13 + 5) % 256));
+
+    test('LZ4 block decoder enforces maxDecompressedSize', () {
+      final comp = Lz4Codec().compress(payload);
+      expect(
+        () => Lz4Codec(maxDecompressedSize: 1000).decompress(comp),
+        throwsA(isA<CompressionFormatException>()),
+      );
     });
   });
 }

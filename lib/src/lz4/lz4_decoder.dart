@@ -53,6 +53,9 @@ class Lz4Decoder {
     final contentChecksumFlag = (flag & 0x04) != 0;
     final dictIdFlag = (flag & 0x01) != 0;
     final bd = reader.readByte();
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
     final blockMaxSizeCode = (bd >> 4) & 0x07;
     final blockMaxSize = blockSizeFromCode(blockMaxSizeCode);
     // Both independent and linked (dependent) blocks decode correctly: a single
@@ -63,10 +66,7 @@ class Lz4Decoder {
     if (contentSizeFlag) {
       final sizeBytes = reader.readBytes(8);
       headerBytes.addAll(sizeBytes);
-      var contentSize = 0;
-      for (var i = 0; i < 8; i++) {
-        contentSize |= sizeBytes[i] << (8 * i);
-      }
+      final contentSize = ByteUtils.readUintLE(sizeBytes, 0, 8);
       expectedContentSize = contentSize;
 
       // Validate declared content size against limit early
@@ -214,13 +214,15 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.add(input);
-    if (_avail > maxBufferSize) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
       throw Lz4FormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
+        'Stream buffer would exceed $maxBufferSize bytes - '
         'frame too large or malformed',
       );
     }
+    _pending.add(input);
     guardFormat(() => _drive(emit), Lz4FormatException.new);
   }
 
@@ -263,6 +265,9 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
     }
     final bd = _pending[base + 5];
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
     final contentSizeFlag = (flag & 0x08) != 0;
     final dictIdFlag = (flag & 0x01) != 0;
     final needed = 6 + (contentSizeFlag ? 8 : 0) + (dictIdFlag ? 4 : 0) + 1;
@@ -272,12 +277,10 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     var p = base + 6;
     int? expectedContentSize;
     if (contentSizeFlag) {
-      var size = 0;
       for (var i = 0; i < 8; i++) {
-        final b = _pending[p + i];
-        headerBytes.add(b);
-        size |= b << (8 * i);
+        headerBytes.add(_pending[p + i]);
       }
+      final size = ByteUtils.readUintLE(_pending.bytes, p, 8);
       p += 8;
       expectedContentSize = size;
       final budget = _limit.remaining;

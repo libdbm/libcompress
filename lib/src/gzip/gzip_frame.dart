@@ -8,6 +8,24 @@ import 'deflate_decoder.dart';
 // Re-export exception from centralized location
 export '../exceptions.dart' show GzipFormatException;
 
+/// Runs [body] under the GZIP error contract: any DEFLATE (or other)
+/// [CompressionFormatException], or a `StateError`/`RangeError` from malformed
+/// input, surfaces as a [GzipFormatException] (message preserved), so callers
+/// catching the codec-specific exception don't miss DEFLATE-level failures.
+T gzipBoundary<T>(T Function() body) {
+  try {
+    return body();
+  } on GzipFormatException {
+    rethrow;
+  } on CompressionFormatException catch (e) {
+    throw GzipFormatException(e.message);
+  } on StateError catch (e) {
+    throw GzipFormatException(e.message);
+  } catch (e) {
+    throw GzipFormatException(e.toString());
+  }
+}
+
 /// GZIP file format implementation (RFC 1952)
 ///
 /// Handles GZIP header and trailer around DEFLATE-compressed data.
@@ -121,7 +139,10 @@ class GzipFrame {
   /// concatenated together. Validates CRC and size for each member.
   ///
   /// [maxSize] limits total output to prevent OOM attacks (null = unlimited).
-  static Uint8List decompress(Uint8List data, {int? maxSize}) {
+  static Uint8List decompress(Uint8List data, {int? maxSize}) =>
+      gzipBoundary(() => _decompress(data, maxSize: maxSize));
+
+  static Uint8List _decompress(Uint8List data, {int? maxSize}) {
     if (data.length < 10) {
       throw GzipFormatException('Invalid GZIP header: too short');
     }
@@ -180,6 +201,9 @@ class GzipFrame {
 
     // Read flags
     final flags = data[offset++];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+    }
 
     // Skip modification time (4 bytes)
     offset += 4;

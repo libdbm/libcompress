@@ -168,12 +168,11 @@ class ZstdDecoder {
 
     var lastBlock = false;
     while (!lastBlock) {
+      // A well-formed frame always has at least one block (an empty frame is a
+      // single raw last-block of size 0), so a frame body that ends before a
+      // block header is malformed — matching the streaming decoder, which
+      // requires a real last block.
       if (offset + 3 > data.length) {
-        final noBlockData = offset == data.length && output.length == 0;
-        if (noBlockData) {
-          lastBlock = true;
-          break;
-        }
         throw ZstdFormatException(
           'Unexpected end of frame while reading block header',
         );
@@ -323,10 +322,8 @@ class ZstdDecoder {
         if (pos + sizeBytes > data.length) {
           throw ZstdFormatException('Missing frame content size');
         }
-        var size = 0;
-        for (var i = 0; i < sizeBytes; i++) {
-          size |= data[pos++] << (i * 8);
-        }
+        var size = ByteUtils.readUintLE(data, pos, sizeBytes);
+        pos += sizeBytes;
         // Apply 256 offset for FCS flag 1 (2-byte encoding)
         // This encoding covers values 256-65791
         if (descriptor.contentSizeFlag == 1) {
@@ -432,13 +429,15 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.add(input);
-    if (_avail > maxBufferSize) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
       throw ZstdFormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
+        'Stream buffer would exceed $maxBufferSize bytes - '
         'frame too large or malformed',
       );
     }
+    _pending.add(input);
     guardFormat(() => _drive(emit), ZstdFormatException.new);
   }
 
@@ -516,10 +515,8 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     }
     int? contentSize;
     if (fcsBytes > 0) {
-      var size = 0;
-      for (var i = 0; i < fcsBytes; i++) {
-        size |= _pending[p++] << (i * 8);
-      }
+      var size = ByteUtils.readUintLE(_pending.bytes, p, fcsBytes);
+      p += fcsBytes;
       if (descriptor.contentSizeFlag == 1) size += 256;
       contentSize = size;
     }

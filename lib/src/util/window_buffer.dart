@@ -43,7 +43,6 @@ class WindowBuffer implements ByteSink {
   void addByte(final int byte) {
     _ensure(_length + 1);
     _buffer[_length++] = byte;
-    _guard();
   }
 
   /// Appends [count] bytes from [bytes] starting at [offset].
@@ -59,7 +58,6 @@ class WindowBuffer implements ByteSink {
       }
     }
     _length += n;
-    _guard();
   }
 
   /// Copies [length] bytes from [distance] bytes back, handling overlap
@@ -82,7 +80,6 @@ class WindowBuffer implements ByteSink {
       }
     }
     _length += length;
-    _guard();
   }
 
   /// Emits and discards bytes that are now older than [window] (no longer
@@ -106,14 +103,13 @@ class WindowBuffer implements ByteSink {
     return out;
   }
 
-  void _guard() {
+  void _ensure(final int required) {
+    // Enforce the size cap BEFORE allocating, so a malicious expansion can't
+    // allocate the full (bomb-sized) buffer and only then be rejected.
     final max = _maxSize;
-    if (max != null && _base + _length > max) {
+    if (max != null && _base + required > max) {
       throw StateError('Decompressed size exceeds maximum $max');
     }
-  }
-
-  void _ensure(final int required) {
     if (required <= _buffer.length) return;
     var capacity = _buffer.length;
     while (capacity < required) {

@@ -71,19 +71,21 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    _pending.add(input);
-    if (_avail > maxBufferSize) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
       throw GzipFormatException(
-        'Stream buffer exceeded $maxBufferSize bytes - '
+        'Stream buffer would exceed $maxBufferSize bytes - '
         'frame too large or malformed',
       );
     }
-    guardFormat(() => _drive(emit), GzipFormatException.new);
+    _pending.add(input);
+    gzipBoundary(() => _drive(emit));
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    guardFormat(() => _drive(emit), GzipFormatException.new);
+    gzipBoundary(() => _drive(emit));
     if (_phase != _Phase.header || _avail != 0) {
       throw GzipFormatException('Incomplete GZIP member at end of stream');
     }
@@ -118,6 +120,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       throw GzipFormatException('Unsupported compression method: ${_pending[p + 2]}');
     }
     final flags = _pending[p + 3];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+    }
     p += 10; // magic(2) + cm(1) + flg(1) + mtime(4) + xfl(1) + os(1)
 
     if ((flags & GzipFrame.fextra) != 0) {
@@ -324,20 +329,26 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           throw DeflateFormatException('Invalid repeat code at start');
         }
         final previous = codeLengths.last;
-        var repeat = input.readBits(2) + 3;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(2) + 3;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(previous);
         }
       } else if (symbol == 17) {
-        var repeat = input.readBits(3) + 3;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(3) + 3;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }
       } else if (symbol == 18) {
-        var repeat = input.readBits(7) + 11;
-        if (repeat > total - codeLengths.length) repeat = total - codeLengths.length;
+        final repeat = input.readBits(7) + 11;
+        if (repeat > total - codeLengths.length) {
+          throw DeflateFormatException('Run-length code overruns code-length table');
+        }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
         }

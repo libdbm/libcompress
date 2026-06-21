@@ -32,9 +32,6 @@ class Lz4StreamCodec extends CompressionStreamCodec {
   /// Maximum buffer size for compressed data before rejecting
   final int maxBufferSize;
 
-  /// Chunk size for buffering input during compression
-  final int chunkSize;
-
   /// When true, a frame's output is withheld until its content checksum and
   /// size validate, then released (buffers up to one frame's output, bounded
   /// by [maxSize]). The default (false) emits as it decodes, so an integrity
@@ -48,7 +45,6 @@ class Lz4StreamCodec extends CompressionStreamCodec {
     this.checksum = true,
     this.maxSize = lz4DefaultMaxDecompressedSize,
     this.maxBufferSize = lz4DefaultMaxBufferSize,
-    this.chunkSize = 1024 * 1024, // 1MB default
     this.verified = false,
   });
 

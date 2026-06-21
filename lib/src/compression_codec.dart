@@ -59,6 +59,11 @@ enum CodecMode {
 /// Each codec supports a maximum decompressed size limit to prevent
 /// decompression bomb attacks. Configure via codec-specific constructors
 /// (e.g., `Lz4Codec(maxDecompressedSize: 10 * 1024 * 1024)`).
+///
+/// The constructors default to a sane cap. Passing `null` (or
+/// `maxSize: null`) means **unlimited output** and removes that protection —
+/// use it only with **trusted input**. For untrusted/attacker-controlled data,
+/// always keep a finite limit.
 abstract class CompressionCodec {
   /// Compress data synchronously
   ///

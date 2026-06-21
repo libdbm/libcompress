@@ -32,9 +32,6 @@ class ZstdStreamCodec extends CompressionStreamCodec {
   /// Maximum buffer size for compressed data before rejecting
   final int maxBufferSize;
 
-  /// Chunk size for buffering input during compression
-  final int chunkSize;
-
   /// Whether to validate compressed blocks by decompressing them
   final bool validate;
 
@@ -51,7 +48,6 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     this.checksum = false,
     this.maxSize = zstdDefaultMaxDecompressedSize,
     this.maxBufferSize = zstdDefaultMaxBufferSize,
-    this.chunkSize = 1024 * 1024, // 1MB default
     this.validate = false,
     this.verified = false,
   });
