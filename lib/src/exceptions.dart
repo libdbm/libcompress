@@ -23,14 +23,16 @@ abstract class CompressionFormatException extends FormatException {
   const CompressionFormatException(super.message);
 }
 
-/// Runs [body], converting any error that is *not* already a
-/// [CompressionFormatException] (e.g. a `StateError` or `RangeError` thrown
-/// deep in a decoder on malformed input) into a codec-specific format
-/// exception via [wrap].
+/// Runs [body], converting the *input-validation* errors a decoder throws on
+/// malformed data into a codec-specific [CompressionFormatException] via [wrap]:
+/// `StateError` (e.g. exhausted bit reader), `ArgumentError` (incl. its
+/// subtypes `RangeError`/`IndexError`, e.g. an out-of-window back-reference),
+/// and plain `FormatException`.
 ///
-/// This gives callers a single, reliable boundary: invalid compressed input
-/// always surfaces as a [CompressionFormatException], never as an internal
-/// implementation exception.
+/// Other errors — `TypeError`, `NoSuchMethodError`, `AssertionError`, generic
+/// `Error`, etc. — are NOT caught: they indicate a library bug (corrupted
+/// internal state), and masking them as "bad compressed data" would destroy
+/// the signal. They propagate unchanged so callers/observability can see them.
 T guardFormat<T>(
   final T Function() body,
   final CompressionFormatException Function(String message) wrap,
@@ -39,10 +41,12 @@ T guardFormat<T>(
     return body();
   } on CompressionFormatException {
     rethrow;
+  } on FormatException catch (e) {
+    throw wrap(e.message.toString());
+  } on ArgumentError catch (e) {
+    throw wrap(e.message?.toString() ?? e.toString());
   } on StateError catch (e) {
     throw wrap(e.message);
-  } catch (e) {
-    throw wrap(e.toString());
   }
 }
 
