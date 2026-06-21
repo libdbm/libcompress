@@ -19,8 +19,9 @@ const int snappyDefaultMaxBufferSize = 64 * 1024 * 1024;
 /// Snappy framing format. The framing format allows for streaming
 /// decompression and chunk-based processing.
 class SnappyStreamCodec extends CompressionStreamCodec {
-  /// Maximum uncompressed size per chunk
-  final int maxSize;
+  /// Maximum cumulative decompressed size across all chunks
+  /// (`null` = unlimited; trusted input only).
+  final int? maxSize;
 
   /// Maximum buffer size for compressed data before rejecting
   final int maxBufferSize;
@@ -30,11 +31,11 @@ class SnappyStreamCodec extends CompressionStreamCodec {
 
   /// Creates a Snappy streaming codec
   SnappyStreamCodec({
-    this.maxSize = SnappyDecoder.defaultMaxSize,
+    this.maxSize = snappyDefaultMaxDecompressedSize,
     this.maxBufferSize = snappyDefaultMaxBufferSize,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
   }) {
-    validatePositive(maxSize, 'maxSize');
+    validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
     validateRange(chunkSize, 1, SnappyStreamEncoder.maxChunkSize, 'chunkSize');
   }
@@ -64,7 +65,7 @@ class SnappyStreamCodec extends CompressionStreamCodec {
 class SnappyIncrementalDecoder implements IncrementalDecoder {
   SnappyIncrementalDecoder({required this.maxSize, required this.maxBufferSize});
 
-  final int maxSize;
+  final int? maxSize;
   final int maxBufferSize;
 
   // Cumulative output cap across all chunks (the per-chunk SnappyStreamDecoder
@@ -98,7 +99,7 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
       final chunk = _pending.slice(_cursor, _cursor + chunkSize);
       final decoded = _decoder.decompressChunk(chunk);
       _limit.record(decoded.length);
-      if (_limit.produced > maxSize) {
+      if (maxSize != null && _limit.produced > maxSize!) {
         throw SnappyFormatException(
           'Decompressed size ${_limit.produced} exceeds maximum allowed size $maxSize',
         );

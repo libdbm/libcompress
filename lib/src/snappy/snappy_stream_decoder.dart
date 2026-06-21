@@ -27,7 +27,7 @@ class SnappyStreamDecoder {
   static const int chunkTypePadding = 0xfe;
 
   /// Maximum allowed uncompressed size per chunk
-  final int maxUncompressedSize;
+  final int? maxUncompressedSize;
 
   /// Whether we've seen a stream identifier (for incremental decoding)
   bool _seenIdentifier = false;
@@ -126,8 +126,9 @@ class SnappyStreamDecoder {
     // Decompress the data (after checksum), bounded by the 64 KB per-chunk
     // spec limit (and any smaller configured cap).
     final compressed = Uint8List.sublistView(chunk.data, 4);
-    final chunkLimit = maxUncompressedSize < _maxChunkUncompressed
-        ? maxUncompressedSize
+    final chunkLimit = (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
         : _maxChunkUncompressed;
     final decompressed = SnappyDecoder.decompress(
       compressed,
@@ -161,8 +162,9 @@ class SnappyStreamDecoder {
     final uncompressed = Uint8List.sublistView(chunk.data, 4);
 
     // Validate maximum size (the 64 KB per-chunk spec limit and any smaller cap)
-    final chunkLimit = maxUncompressedSize < _maxChunkUncompressed
-        ? maxUncompressedSize
+    final chunkLimit = (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
         : _maxChunkUncompressed;
     if (uncompressed.length > chunkLimit) {
       throw SnappyFormatException(
@@ -207,7 +209,7 @@ class SnappyStreamDecoder {
       total += decompressed.length;
       // Cumulative cap across all chunks (each chunk alone is bounded by
       // maxUncompressedSize, but an unbounded number of chunks is not).
-      if (total > maxUncompressedSize) {
+      if (maxUncompressedSize != null && total > maxUncompressedSize!) {
         throw SnappyFormatException(
           'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
         );
