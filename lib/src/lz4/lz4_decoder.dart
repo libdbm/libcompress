@@ -32,6 +32,24 @@ class Lz4Decoder {
 
     final reader = _FrameReader(input);
 
+    // Decode each concatenated frame into one output, enforcing maxSize
+    // cumulatively across frames (matching the GZIP/Zstd block decoders and the
+    // LZ4 streaming decoder, which all accept concatenated members/frames).
+    final frames = BytesBuilder(copy: false);
+    var total = 0;
+    while (!reader.isAtEnd) {
+      final remaining = maxSize != null ? maxSize! - total : null;
+      final frame = _decodeFrame(reader, remaining);
+      frames.add(frame);
+      total += frame.length;
+    }
+    return frames.takeBytes();
+  }
+
+  /// Decodes a single LZ4 frame at the reader's current position, bounding its
+  /// output to [remaining] (null = unlimited), and advances the reader past the
+  /// frame (end mark + optional content checksum).
+  Uint8List _decodeFrame(final _FrameReader reader, final int? remaining) {
     final magic = reader.readUint32();
     if (magic != lz4FrameMagic) {
       throw Lz4FormatException(
@@ -69,11 +87,11 @@ class Lz4Decoder {
       final contentSize = ByteUtils.readUintLE(sizeBytes, 0, 8);
       expectedContentSize = contentSize;
 
-      // Validate declared content size against limit early
-      if (maxSize != null && contentSize > maxSize!) {
+      // Validate declared content size against the remaining limit early
+      if (remaining != null && contentSize > remaining) {
         throw Lz4FormatException(
           'Declared content size $contentSize exceeds '
-          'maximum allowed size $maxSize',
+          'maximum allowed size $remaining',
         );
       }
     }
@@ -96,10 +114,10 @@ class Lz4Decoder {
     var initialCapacity = expectedContentSize != null
         ? math.max(256, math.min(expectedContentSize, blockMaxSize * 2))
         : blockMaxSize;
-    if (maxSize != null && initialCapacity > maxSize!) {
-      initialCapacity = maxSize!;
+    if (remaining != null && initialCapacity > remaining) {
+      initialCapacity = remaining;
     }
-    final output = GrowableBuffer(initialCapacity, maxSize);
+    final output = GrowableBuffer(initialCapacity, remaining);
     final blockDecoder = _BlockDecoder(output);
 
     while (true) {
@@ -143,10 +161,6 @@ class Lz4Decoder {
       if (expectedContentChecksum != actualContentChecksum) {
         throw Lz4FormatException('Content checksum mismatch');
       }
-    }
-
-    if (!reader.isAtEnd) {
-      throw Lz4FormatException('Trailing bytes after LZ4 frame');
     }
 
     if (expectedContentSize != null &&
