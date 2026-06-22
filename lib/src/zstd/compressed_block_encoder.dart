@@ -60,15 +60,18 @@ class CompressedBlockEncoder {
   /// Returns the encoded block data (without block header).
   ///
   /// Bytes in `input[0..from)` are a history prefix used only for matching
-  /// (cross-chunk back-references); the block encodes `input[from..]`.
-  Uint8List encodeBlock(final Uint8List input, {final int from = 0}) {
-    if (input.length - from <= 0) {
+  /// (cross-chunk back-references); the block encodes `input[from..end)`.
+  /// [end] defaults to `input.length`; pass a smaller bound to encode a prefix
+  /// of a larger (reused) buffer without slicing/copying it.
+  Uint8List encodeBlock(final Uint8List input, {final int from = 0, final int? end}) {
+    final limit = end ?? input.length;
+    if (limit - from <= 0) {
       return Uint8List(0);
     }
 
     try {
       final matchFinder = _matchFinder;
-      final matchResult = matchFinder.findMatches(input, from: from);
+      final matchResult = matchFinder.findMatches(input, from: from, end: limit);
       final matches = matchResult.$1;
       final trailingLiterals = matchResult.$2;
 
@@ -90,7 +93,9 @@ class CompressedBlockEncoder {
       output.setRange(0, literalSection.length, literalSection);
       output.setRange(literalSection.length, output.length, sequencesSection);
 
-      if (validate && !_validateEncodedBlock(output, input)) {
+      final validateSource =
+          limit == input.length ? input : Uint8List.sublistView(input, 0, limit);
+      if (validate && !_validateEncodedBlock(output, validateSource)) {
         lastValidationError ??= 'Unknown validation error';
         return Uint8List(0);
       }
