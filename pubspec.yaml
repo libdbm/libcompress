@@ -7,6 +7,9 @@ issue_tracker: https://github.com/libdbm/libcompress/issues
 environment:
   sdk: ^3.8.1
 
+executables:
+  libcompress:
+
 topics:
   - compression
   - lz4
