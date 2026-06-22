@@ -27,17 +27,40 @@ class ZstdEncoder {
   final bool enableChecksum;
   final bool validate;
 
+  /// Fail loud on an unexpected compressed-block encode error instead of
+  /// silently falling back to a raw block. See [CompressedBlockEncoder.strict].
+  final bool strict;
+
+  /// Observability hook for silent raw-block fallbacks (see [fallbacks]).
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Search depth for match finding (derived from level)
   late final int searchDepth;
 
   /// Minimum match length (lower = better compression, slower)
   late final int minMatchLen;
 
+  // Reused across compress() calls and blocks (its match finder owns large
+  // hash/chain tables that should be allocated once, not per block).
+  late final CompressedBlockEncoder _compressedEncoder = CompressedBlockEncoder(
+    searchDepth: searchDepth,
+    minMatch: minMatchLen,
+    validate: validate,
+    strict: strict,
+    onFallback: onFallback,
+  );
+
+  /// Number of blocks that fell back to raw output due to an unexpected encode
+  /// error (0 in healthy operation; >0 signals a compression regression).
+  int get fallbacks => _compressedEncoder.fallbacks;
+
   ZstdEncoder({
     this.level = 3,
     this.blockSize = 128 * 1024,
     this.enableChecksum = false,
     this.validate = false,
+    this.strict = false,
+    this.onFallback,
   }) {
     if (level < 1 || level > 22) {
       throw ArgumentError('Level must be between 1 and 22, got $level');
@@ -86,13 +109,7 @@ class ZstdEncoder {
     if (input.isEmpty) {
       pos = _writeBlockHeader(output, pos, true, ZstdBlockType.raw, 0);
     } else {
-      // One encoder reused across blocks (its match finder owns large
-      // hash/chain tables that should be allocated once, not per block).
-      final compressedEncoder = CompressedBlockEncoder(
-        searchDepth: searchDepth,
-        minMatch: minMatchLen,
-        validate: validate,
-      );
+      final compressedEncoder = _compressedEncoder;
 
       // Compress data in blocks
       var offset = 0;

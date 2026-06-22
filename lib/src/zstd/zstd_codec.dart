@@ -52,6 +52,17 @@ class ZstdCodec extends CompressionCodec {
   /// to verify correctness. This doubles CPU work but is useful for debugging.
   final bool validate;
 
+  /// Fail loud if an unexpected error makes a compressed block fall back to raw
+  /// output, instead of silently degrading to raw framing. Independent of
+  /// [validate] (no decode cost). Default false (fall back, optionally observed
+  /// via [onFallback]).
+  final bool strict;
+
+  /// Hook invoked when an unexpected encode error makes a block fall back to a
+  /// raw block — wire a log/metric so the ratio collapse isn't silent; null =
+  /// no-op. Not called for the legitimate "incompressible" path.
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Creates a Zstd codec with specified options
   ZstdCodec({
     this.level = 3,
@@ -59,6 +70,8 @@ class ZstdCodec extends CompressionCodec {
     this.enableChecksum = false,
     this.maxDecompressedSize = zstdDefaultMaxDecompressedSize,
     this.validate = false,
+    this.strict = false,
+    this.onFallback,
   }) {
     validateLevel(level, 1, 22);
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
@@ -83,6 +96,8 @@ class ZstdCodec extends CompressionCodec {
       blockSize: blockSize,
       enableChecksum: enableChecksum,
       validate: validate,
+      strict: strict,
+      onFallback: onFallback,
     );
     return compressor.compress(data);
   }

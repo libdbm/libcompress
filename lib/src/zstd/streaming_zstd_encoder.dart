@@ -21,6 +21,8 @@ class StreamingZstdEncoder implements StreamCompressor {
     this.checksum = false,
     this.validate = false,
     this.blockSize = zstdMaxBlockSize,
+    this.strict = false,
+    this.onFallback,
   }) : assert(blockSize > 0 && blockSize <= zstdMaxBlockSize);
 
   final int level;
@@ -31,6 +33,13 @@ class StreamingZstdEncoder implements StreamCompressor {
   /// blocks lower latency/memory; larger blocks improve ratio.
   final int blockSize;
 
+  /// Fail loud on an unexpected compressed-block encode error instead of
+  /// silently falling back to a raw block. See [CompressedBlockEncoder.strict].
+  final bool strict;
+
+  /// Observability hook for silent raw-block fallbacks (see [fallbacks]).
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   // Declared window = smallest power of two >= 2*blockSize, so the combined
   // `history (<=blockSize) + block (<=blockSize)` always fits and absolute
   // match offsets stay below it.
@@ -40,7 +49,13 @@ class StreamingZstdEncoder implements StreamCompressor {
     searchDepth: _searchDepth(level),
     minMatch: level >= 6 ? 3 : 4,
     validate: validate,
+    strict: strict,
+    onFallback: onFallback,
   );
+
+  /// Number of blocks that fell back to raw output due to an unexpected encode
+  /// error (0 in healthy operation; >0 signals a compression regression).
+  int get fallbacks => _encoder.fallbacks;
 
   Uint8List _history = Uint8List(0); // last <=blockSize bytes (match window)
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input

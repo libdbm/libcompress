@@ -29,15 +29,25 @@ class CompressedBlockEncoder {
   String? lastValidationStack;
 
   /// Optional hook invoked when an unexpected encode error makes the block fall
-  /// back to raw output (normal mode). Lets production wire a log/metric so the
-  /// fallback isn't silent; null = no-op.
+  /// back to raw output. Lets production wire a log/metric so the fallback isn't
+  /// silent; null = no-op.
   final void Function(Object error, StackTrace stackTrace)? onFallback;
+
+  /// When true, an unexpected compressed-encode error is rethrown instead of
+  /// silently falling back to a raw block (fail-loud). Independent of [validate]
+  /// (which also rethrows but doubles CPU by decoding every block).
+  final bool strict;
+
+  /// Count of unexpected-error fallbacks to raw output. Does NOT count the
+  /// legitimate "incompressible" path (empty result with no error).
+  int fallbacks = 0;
 
   /// Creates a compressed block encoder with specified search depth
   CompressedBlockEncoder({
     this.searchDepth = 32,
     this.minMatch = 3,
     this.validate = false,
+    this.strict = false,
     this.onFallback,
   });
 
@@ -94,7 +104,8 @@ class CompressedBlockEncoder {
       // when validation is enabled.
       lastValidationError = 'Compressed block encoding failed: $e';
       lastValidationStack = st.toString();
-      if (validate) rethrow;
+      fallbacks++;
+      if (validate || strict) rethrow;
       onFallback?.call(e, st);
       return Uint8List(0);
     }
