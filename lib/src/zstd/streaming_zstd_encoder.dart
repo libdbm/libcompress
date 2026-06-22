@@ -21,6 +21,8 @@ class StreamingZstdEncoder implements StreamCompressor {
     this.checksum = false,
     this.validate = false,
     this.blockSize = zstdMaxBlockSize,
+    this.strict = false,
+    this.onFallback,
   }) : assert(blockSize > 0 && blockSize <= zstdMaxBlockSize);
 
   final int level;
@@ -31,6 +33,13 @@ class StreamingZstdEncoder implements StreamCompressor {
   /// blocks lower latency/memory; larger blocks improve ratio.
   final int blockSize;
 
+  /// Fail loud on an unexpected compressed-block encode error instead of
+  /// silently falling back to a raw block. See [CompressedBlockEncoder.strict].
+  final bool strict;
+
+  /// Observability hook for silent raw-block fallbacks (see [fallbacks]).
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   // Declared window = smallest power of two >= 2*blockSize, so the combined
   // `history (<=blockSize) + block (<=blockSize)` always fits and absolute
   // match offsets stay below it.
@@ -40,9 +49,23 @@ class StreamingZstdEncoder implements StreamCompressor {
     searchDepth: _searchDepth(level),
     minMatch: level >= 6 ? 3 : 4,
     validate: validate,
+    strict: strict,
+    onFallback: onFallback,
   );
 
-  Uint8List _history = Uint8List(0); // last <=blockSize bytes (match window)
+  /// Number of blocks that fell back to raw output due to an unexpected encode
+  /// error (0 in healthy operation; >0 signals a compression regression).
+  int get fallbacks => _encoder.fallbacks;
+
+  // Two reused, ping-ponged window buffers. The active buffer holds
+  // `history (<=blockSize) at [0.._hist)` followed by the appended piece, and is
+  // matched in place (native element access, bounded by `end`). After each block
+  // the next history is copied into the *other* buffer (non-overlapping) and the
+  // buffers swap — no per-block concat/tail allocation.
+  late Uint8List _cur = Uint8List(2 * blockSize);
+  late Uint8List _alt = Uint8List(2 * blockSize);
+  int _hist = 0; // bytes of history at the front of _cur (<= blockSize)
+
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input
 
   /// Frame header: magic + descriptor + window descriptor (no content size).
@@ -81,20 +104,35 @@ class StreamingZstdEncoder implements StreamCompressor {
 
   Uint8List _emitBlock(final Uint8List piece) {
     _sink.add(piece);
-    final combined = _concat(_history, piece);
-    final from = _history.length;
-    final compressed = _encoder.encodeBlock(combined, from: from);
+    final pieceLen = piece.length;
+
+    // Append the piece after the front-anchored history in the active buffer.
+    // _hist + pieceLen <= 2*blockSize == buffer length.
+    _cur.setRange(_hist, _hist + pieceLen, piece);
+    final total = _hist + pieceLen;
+
+    // Match over the native buffer directly (fast element access), bounded to
+    // the live region via `end` — no view/copy. Identical bytes/layout to the
+    // old concatenated buffer, so the output is unchanged.
+    final compressed = _encoder.encodeBlock(_cur, from: _hist, end: total);
 
     final out = BytesBuilder(copy: false);
-    if (compressed.isNotEmpty && compressed.length < piece.length) {
+    if (compressed.isNotEmpty && compressed.length < pieceLen) {
       out.add(_blockHeader(last: false, type: 2, size: compressed.length));
       out.add(compressed);
     } else {
-      out.add(_blockHeader(last: false, type: 0, size: piece.length));
+      out.add(_blockHeader(last: false, type: 0, size: pieceLen));
       out.add(piece);
     }
-    // Retain the last blockSize bytes as the window for the next block.
-    _history = _tail(combined, blockSize);
+
+    // Copy the last <=blockSize bytes as the next block's history into the
+    // alternate buffer (non-overlapping) and swap. No allocation.
+    final newHist = math.min(blockSize, total);
+    _alt.setRange(0, newHist, _cur, total - newHist);
+    final swap = _cur;
+    _cur = _alt;
+    _alt = swap;
+    _hist = newHist;
     return out.takeBytes();
   }
 
@@ -127,18 +165,6 @@ class StreamingZstdEncoder implements StreamCompressor {
     if (level <= 12) return 256;
     if (level <= 16) return 512;
     return 1024;
-  }
-
-  static Uint8List _concat(final Uint8List a, final Uint8List b) {
-    final out = Uint8List(a.length + b.length);
-    out.setRange(0, a.length, a);
-    out.setRange(a.length, out.length, b);
-    return out;
-  }
-
-  static Uint8List _tail(final Uint8List b, final int n) {
-    if (b.length <= n) return Uint8List.fromList(b);
-    return Uint8List.fromList(Uint8List.sublistView(b, b.length - n));
   }
 
   static Uint8List _u32le(final int v) => Uint8List.fromList([

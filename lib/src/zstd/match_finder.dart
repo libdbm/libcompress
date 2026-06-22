@@ -44,9 +44,14 @@ class MatchFinder {
   late final List<int> _hashTable = List<int>.filled(_hashTableSize, -1);
   late final List<int> _chainTable = List<int>.filled(_chainSize, -1);
 
+  // Logical end of the data being matched, set per findMatches run. Lets the
+  // streaming encoder pass a larger reused buffer (native, fast element access)
+  // while bounding matching to the live `history + piece` region.
+  int _end = 0;
+
   /// Hash function for match finding
   int _hash(final Uint8List data, final int pos) {
-    if (pos + 3 >= data.length) return 0;
+    if (pos + 3 >= _end) return 0;
     final v = ByteUtils.readUint32LE(data, pos);
     final product = ByteUtils.mul32(v, 2654435761);
     return (product >> (32 - _hashLog)) & _hashMask;
@@ -60,9 +65,14 @@ class MatchFinder {
   /// prefix: they seed the hash so matches in the new region can reference them
   /// (cross-chunk back-references), but no tokens are emitted for them. With
   /// the default `from == 0` this is plain whole-buffer matching.
-  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input, {final int from = 0}) {
-    if (input.length - from < minMatch) {
-      return (<ZstdMatch>[], Uint8List.sublistView(input, from));
+  /// Matches `input[from..end)`; `[0, from)` is a history prefix (seeds the
+  /// hash, emits no tokens). [end] defaults to `input.length`; pass a smaller
+  /// bound to match only a prefix of a larger (reused) buffer.
+  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input,
+      {final int from = 0, final int? end}) {
+    _end = end ?? input.length;
+    if (_end - from < minMatch) {
+      return (<ZstdMatch>[], Uint8List.sublistView(input, from, _end));
     }
 
     final matches = <ZstdMatch>[];
@@ -76,8 +86,7 @@ class MatchFinder {
 
     var pos = from;
     var anchor = from;
-    final end = input.length;
-    final limit = end - minMatch;
+    final limit = _end - minMatch;
 
     while (pos <= limit) {
       // Hash this position once and reuse it for the chain search and the
@@ -122,7 +131,7 @@ class MatchFinder {
     }
 
     // Trailing literals
-    final trailing = Uint8List.sublistView(input, anchor);
+    final trailing = Uint8List.sublistView(input, anchor, _end);
     return (matches, trailing);
   }
 
@@ -148,7 +157,7 @@ class MatchFinder {
   ) {
     var bestLen = 0;
     var bestOffset = 0;
-    final end = input.length;
+    final end = _end;
 
     // Search hash chain for best match
     var candidate = hashTable[hash];
@@ -191,7 +200,7 @@ class MatchFinder {
 
     // Fast 8-byte comparison when possible
     while (len + 8 <= limit) {
-      if (ref + len + 7 >= data.length) break;
+      if (ref + len + 7 >= _end) break;
       var diff = false;
       for (var i = 0; i < 8; i++) {
         if (data[ref + len + i] != data[cur + len + i]) {

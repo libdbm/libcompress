@@ -42,6 +42,14 @@ class ZstdStreamCodec extends CompressionStreamCodec {
   /// error can arrive after some bytes were already emitted.
   final bool verified;
 
+  /// Fail loud if an unexpected error makes a compressed block fall back to raw
+  /// output during streaming compression, instead of silently degrading.
+  final bool strict;
+
+  /// Hook invoked on a silent raw-block fallback during streaming compression
+  /// (wire a log/metric); null = no-op. Not called for the "incompressible" path.
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Creates a Zstd streaming codec
   ZstdStreamCodec({
     this.level = 3,
@@ -51,6 +59,8 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     this.maxBufferSize = zstdDefaultMaxBufferSize,
     this.validate = false,
     this.verified = false,
+    this.strict = false,
+    this.onFallback,
   }) {
     validateLevel(level, 1, 22);
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
@@ -72,6 +82,8 @@ class ZstdStreamCodec extends CompressionStreamCodec {
         checksum: checksum,
         validate: validate,
         blockSize: blockSize,
+        strict: strict,
+        onFallback: onFallback,
       ),
     );
   }

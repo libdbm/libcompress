@@ -15,6 +15,9 @@ final _cliBenchmarks = Platform.environment['RUN_CLI_BENCHMARKS'] == '1';
 
 void main() {
   group('Comprehensive Compression Benchmark', () {
+    // Wall-clock "best of 5" timing is slow (~minute) and not a reliable CI
+    // signal, so this is gated out of the default suite. Deterministic
+    // compression-ratio floors live in perf_budget_test.dart, which always runs.
     test('generate detailed performance comparison report', () {
       final report = BenchmarkReport(
         verbose: _verbose,
@@ -22,7 +25,18 @@ void main() {
       );
       report.run();
       report.print();
-    });
+
+      // A green benchmark must mean every round-trip actually verified
+      // (excludes CLI tools that weren't available, marked error 'N/A').
+      final failed =
+          report.results.where((r) => !r.valid && r.error != 'N/A').toList();
+      expect(
+        failed,
+        isEmpty,
+        reason: 'codec round-trip failures: '
+            '${failed.map((f) => '${f.implementation} ${f.codec}/${f.dataset}: ${f.error ?? 'invalid'}').join('; ')}',
+      );
+    }, skip: !_benchmarks ? 'set RUN_BENCHMARKS=1 to run benchmarks' : null);
   });
 }
 
