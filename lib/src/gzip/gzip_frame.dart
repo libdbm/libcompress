@@ -8,6 +8,28 @@ import 'deflate_decoder.dart';
 // Re-export exception from centralized location
 export '../exceptions.dart' show GzipFormatException;
 
+/// Runs [body] under the GZIP error contract: any DEFLATE (or other)
+/// [CompressionFormatException], or a `StateError`/`RangeError` from malformed
+/// input, surfaces as a [GzipFormatException] (message preserved), so callers
+/// catching the codec-specific exception don't miss DEFLATE-level failures.
+T gzipBoundary<T>(T Function() body) {
+  try {
+    return body();
+  } on GzipFormatException {
+    rethrow;
+  } on CompressionFormatException catch (e) {
+    // DEFLATE-level (or other) format errors surface under the GZIP contract.
+    throw GzipFormatException(e.message);
+  } on FormatException catch (e) {
+    throw GzipFormatException(e.message.toString());
+  } on ArgumentError catch (e) {
+    throw GzipFormatException(e.message?.toString() ?? e.toString());
+  } on StateError catch (e) {
+    throw GzipFormatException(e.message);
+  }
+  // Other errors (library bugs) propagate unchanged — see [guardFormat].
+}
+
 /// GZIP file format implementation (RFC 1952)
 ///
 /// Handles GZIP header and trailer around DEFLATE-compressed data.
@@ -56,7 +78,8 @@ class GzipFrame {
 
     // Build header
     final flags = _buildFlags(filename: filename, comment: comment);
-    final mtime = modificationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    final mtime =
+        modificationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
     // Write header
     output.addByte(id1);
@@ -121,7 +144,10 @@ class GzipFrame {
   /// concatenated together. Validates CRC and size for each member.
   ///
   /// [maxSize] limits total output to prevent OOM attacks (null = unlimited).
-  static Uint8List decompress(Uint8List data, {int? maxSize}) {
+  static Uint8List decompress(Uint8List data, {int? maxSize}) =>
+      gzipBoundary(() => _decompress(data, maxSize: maxSize));
+
+  static Uint8List _decompress(Uint8List data, {int? maxSize}) {
     if (data.length < 10) {
       throw GzipFormatException('Invalid GZIP header: too short');
     }
@@ -134,7 +160,9 @@ class GzipFrame {
     while (position < data.length) {
       // Check for minimum member size
       if (position + 10 > data.length) {
-        throw GzipFormatException('Incomplete GZIP member at position $position');
+        throw GzipFormatException(
+          'Incomplete GZIP member at position $position',
+        );
       }
 
       // Calculate remaining size limit for this member
@@ -180,6 +208,11 @@ class GzipFrame {
 
     // Read flags
     final flags = data[offset++];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException(
+        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
+      );
+    }
 
     // Skip modification time (4 bytes)
     offset += 4;
@@ -206,7 +239,9 @@ class GzipFrame {
         offset++;
       }
       if (offset >= data.length) {
-        throw GzipFormatException('Truncated FNAME field: missing NUL terminator');
+        throw GzipFormatException(
+          'Truncated FNAME field: missing NUL terminator',
+        );
       }
       offset++; // Skip null terminator
     }
@@ -217,7 +252,9 @@ class GzipFrame {
         offset++;
       }
       if (offset >= data.length) {
-        throw GzipFormatException('Truncated FCOMMENT field: missing NUL terminator');
+        throw GzipFormatException(
+          'Truncated FCOMMENT field: missing NUL terminator',
+        );
       }
       offset++; // Skip null terminator
     }
@@ -247,7 +284,9 @@ class GzipFrame {
     final compressedStart = offset;
     final compressedData = Uint8List.sublistView(data, compressedStart);
     final decoder = DeflateDecoder(maxSize: maxSize);
-    final (decompressed, consumed) = decoder.decompressWithPosition(compressedData);
+    final (decompressed, consumed) = decoder.decompressWithPosition(
+      compressedData,
+    );
     offset = compressedStart + consumed;
 
     // Read and validate trailer (CRC32 + ISIZE)
@@ -256,7 +295,8 @@ class GzipFrame {
     }
 
     // Read CRC32
-    final expectedCrc = data[offset] |
+    final expectedCrc =
+        data[offset] |
         (data[offset + 1] << 8) |
         (data[offset + 2] << 16) |
         (data[offset + 3] << 24);
@@ -272,7 +312,8 @@ class GzipFrame {
     }
 
     // Read ISIZE (original file size mod 2^32)
-    final expectedSize = data[offset] |
+    final expectedSize =
+        data[offset] |
         (data[offset + 1] << 8) |
         (data[offset + 2] << 16) |
         (data[offset + 3] << 24);
@@ -281,7 +322,9 @@ class GzipFrame {
     // Verify size (modulo 2^32)
     final actualSize = decompressed.length & 0xFFFFFFFF;
     if (actualSize != expectedSize) {
-      throw GzipFormatException('Size mismatch: expected $expectedSize, got $actualSize');
+      throw GzipFormatException(
+        'Size mismatch: expected $expectedSize, got $actualSize',
+      );
     }
 
     return (decompressed, offset - start);

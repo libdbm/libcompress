@@ -23,14 +23,16 @@ dependencies - works on all Dart platforms.
   - CRC32 verification
   - Compatible with `gzip` command-line tool
 
-- **Zstd Compression**: Full Zstandard implementation (RFC 8878)
+- **Zstd Compression**: Zstandard implementation (RFC 8878)
   - Compressed blocks with Huffman/FSE entropy coding
   - Sequence encoding (literal lengths, offsets, match lengths)
   - Repeat offset optimization
   - Hash chain match finding with configurable depth
   - Compression levels 1-22
   - Optional XXH64 content checksums
-  - Compatible with `zstd` command-line tool
+  - Compatible with the `zstd` command-line tool for non-dictionary frames
+  - **Not supported:** dictionary-compressed frames (frames with a Dictionary_ID
+    are rejected) and the legacy (pre-v0.8) frame formats
 
 - **Stream Processing**: All codecs support stream-based compression/decompression
 
@@ -149,12 +151,19 @@ All codecs produce output compatible with standard command-line tools:
 | Zstd   | `zstd`   | ✓        |
 
 Bidirectional compatibility: library output can be decompressed by CLI tools, and CLI output can be decompressed by
-the library.
+the library. One exception: **Zstd dictionary-compressed frames** (produced with `zstd -D`) are not supported and are
+rejected on decode.
 
 ## Security
 
-- All decompressors enforce `maxSize` limits to prevent OOM attacks
-- Stream decompressors have 64MB buffer limits
+- All decompressors enforce a `maxSize` limit by default to prevent decompression-bomb / OOM attacks. Passing
+  `null` disables the limit (unlimited output) and should be used only with **trusted** input.
+- Stream decompressors additionally cap buffered compressed input (default 64MB), rejecting oversized chunks
+  before allocating them.
+- **For untrusted or large input, prefer the streaming APIs**: block decode builds the whole output (up to the
+  cap) and verifies trailers/checksums only at the end, so corrupt data can still consume CPU and memory up to the
+  limit before rejection. Streaming decode is incremental and bounded; use `verified: true` when all-or-nothing
+  integrity (no output emitted until the trailer validates) is required.
 - Block size validation per format specifications
 - No dictionary support (prevents dictionary-based attacks)
 

@@ -10,6 +10,46 @@ class ByteUtils {
     return data[offset] | (data[offset + 1] << 8);
   }
 
+  /// Returns the low 32 bits of `left * right`, treating both as unsigned
+  /// 32-bit values, without allocating.
+  ///
+  /// A full 32x32 product is up to 2^64 and loses precision on JavaScript
+  /// (doubles are exact only below 2^53). This splits `left` into 16-bit
+  /// halves so every intermediate stays below 2^53, giving the exact result
+  /// on both native and dart2js without the cost of [BigInt].
+  static int mul32(final int left, final int right) {
+    final low = (left & 0xFFFF) * right;
+    final high = ((left >> 16) & 0xFFFF) * right;
+    return (low + (high & 0xFFFF) * 0x10000) % 0x100000000;
+  }
+
+  /// Reads a [count]-byte little-endian unsigned integer using multiplication,
+  /// so it is exact and non-negative on both the VM and dart2js (unlike
+  /// `byte << 56`, which truncates/signs on JS).
+  ///
+  /// Sizes that need more than 6 bytes (>= 2^48, ~281 TB) cannot be a
+  /// legitimate decompressed-size field and exceed any sane limit, so the top
+  /// bytes are required to be zero — otherwise a [FormatException] is thrown
+  /// (rather than silently producing a wrong or negative value that could slip
+  /// past a maxSize check).
+  static int readUintLE(Uint8List data, int offset, int count) {
+    var value = 0;
+    var multiplier = 1;
+    final exact = count < 6 ? count : 6;
+    for (var i = 0; i < exact; i++) {
+      value += data[offset + i] * multiplier;
+      multiplier *= 256;
+    }
+    for (var i = exact; i < count; i++) {
+      if (data[offset + i] != 0) {
+        throw const FormatException(
+          'Multi-byte size field exceeds the supported range (2^48)',
+        );
+      }
+    }
+    return value;
+  }
+
   /// Reads a 32-bit unsigned integer in little-endian byte order
   ///
   /// Uses multiplication instead of bit shifts to avoid signed integer issues
@@ -110,5 +150,4 @@ class ByteUtils {
         data[pos1 + 2] == data[pos2 + 2] &&
         data[pos1 + 3] == data[pos2 + 3];
   }
-
 }

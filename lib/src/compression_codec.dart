@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:typed_data';
 
 /// Codec capability modes
@@ -59,6 +58,20 @@ enum CodecMode {
 /// Each codec supports a maximum decompressed size limit to prevent
 /// decompression bomb attacks. Configure via codec-specific constructors
 /// (e.g., `Lz4Codec(maxDecompressedSize: 10 * 1024 * 1024)`).
+///
+/// The constructors default to a sane cap. Passing `null` (or
+/// `maxSize: null`) means **unlimited output** and removes that protection —
+/// use it only with **trusted input**. For untrusted/attacker-controlled data,
+/// always keep a finite limit.
+///
+/// ## Offloading large jobs
+///
+/// [compress]/[decompress] are synchronous and run on the calling isolate. For
+/// truly non-blocking processing of large inputs, either run the call on a
+/// separate isolate (`Isolate.run(() => codec.compress(data))`, VM only) or use
+/// the chunked streaming APIs ([CompressionStreamCodec]). (There are no
+/// `*Async` convenience methods — a microtask wrapper would not actually offload
+/// the work.)
 abstract class CompressionCodec {
   /// Compress data synchronously
   ///
@@ -69,36 +82,14 @@ abstract class CompressionCodec {
   /// Decompress data synchronously
   ///
   /// Takes compressed data and returns the original uncompressed bytes.
-  /// Throws an exception if the data is corrupted or in an invalid format.
+  /// Throws a [CompressionFormatException] if the data is corrupted or in an
+  /// invalid format.
+  ///
+  /// This materializes the entire output (up to the codec's
+  /// `maxDecompressedSize`) before validating the trailer/checksum, so for
+  /// untrusted or large input prefer the streaming codec, which is incremental
+  /// and bounded (`CompressionStreamCodec`, e.g. via `CodecFactory.streaming`).
   Uint8List decompress(Uint8List data);
-
-  /// Compress data asynchronously
-  ///
-  /// Schedules compression to run after a microtask yield, allowing
-  /// other async operations to interleave. The actual compression
-  /// work is still synchronous but won't block the caller immediately.
-  ///
-  /// **Note:** This does NOT run compression on a separate thread/isolate.
-  /// For truly non-blocking compression of large data, use:
-  /// - `Isolate.run(() => codec.compress(data))` for isolate-based offloading
-  /// - Streaming APIs (`CompressionStreamCodec`) for chunked processing
-  Future<Uint8List> compressAsync(final Uint8List data) {
-    return Future.microtask(() => compress(data));
-  }
-
-  /// Decompress data asynchronously
-  ///
-  /// Schedules decompression to run after a microtask yield, allowing
-  /// other async operations to interleave. The actual decompression
-  /// work is still synchronous but won't block the caller immediately.
-  ///
-  /// **Note:** This does NOT run decompression on a separate thread/isolate.
-  /// For truly non-blocking decompression of large data, use:
-  /// - `Isolate.run(() => codec.decompress(data))` for isolate-based offloading
-  /// - Streaming APIs (`CompressionStreamCodec`) for chunked processing
-  Future<Uint8List> decompressAsync(final Uint8List data) {
-    return Future.microtask(() => decompress(data));
-  }
 
   /// Get codec name (e.g., 'LZ4', 'GZIP', 'Snappy')
   String get name;

@@ -19,11 +19,9 @@ class Lz77Encoder {
   /// Whether to use lazy matching for better compression
   final bool _lazyMatching;
 
-  Lz77Encoder({
-    int lazyMatchLevel = 4,
-    bool lazyMatching = true,
-  })  : _lazyMatchLevel = lazyMatchLevel,
-        _lazyMatching = lazyMatching {
+  Lz77Encoder({int lazyMatchLevel = 4, bool lazyMatching = true})
+    : _lazyMatchLevel = lazyMatchLevel,
+      _lazyMatching = lazyMatching {
     // Initialize hash table to -1 (no position)
     for (var i = 0; i < _hashTable.length; i++) {
       _hashTable[i] = -1;

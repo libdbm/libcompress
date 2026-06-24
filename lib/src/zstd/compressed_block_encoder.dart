@@ -16,6 +16,9 @@ class CompressedBlockEncoder {
   /// Search depth for match finding (higher = better compression, slower)
   final int searchDepth;
 
+  /// Minimum match length to emit (level-derived; 3 or 4).
+  final int minMatch;
+
   /// Whether to validate encoded blocks by decompressing them
   ///
   /// When enabled, each block is decompressed immediately after compression
@@ -25,20 +28,60 @@ class CompressedBlockEncoder {
   String? lastValidationError;
   String? lastValidationStack;
 
+  /// Optional hook invoked when an unexpected encode error makes the block fall
+  /// back to raw output. Lets production wire a log/metric so the fallback isn't
+  /// silent; null = no-op.
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
+  /// When true, an unexpected compressed-encode error is rethrown instead of
+  /// silently falling back to a raw block (fail-loud). Independent of [validate]
+  /// (which also rethrows but doubles CPU by decoding every block).
+  final bool strict;
+
+  /// Count of unexpected-error fallbacks to raw output. Does NOT count the
+  /// legitimate "incompressible" path (empty result with no error).
+  int fallbacks = 0;
+
   /// Creates a compressed block encoder with specified search depth
-  CompressedBlockEncoder({this.searchDepth = 32, this.validate = false});
+  CompressedBlockEncoder({
+    this.searchDepth = 32,
+    this.minMatch = 3,
+    this.validate = false,
+    this.strict = false,
+    this.onFallback,
+  });
+
+  // Reused across blocks so its large hash/chain tables are allocated once.
+  late final MatchFinder _matchFinder = MatchFinder(
+    searchDepth: searchDepth,
+    minMatch: minMatch,
+  );
 
   /// Encode a block using compressed format
   ///
-  /// Returns the encoded block data (without block header)
-  Uint8List encodeBlock(final Uint8List input) {
-    if (input.isEmpty) {
+  /// Returns the encoded block data (without block header).
+  ///
+  /// Bytes in `input[0..from)` are a history prefix used only for matching
+  /// (cross-chunk back-references); the block encodes `input[from..end)`.
+  /// [end] defaults to `input.length`; pass a smaller bound to encode a prefix
+  /// of a larger (reused) buffer without slicing/copying it.
+  Uint8List encodeBlock(
+    final Uint8List input, {
+    final int from = 0,
+    final int? end,
+  }) {
+    final limit = end ?? input.length;
+    if (limit - from <= 0) {
       return Uint8List(0);
     }
 
     try {
-      final matchFinder = MatchFinder(searchDepth: searchDepth);
-      final matchResult = matchFinder.findMatches(input);
+      final matchFinder = _matchFinder;
+      final matchResult = matchFinder.findMatches(
+        input,
+        from: from,
+        end: limit,
+      );
       final matches = matchResult.$1;
       final trailingLiterals = matchResult.$2;
 
@@ -50,6 +93,7 @@ class CompressedBlockEncoder {
         input,
         matches,
         trailingLiterals,
+        from: from,
       );
 
       final literalSection = _encodeLiteralSection(literals);
@@ -59,15 +103,26 @@ class CompressedBlockEncoder {
       output.setRange(0, literalSection.length, literalSection);
       output.setRange(literalSection.length, output.length, sequencesSection);
 
-      if (validate && !_validateEncodedBlock(output, input)) {
+      final validateSource = limit == input.length
+          ? input
+          : Uint8List.sublistView(input, 0, limit);
+      if (validate && !_validateEncodedBlock(output, validateSource)) {
         lastValidationError ??= 'Unknown validation error';
         return Uint8List(0);
       }
       lastValidationError = null;
 
       return output;
-    } catch (_) {
-      // Fall back to raw block when compressed encoding fails
+    } catch (e, st) {
+      // Compressed encoding failed unexpectedly. Fall back to a raw block so
+      // the stream stays valid, but do not hide the failure: record it (so the
+      // silent ratio collapse is at least inspectable) and surface it loudly
+      // when validation is enabled.
+      lastValidationError = 'Compressed block encoding failed: $e';
+      lastValidationStack = st.toString();
+      fallbacks++;
+      if (validate || strict) rethrow;
+      onFallback?.call(e, st);
       return Uint8List(0);
     }
   }
@@ -109,6 +164,12 @@ class CompressedBlockEncoder {
     try {
       encoder.buildFromCounts(counts, maxSym);
     } catch (_) {
+      return null;
+    }
+
+    // The current Huffman weights encoder only supports the direct 4-bit
+    // representation, whose header can encode at most 128 weights.
+    if (maxSym + 1 > 128) {
       return null;
     }
 
@@ -179,25 +240,28 @@ class CompressedBlockEncoder {
       bitsPerSize = 18;
     }
 
-    // Build header as little-endian value
-    // Bits 0-1: type, Bits 2-3: sizeFormat
-    // Bits 4 to 4+bitsPerSize-1: regeneratedSize
-    // Bits 4+bitsPerSize to 4+2*bitsPerSize-1: compressedSize
-    var header = (type & 0x03) | ((sizeFormat & 0x03) << 2);
-    header |= (regeneratedSize & ((1 << bitsPerSize) - 1)) << 4;
-    header |= (compressedSize & ((1 << bitsPerSize) - 1)) << (4 + bitsPerSize);
+    // Build header as little-endian value. This can require more than 32 bits
+    // for size format 3, so avoid JS bitwise operators after dart2js.
+    final sizeMask = (BigInt.one << bitsPerSize) - BigInt.one;
+    var header = BigInt.from((type & 0x03) | ((sizeFormat & 0x03) << 2));
+    header |= (BigInt.from(regeneratedSize) & sizeMask) << 4;
+    header |= (BigInt.from(compressedSize) & sizeMask) << (4 + bitsPerSize);
 
-    // Convert to bytes (little-endian)
-    final output = <int>[];
+    final output = Uint8List(
+      headerSize + weightsHeader.length + compressedStreams.length,
+    );
+
+    // Convert to bytes (little-endian).
     for (var i = 0; i < headerSize; i++) {
-      output.add((header >> (i * 8)) & 0xFF);
+      output[i] = ((header >> (i * 8)) & BigInt.from(0xff)).toInt();
     }
 
-    // Add weights header and compressed streams
-    output.addAll(weightsHeader);
-    output.addAll(compressedStreams);
+    var pos = headerSize;
+    output.setRange(pos, pos + weightsHeader.length, weightsHeader);
+    pos += weightsHeader.length;
+    output.setRange(pos, pos + compressedStreams.length, compressedStreams);
 
-    return Uint8List.fromList(output);
+    return output;
   }
 
   /// Encode raw literals section (header + payload)

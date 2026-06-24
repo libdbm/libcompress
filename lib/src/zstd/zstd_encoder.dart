@@ -27,20 +27,46 @@ class ZstdEncoder {
   final bool enableChecksum;
   final bool validate;
 
+  /// Fail loud on an unexpected compressed-block encode error instead of
+  /// silently falling back to a raw block. See [CompressedBlockEncoder.strict].
+  final bool strict;
+
+  /// Observability hook for silent raw-block fallbacks (see [fallbacks]).
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Search depth for match finding (derived from level)
   late final int searchDepth;
 
   /// Minimum match length (lower = better compression, slower)
   late final int minMatchLen;
 
+  // Reused across compress() calls and blocks (its match finder owns large
+  // hash/chain tables that should be allocated once, not per block).
+  late final CompressedBlockEncoder _compressedEncoder = CompressedBlockEncoder(
+    searchDepth: searchDepth,
+    minMatch: minMatchLen,
+    validate: validate,
+    strict: strict,
+    onFallback: onFallback,
+  );
+
+  /// Number of blocks that fell back to raw output due to an unexpected encode
+  /// error (0 in healthy operation; >0 signals a compression regression).
+  int get fallbacks => _compressedEncoder.fallbacks;
+
   ZstdEncoder({
     this.level = 3,
     this.blockSize = 128 * 1024,
     this.enableChecksum = false,
     this.validate = false,
+    this.strict = false,
+    this.onFallback,
   }) {
     if (level < 1 || level > 22) {
       throw ArgumentError('Level must be between 1 and 22, got $level');
+    }
+    if (blockSize <= 0) {
+      throw ArgumentError('Block size must be positive, got $blockSize');
     }
     if (blockSize > zstdMaxBlockSize) {
       throw ArgumentError('Block size cannot exceed $zstdMaxBlockSize');
@@ -83,6 +109,8 @@ class ZstdEncoder {
     if (input.isEmpty) {
       pos = _writeBlockHeader(output, pos, true, ZstdBlockType.raw, 0);
     } else {
+      final compressedEncoder = _compressedEncoder;
+
       // Compress data in blocks
       var offset = 0;
       while (offset < input.length) {
@@ -99,10 +127,6 @@ class ZstdEncoder {
         } else {
           // Try compressed block encoding with FSE sequences
           // Falls back to raw if compression doesn't help
-          final compressedEncoder = CompressedBlockEncoder(
-            searchDepth: searchDepth,
-            validate: validate,
-          );
           final compressed = compressedEncoder.encodeBlock(chunk);
           if (compressed.length < chunk.length && compressed.isNotEmpty) {
             pos = _writeCompressedBlock(output, pos, compressed, isLastBlock);
@@ -118,7 +142,7 @@ class ZstdEncoder {
     // Write checksum if enabled
     if (enableChecksum) {
       // Per RFC 8878: content checksum is low 32 bits of XXH64
-      final checksum = XXH64.hash(input) & 0xFFFFFFFF;
+      final checksum = XXH64.hashLow32(input);
       ByteUtils.writeUint32LEAt(output, pos, checksum);
       pos += 4;
     }
@@ -224,7 +248,13 @@ class ZstdEncoder {
     final Uint8List chunk,
     final bool isLastBlock,
   ) {
-    pos = _writeBlockHeader(output, pos, isLastBlock, ZstdBlockType.raw, chunk.length);
+    pos = _writeBlockHeader(
+      output,
+      pos,
+      isLastBlock,
+      ZstdBlockType.raw,
+      chunk.length,
+    );
     output.setRange(pos, pos + chunk.length, chunk);
     return pos + chunk.length;
   }
@@ -236,7 +266,13 @@ class ZstdEncoder {
     final Uint8List chunk,
     final bool isLastBlock,
   ) {
-    pos = _writeBlockHeader(output, pos, isLastBlock, ZstdBlockType.rle, chunk.length);
+    pos = _writeBlockHeader(
+      output,
+      pos,
+      isLastBlock,
+      ZstdBlockType.rle,
+      chunk.length,
+    );
     output[pos++] = chunk[0]; // Single byte value
     return pos;
   }

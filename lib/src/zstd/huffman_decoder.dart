@@ -161,7 +161,10 @@ class HuffmanDecoder {
     final start3 = start2 + size2;
     final start4 = start3 + size3;
 
-    if (start1 >= start2 || start2 >= start3 || start3 >= start4 || start4 > end) {
+    if (start1 >= start2 ||
+        start2 >= start3 ||
+        start3 >= start4 ||
+        start4 > end) {
       throw ZstdFormatException('Invalid 4-stream jump table');
     }
 
@@ -244,20 +247,30 @@ class HuffmanDecoder {
   }
 }
 
-/// Bit reader for Huffman decoding (MSB-first backward stream, like Java BitInputStream)
+/// Bit reader for Huffman decoding (MSB-first backward stream, like Java
+/// BitInputStream).
+///
+/// The 64-bit window is held as two 32-bit halves (`_hi`/`_lo`) to avoid
+/// allocating a [BigInt] per symbol on the decode hot path; all peek/read math
+/// stays below 2^53 and is exact on the VM and dart2js (see
+/// [SequenceBitReader] for the same technique).
 class HuffmanBitReader {
   final Uint8List _data;
   final int _start;
+  final int _end;
   int _current;
-  int _bits;
+  int _hi;
+  int _lo;
   int _consumed;
   bool _overflow = false;
 
   HuffmanBitReader(this._data, final int start, final int end)
-      : _start = start,
-        _current = 0,
-        _bits = 0,
-        _consumed = 0 {
+    : _start = start,
+      _end = end,
+      _current = 0,
+      _hi = 0,
+      _lo = 0,
+      _consumed = 0 {
     if (end <= start) {
       throw ZstdFormatException('Empty Huffman stream');
     }
@@ -274,28 +287,30 @@ class HuffmanBitReader {
     final size = end - start;
     if (size >= 8) {
       _current = end - 8;
-      _bits = _load64(_current);
+      _load64(_current);
     } else {
       _current = start;
-      _bits = _loadTail(start, size);
+      _load64(start);
       _consumed += (8 - size) * 8;
     }
   }
 
-  int _load64(final int off) {
-    var r = 0;
-    for (var i = 0; i < 8 && off + i < _data.length; i++) {
-      r |= (_data[off + i] & 0xFF) << (i * 8);
-    }
-    return r;
+  void _load64(final int off) {
+    _lo = _read4(off);
+    _hi = _read4(off + 4);
   }
 
-  int _loadTail(final int off, final int n) {
-    var r = 0;
-    for (var i = 0; i < n; i++) {
-      r |= (_data[off + i] & 0xFF) << (i * 8);
+  int _read4(final int off) {
+    var result = 0;
+    var multiplier = 1;
+    for (var i = 0; i < 4; i++) {
+      final p = off + i;
+      if (p >= 0 && p < _end) {
+        result += _data[p] * multiplier;
+      }
+      multiplier *= 256;
     }
-    return r;
+    return result;
   }
 
   bool get isOverflow => _overflow;
@@ -315,29 +330,48 @@ class HuffmanBitReader {
     if (_current >= _start + 8) {
       if (bytes > 0) {
         _current -= bytes;
-        _bits = _load64(_current);
+        _load64(_current);
       }
       _consumed &= 7;
     } else if (_current - bytes < _start) {
       final actual = _current - _start;
       _current = _start;
       _consumed -= actual * 8;
-      _bits = _load64(_start);
+      _load64(_start);
       return true;
     } else {
       _current -= bytes;
       _consumed -= bytes * 8;
-      _bits = _load64(_current);
+      _load64(_current);
     }
     return false;
   }
 
-  /// Peek bits from MSB (Java-style)
+  /// Peek [n] bits from the MSB end (see [SequenceBitReader.peekBits]).
   int peekBits(final int n) {
     if (n == 0) return 0;
-    // Java formula: ((bits << consumed) >>> (64 - n))
-    final shifted = (_bits << _consumed) & 0xFFFFFFFFFFFFFFFF;
-    return (shifted >> (64 - n)) & ((1 << n) - 1);
+    final consumed = _consumed;
+    final available = 64 - consumed;
+    if (available <= 0) return 0;
+    if (available >= n) {
+      final shift = available - n;
+      if (shift >= 32) {
+        return (_hi >> (shift - 32)) & _hMask[n];
+      } else if (shift + n <= 32) {
+        return (_lo >> shift) & _hMask[n];
+      } else {
+        final lowCount = 32 - shift;
+        final lowPart = _lo >> shift;
+        final highCount = n - lowCount;
+        final highPart = _hi & _hMask[highCount];
+        return lowPart + highPart * _hPow2[lowCount];
+      }
+    }
+    // The unconsumed bits are the low `available` bits of the window (consumed
+    // from the MSB down); place them MSB-aligned, low bits zero. available < n
+    // <= 32, so they all live in _lo.
+    final lowBits = _lo & _hMask[available];
+    return (lowBits * _hPow2[n - available]) & _hMask[n];
   }
 
   /// Consume bits
@@ -351,4 +385,19 @@ class HuffmanBitReader {
     consumeBits(n);
     return r;
   }
+}
+
+/// `_hPow2[i] == 2^i` and `_hMask[i] == 2^i - 1` for i in 0..32 (all <= 2^32,
+/// exact on dart2js).
+final List<int> _hPow2 = _buildHPow2();
+final List<int> _hMask = List<int>.generate(33, (i) => _hPow2[i] - 1);
+
+List<int> _buildHPow2() {
+  final result = List<int>.filled(33, 0);
+  var value = 1;
+  for (var i = 0; i <= 32; i++) {
+    result[i] = value;
+    value *= 2;
+  }
+  return result;
 }

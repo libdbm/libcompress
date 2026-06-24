@@ -20,10 +20,7 @@ class DeflateEncoder {
   /// LZ77 encoder instance
   late final Lz77Encoder _lz77;
 
-  DeflateEncoder({
-    this.level = 6,
-    this.blockSize = 65535,
-  }) {
+  DeflateEncoder({this.level = 6, this.blockSize = 65535}) {
     // Configure LZ77 based on compression level
     final lazyMatch = level >= 4;
     final lazyMatchLevel = level >= 7 ? 8 : 4;
@@ -57,15 +54,16 @@ class DeflateEncoder {
       final isFinal = offset + chunkSize >= data.length;
 
       final chunk = Uint8List.sublistView(data, offset, offset + chunkSize);
+      final tokens = _lz77.compress(chunk);
 
       // Choose compression strategy based on level
       // All levels compress - differ in Huffman strategy and lazy matching
       if (level <= 3) {
         // Fast: use fixed Huffman (no tree overhead)
-        _writeFixedHuffmanBlock(output, chunk, isFinal: isFinal);
+        writeFixedBlock(output, tokens, isFinal: isFinal);
       } else {
         // Use dynamic Huffman for better compression
-        _writeDynamicHuffmanBlock(output, chunk, isFinal: isFinal);
+        writeDynamicBlock(output, tokens, isFinal: isFinal);
       }
 
       offset += chunkSize;
@@ -109,82 +107,51 @@ class DeflateEncoder {
     }
   }
 
-  /// Writes a block using fixed Huffman codes
-  void _writeFixedHuffmanBlock(
+  /// Writes a block using fixed Huffman codes from precomputed [tokens].
+  void writeFixedBlock(
     BitStreamWriter output,
-    Uint8List data, {
+    List<Token> tokens, {
     required bool isFinal,
   }) {
     // Block header: BFINAL (1 bit) + BTYPE (2 bits = 01 for fixed)
     output.writeBits(isFinal ? 1 : 0, 1);
     output.writeBits(BlockType.fixedHuffman.value, 2);
 
-    // Compress data using LZ77
-    final tokens = _lz77.compress(data);
-
-    // Encode tokens using fixed Huffman codes
-    final literalLengths = List<int>.filled(288, 0);
-    for (var i = 0; i <= 143; i++) {
-      literalLengths[i] = 8;
-    }
-    for (var i = 144; i <= 255; i++) {
-      literalLengths[i] = 9;
-    }
-    for (var i = 256; i <= 279; i++) {
-      literalLengths[i] = 7;
-    }
-    for (var i = 280; i <= 287; i++) {
-      literalLengths[i] = 8;
-    }
-    final literalCodes = HuffmanTreeBuilder.generateCanonicalCodes(literalLengths);
-    final distanceLengths = List<int>.filled(30, 5);
-    final distanceCodes = HuffmanTreeBuilder.generateCanonicalCodes(distanceLengths);
+    // Fixed Huffman code tables are RFC constants (cached).
+    final literalCodes = _fixedLiteralCodes;
+    final distanceCodes = _fixedDistanceCodes;
 
     for (final token in tokens) {
       if (token is LiteralToken) {
-        // Write literal using fixed code
-        final code = literalCodes[token.value]!;
-        _writeHuffmanCode(output, code);
+        _emit(output, literalCodes, token.value);
       } else if (token is MatchToken) {
-        // Encode length
         final lengthCode = encodeLength(token.length);
-        final literalCode = literalCodes[lengthCode.code]!;
-        _writeHuffmanCode(output, literalCode);
-
-        // Write extra bits for length
+        _emit(output, literalCodes, lengthCode.code);
         if (lengthCode.extraBits > 0) {
           output.writeBits(lengthCode.extraValue, lengthCode.extraBits);
         }
 
-        // Encode distance
         final distanceCode = encodeDistance(token.distance);
-        final dcode = distanceCodes[distanceCode.code]!;
-        _writeHuffmanCode(output, dcode);
-
-        // Write extra bits for distance
+        _emit(output, distanceCodes, distanceCode.code);
         if (distanceCode.extraBits > 0) {
           output.writeBits(distanceCode.extraValue, distanceCode.extraBits);
         }
       }
     }
 
-    // Write end-of-block symbol
-    final endCode = literalCodes[endBlock]!;
-    _writeHuffmanCode(output, endCode);
+    // End-of-block symbol
+    _emit(output, literalCodes, endBlock);
   }
 
-  /// Writes a block using dynamic Huffman codes
-  void _writeDynamicHuffmanBlock(
+  /// Writes a block using dynamic Huffman codes from precomputed [tokens].
+  void writeDynamicBlock(
     BitStreamWriter output,
-    Uint8List data, {
+    List<Token> tokens, {
     required bool isFinal,
   }) {
     // Block header: BFINAL (1 bit) + BTYPE (2 bits = 10 for dynamic)
     output.writeBits(isFinal ? 1 : 0, 1);
     output.writeBits(BlockType.dynamicHuffman.value, 2);
-
-    // Compress data using LZ77
-    final tokens = _lz77.compress(data);
 
     // Build frequency tables
     final literalFrequencies = List<int>.filled(286, 0);
@@ -217,14 +184,18 @@ class DeflateEncoder {
     }
 
     // Generate code lengths (limited to 15 bits for DEFLATE)
-    final literalLengths =
-        HuffmanTreeBuilder.computeLimitedCodeLengths(literalFrequencies, 15);
-    final distanceLengths =
-        HuffmanTreeBuilder.computeLimitedCodeLengths(distanceFrequencies, 15);
+    final literalLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      literalFrequencies,
+      15,
+    );
+    final distanceLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      distanceFrequencies,
+      15,
+    );
 
-    // Generate canonical codes
-    final literalCodes = HuffmanTreeBuilder.generateCanonicalCodes(literalLengths);
-    final distanceCodes = HuffmanTreeBuilder.generateCanonicalCodes(distanceLengths);
+    // Generate canonical codes (pre-reversed, typed arrays).
+    final literalCodes = _buildCodes(literalLengths);
+    final distanceCodes = _buildCodes(distanceLengths);
 
     // Write tree descriptions
     _writeTreeDescriptions(output, literalLengths, distanceLengths);
@@ -232,26 +203,21 @@ class DeflateEncoder {
     // Encode tokens using dynamic Huffman codes
     for (final token in tokens) {
       if (token is LiteralToken) {
-        final code = literalCodes[token.value];
-        if (code != null) {
-          _writeHuffmanCode(output, code);
+        if (literalCodes.lengths[token.value] != 0) {
+          _emit(output, literalCodes, token.value);
         }
       } else if (token is MatchToken) {
-        // Encode length
         final lengthCode = encodeLength(token.length);
-        final literalCode = literalCodes[lengthCode.code];
-        if (literalCode != null) {
-          _writeHuffmanCode(output, literalCode);
+        if (literalCodes.lengths[lengthCode.code] != 0) {
+          _emit(output, literalCodes, lengthCode.code);
           if (lengthCode.extraBits > 0) {
             output.writeBits(lengthCode.extraValue, lengthCode.extraBits);
           }
         }
 
-        // Encode distance
         final distanceCode = encodeDistance(token.distance);
-        final dcode = distanceCodes[distanceCode.code];
-        if (dcode != null) {
-          _writeHuffmanCode(output, dcode);
+        if (distanceCodes.lengths[distanceCode.code] != 0) {
+          _emit(output, distanceCodes, distanceCode.code);
           if (distanceCode.extraBits > 0) {
             output.writeBits(distanceCode.extraValue, distanceCode.extraBits);
           }
@@ -259,10 +225,9 @@ class DeflateEncoder {
       }
     }
 
-    // Write end-of-block symbol
-    final endCode = literalCodes[endBlock];
-    if (endCode != null) {
-      _writeHuffmanCode(output, endCode);
+    // End-of-block symbol
+    if (literalCodes.lengths[endBlock] != 0) {
+      _emit(output, literalCodes, endBlock);
     }
   }
 
@@ -299,8 +264,11 @@ class DeflateEncoder {
     }
 
     // Build code length Huffman tree (limited to 7 bits per RFC 1951)
-    final clLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(codeLengthFrequencies, 7);
-    final clCodes = HuffmanTreeBuilder.generateCanonicalCodes(clLengths);
+    final clLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      codeLengthFrequencies,
+      7,
+    );
+    final clCodes = _buildCodes(clLengths);
 
     // Find number of code length codes to transmit
     var hclen = 19;
@@ -324,9 +292,8 @@ class DeflateEncoder {
 
     // Write encoded code lengths
     for (final item in encoded) {
-      final code = clCodes[item.symbol];
-      if (code != null) {
-        _writeHuffmanCode(output, code);
+      if (clCodes.lengths[item.symbol] != 0) {
+        _emit(output, clCodes, item.symbol);
         if (item.extraBits > 0) {
           output.writeBits(item.extraValue, item.extraBits);
         }
@@ -345,7 +312,9 @@ class DeflateEncoder {
       if (len == 0) {
         // Count consecutive zeros
         var count = 1;
-        while (i + count < lengths.length && lengths[i + count] == 0 && count < 138) {
+        while (i + count < lengths.length &&
+            lengths[i + count] == 0 &&
+            count < 138) {
           count++;
         }
 
@@ -389,14 +358,88 @@ class DeflateEncoder {
     return result;
   }
 
-  /// Writes a Huffman code to the output stream
-  void _writeHuffmanCode(BitStreamWriter output, HuffmanCode code) {
-    // Emit code bits MSB-first into the LSB-first bitstream.
-    for (var i = code.length - 1; i >= 0; i--) {
-      final bit = (code.code >> i) & 1;
-      output.writeBits(bit, 1);
+  // Fixed Huffman code tables are RFC 1951 constants — built once, reused.
+  static final _HuffmanCodes _fixedLiteralCodes = _buildCodes(
+    _fixedLiteralLengths(),
+  );
+  static final _HuffmanCodes _fixedDistanceCodes = _buildCodes(
+    List<int>.filled(30, 5),
+  );
+
+  static List<int> _fixedLiteralLengths() {
+    final lengths = List<int>.filled(288, 0);
+    for (var i = 0; i <= 143; i++) {
+      lengths[i] = 8;
     }
+    for (var i = 144; i <= 255; i++) {
+      lengths[i] = 9;
+    }
+    for (var i = 256; i <= 279; i++) {
+      lengths[i] = 7;
+    }
+    for (var i = 280; i <= 287; i++) {
+      lengths[i] = 8;
+    }
+    return lengths;
   }
+
+  /// Emits the canonical Huffman code for [symbol] in a single write. Codes are
+  /// pre-reversed so an LSB-first [BitStreamWriter.writeBits] emits them
+  /// MSB-first as DEFLATE requires.
+  void _emit(BitStreamWriter output, _HuffmanCodes codes, int symbol) {
+    output.writeBits(codes.revCodes[symbol], codes.lengths[symbol]);
+  }
+
+  /// Builds canonical Huffman codes (pre-reversed) + lengths indexed by symbol,
+  /// in typed arrays (length 0 = symbol unused).
+  static _HuffmanCodes _buildCodes(List<int> codeLengths) {
+    final n = codeLengths.length;
+    final lengths = Uint8List(n);
+    final revCodes = Uint16List(n);
+
+    var maxLength = 0;
+    for (final len in codeLengths) {
+      if (len > maxLength) maxLength = len;
+    }
+    if (maxLength == 0) return _HuffmanCodes(revCodes, lengths);
+
+    final lengthCounts = Uint32List(maxLength + 1);
+    for (final len in codeLengths) {
+      if (len > 0) lengthCounts[len]++;
+    }
+    final nextCode = Uint32List(maxLength + 1);
+    var code = 0;
+    for (var i = 1; i <= maxLength; i++) {
+      code = (code + lengthCounts[i - 1]) << 1;
+      nextCode[i] = code;
+    }
+    for (var symbol = 0; symbol < n; symbol++) {
+      final len = codeLengths[symbol];
+      if (len > 0) {
+        lengths[symbol] = len;
+        revCodes[symbol] = _reverseBits(nextCode[len], len);
+        nextCode[len]++;
+      }
+    }
+    return _HuffmanCodes(revCodes, lengths);
+  }
+
+  static int _reverseBits(int value, int count) {
+    var result = 0;
+    for (var i = 0; i < count; i++) {
+      result = (result << 1) | ((value >> i) & 1);
+    }
+    return result;
+  }
+}
+
+/// Canonical Huffman codes for one alphabet: pre-reversed code values and code
+/// lengths indexed by symbol (length 0 = unused). Replaces the old
+/// `Map<int, HuffmanCode>` for unboxed, allocation-light lookups.
+class _HuffmanCodes {
+  _HuffmanCodes(this.revCodes, this.lengths);
+  final Uint16List revCodes;
+  final Uint8List lengths;
 }
 
 /// Represents a run-length encoded code length symbol

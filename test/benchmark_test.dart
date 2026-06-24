@@ -15,14 +15,34 @@ final _cliBenchmarks = Platform.environment['RUN_CLI_BENCHMARKS'] == '1';
 
 void main() {
   group('Comprehensive Compression Benchmark', () {
-    test('generate detailed performance comparison report', () {
-      final report = BenchmarkReport(
-        verbose: _verbose,
-        runCli: _benchmarks || _cliBenchmarks,
-      );
-      report.run();
-      report.print();
-    });
+    // Wall-clock "best of 5" timing is slow (~minute) and not a reliable CI
+    // signal, so this is gated out of the default suite. Deterministic
+    // compression-ratio floors live in perf_budget_test.dart, which always runs.
+    test(
+      'generate detailed performance comparison report',
+      () {
+        final report = BenchmarkReport(
+          verbose: _verbose,
+          runCli: _benchmarks || _cliBenchmarks,
+        );
+        report.run();
+        report.print();
+
+        // A green benchmark must mean every round-trip actually verified
+        // (excludes CLI tools that weren't available, marked error 'N/A').
+        final failed = report.results
+            .where((r) => !r.valid && r.error != 'N/A')
+            .toList();
+        expect(
+          failed,
+          isEmpty,
+          reason:
+              'codec round-trip failures: '
+              '${failed.map((f) => '${f.implementation} ${f.codec}/${f.dataset}: ${f.error ?? 'invalid'}').join('; ')}',
+        );
+      },
+      skip: !_benchmarks ? 'set RUN_BENCHMARKS=1 to run benchmarks' : null,
+    );
   });
 }
 
@@ -44,82 +64,123 @@ class BenchmarkReport {
 
   void _prepareDatasets() {
     // Small datasets (< 10KB)
-    testDatasets.add(Dataset(
-      name: 'Empty',
-      category: 'Small',
-      data: Uint8List(0),
-    ));
+    testDatasets.add(
+      Dataset(name: 'Empty', category: 'Small', data: Uint8List(0)),
+    );
 
-    testDatasets.add(Dataset(
-      name: 'Tiny Text',
-      category: 'Small',
-      data: Uint8List.fromList('Hello, World! This is a test.'.codeUnits),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: 'Tiny Text',
+        category: 'Small',
+        data: Uint8List.fromList('Hello, World! This is a test.'.codeUnits),
+      ),
+    );
 
-    testDatasets.add(Dataset(
-      name: '1KB Random',
-      category: 'Small',
-      data: Uint8List.fromList(List.generate(1024, (i) => (i * 7 + 13) % 256)),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: '1KB Random',
+        category: 'Small',
+        data: Uint8List.fromList(
+          List.generate(1024, (i) => (i * 7 + 13) % 256),
+        ),
+      ),
+    );
 
-    testDatasets.add(Dataset(
-      name: '1KB Zeros',
-      category: 'Small',
-      data: Uint8List(1024),
-    ));
+    testDatasets.add(
+      Dataset(name: '1KB Zeros', category: 'Small', data: Uint8List(1024)),
+    );
 
-    testDatasets.add(Dataset(
-      name: '1KB Repeated',
-      category: 'Small',
-      data: Uint8List.fromList(List.filled(1024, 65)),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: '1KB Repeated',
+        category: 'Small',
+        data: Uint8List.fromList(List.filled(1024, 65)),
+      ),
+    );
 
     // Medium datasets (10KB - 100KB)
     if (File('test/fixtures/data/html').existsSync()) {
       final html = File('test/fixtures/data/html').readAsBytesSync();
-      testDatasets.add(Dataset(
-        name: 'HTML (${_formatBytes(html.length)})',
-        category: 'Medium',
-        data: html,
-      ));
+      testDatasets.add(
+        Dataset(
+          name: 'HTML (${_formatBytes(html.length)})',
+          category: 'Medium',
+          data: html,
+        ),
+      );
     }
 
-    testDatasets.add(Dataset(
-      name: '64KB Random',
-      category: 'Medium',
-      data: Uint8List.fromList(List.generate(65536, (i) => (i * 7 + 13) % 256)),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: '64KB Random',
+        category: 'Medium',
+        data: Uint8List.fromList(
+          List.generate(65536, (i) => (i * 7 + 13) % 256),
+        ),
+      ),
+    );
 
-    testDatasets.add(Dataset(
-      name: '64KB Pattern',
-      category: 'Medium',
-      data: Uint8List.fromList(List.generate(65536, (i) => (i % 256))),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: '64KB Pattern',
+        category: 'Medium',
+        data: Uint8List.fromList(List.generate(65536, (i) => (i % 256))),
+      ),
+    );
 
     // Large datasets (> 100KB)
     if (File('test/fixtures/data/canterbury/alice29.txt').existsSync()) {
-      final alice = File('test/fixtures/data/canterbury/alice29.txt').readAsBytesSync();
-      testDatasets.add(Dataset(
-        name: 'Alice29 (${_formatBytes(alice.length)})',
-        category: 'Large',
-        data: alice,
-      ));
+      final alice = File(
+        'test/fixtures/data/canterbury/alice29.txt',
+      ).readAsBytesSync();
+      testDatasets.add(
+        Dataset(
+          name: 'Alice29 (${_formatBytes(alice.length)})',
+          category: 'Large',
+          data: alice,
+        ),
+      );
     }
 
     if (File('test/fixtures/data/calgary/paper1').existsSync()) {
       final paper = File('test/fixtures/data/calgary/paper1').readAsBytesSync();
-      testDatasets.add(Dataset(
-        name: 'Paper1 (${_formatBytes(paper.length)})',
-        category: 'Large',
-        data: paper,
-      ));
+      testDatasets.add(
+        Dataset(
+          name: 'Paper1 (${_formatBytes(paper.length)})',
+          category: 'Large',
+          data: paper,
+        ),
+      );
     }
 
-    testDatasets.add(Dataset(
-      name: '1MB Random',
-      category: 'Large',
-      data: Uint8List.fromList(List.generate(1024 * 1024, (i) => (i * 7 + 13) % 256)),
-    ));
+    testDatasets.add(
+      Dataset(
+        name: '1MB Random',
+        category: 'Large',
+        data: Uint8List.fromList(
+          List.generate(1024 * 1024, (i) => (i * 7 + 13) % 256),
+        ),
+      ),
+    );
+
+    // Multi-MB fixtures (exercise multi-block + deep-match cost at high levels)
+    for (final spec in const [
+      ['Bible', 'large/bible.txt'],
+      ['E.coli', 'large/E.coli'],
+      ['URLs', 'urls.10K'],
+    ]) {
+      final path = 'test/fixtures/data/${spec[1]}';
+      if (File(path).existsSync()) {
+        final data = File(path).readAsBytesSync();
+        testDatasets.add(
+          Dataset(
+            name: '${spec[0]} (${_formatBytes(data.length)})',
+            category: 'Large',
+            data: data,
+          ),
+        );
+      }
+    }
   }
 
   void _runDartBenchmarks() {
@@ -130,35 +191,49 @@ class BenchmarkReport {
 
       // Snappy
       _benchmarkDartCodec(dataset, 'Snappy-Raw', SnappyCodec(framing: false));
-      _benchmarkDartCodec(dataset, 'Snappy-Framing', SnappyCodec(framing: true));
+      _benchmarkDartCodec(
+        dataset,
+        'Snappy-Framing',
+        SnappyCodec(framing: true),
+      );
 
       // Gzip
       _benchmarkDartCodec(dataset, 'Gzip-1', GzipCodec(level: 1));
       _benchmarkDartCodec(dataset, 'Gzip-6', GzipCodec(level: 6));
       _benchmarkDartCodec(dataset, 'Gzip-9', GzipCodec(level: 9));
 
-      // Zstd (raw/RLE only for now)
-      _benchmarkDartCodec(dataset, 'Zstd-3', ZstdCodec(level: 3));
+      // Zstd across levels (search depth scales steeply: 32 -> 128 -> 1024)
+      for (final level in _zstdLevels) {
+        _benchmarkDartCodec(dataset, 'Zstd-$level', ZstdCodec(level: level));
+      }
     }
   }
 
-  void _benchmarkDartCodec(final Dataset dataset, final String codecName, final CompressionCodec codec) {
+  static const _zstdLevels = [3, 9, 19];
+
+  void _benchmarkDartCodec(
+    final Dataset dataset,
+    final String codecName,
+    final CompressionCodec codec,
+  ) {
     if (dataset.data.isEmpty) {
       // Skip empty for timing accuracy
       final compressed = codec.compress(dataset.data);
       final decompressed = codec.decompress(compressed);
 
-      results.add(BenchmarkResult(
-        dataset: dataset.name,
-        codec: codecName,
-        implementation: 'Dart',
-        originalSize: 0,
-        compressedSize: compressed.length,
-        compressTimeMs: 0,
-        decompressTimeMs: 0,
-        compressionRatio: 0,
-        valid: decompressed.isEmpty,
-      ));
+      results.add(
+        BenchmarkResult(
+          dataset: dataset.name,
+          codec: codecName,
+          implementation: 'Dart',
+          originalSize: 0,
+          compressedSize: compressed.length,
+          compressTimeMs: 0,
+          decompressTimeMs: 0,
+          compressionRatio: 0,
+          valid: decompressed.isEmpty,
+        ),
+      );
       return;
     }
 
@@ -188,34 +263,42 @@ class BenchmarkReport {
         if (ms < bestDecompressMs) bestDecompressMs = ms;
       }
 
-      final valid = decompressed != null && _arraysEqual(decompressed, dataset.data);
-      final ratio = dataset.data.isEmpty ? 0.0 :
-          (dataset.data.length - compressed.length) * 100.0 / dataset.data.length;
+      final valid =
+          decompressed != null && _arraysEqual(decompressed, dataset.data);
+      final ratio = dataset.data.isEmpty
+          ? 0.0
+          : (dataset.data.length - compressed.length) *
+                100.0 /
+                dataset.data.length;
 
-      results.add(BenchmarkResult(
-        dataset: dataset.name,
-        codec: codecName,
-        implementation: 'Dart',
-        originalSize: dataset.data.length,
-        compressedSize: compressed.length,
-        compressTimeMs: bestCompressMs,
-        decompressTimeMs: bestDecompressMs,
-        compressionRatio: ratio,
-        valid: valid,
-      ));
+      results.add(
+        BenchmarkResult(
+          dataset: dataset.name,
+          codec: codecName,
+          implementation: 'Dart',
+          originalSize: dataset.data.length,
+          compressedSize: compressed.length,
+          compressTimeMs: bestCompressMs,
+          decompressTimeMs: bestDecompressMs,
+          compressionRatio: ratio,
+          valid: valid,
+        ),
+      );
     } catch (e) {
-      results.add(BenchmarkResult(
-        dataset: dataset.name,
-        codec: codecName,
-        implementation: 'Dart',
-        originalSize: dataset.data.length,
-        compressedSize: 0,
-        compressTimeMs: 0,
-        decompressTimeMs: 0,
-        compressionRatio: 0,
-        valid: false,
-        error: e.toString(),
-      ));
+      results.add(
+        BenchmarkResult(
+          dataset: dataset.name,
+          codec: codecName,
+          implementation: 'Dart',
+          originalSize: dataset.data.length,
+          compressedSize: 0,
+          compressTimeMs: 0,
+          decompressTimeMs: 0,
+          compressionRatio: 0,
+          valid: false,
+          error: e.toString(),
+        ),
+      );
     }
   }
 
@@ -232,22 +315,67 @@ class BenchmarkReport {
       tmpFile.writeAsBytesSync(dataset.data);
 
       try {
-        _benchmarkCli(dataset, 'LZ4-Fast', 'lz4', ['-1', '-f'], '.lz4', tmpFile);
+        _benchmarkCli(
+          dataset,
+          'LZ4-Fast',
+          'lz4',
+          ['-1', '-f'],
+          '.lz4',
+          tmpFile,
+        );
         _benchmarkCli(dataset, 'LZ4-HC', 'lz4', ['-9', '-f'], '.lz4', tmpFile);
-        _benchmarkCli(dataset, 'Gzip-1', 'gzip', ['-1', '-f', '-k'], '.gz', tmpFile);
-        _benchmarkCli(dataset, 'Gzip-6', 'gzip', ['-6', '-f', '-k'], '.gz', tmpFile);
-        _benchmarkCli(dataset, 'Gzip-9', 'gzip', ['-9', '-f', '-k'], '.gz', tmpFile);
+        _benchmarkCli(
+          dataset,
+          'Gzip-1',
+          'gzip',
+          ['-1', '-f', '-k'],
+          '.gz',
+          tmpFile,
+        );
+        _benchmarkCli(
+          dataset,
+          'Gzip-6',
+          'gzip',
+          ['-6', '-f', '-k'],
+          '.gz',
+          tmpFile,
+        );
+        _benchmarkCli(
+          dataset,
+          'Gzip-9',
+          'gzip',
+          ['-9', '-f', '-k'],
+          '.gz',
+          tmpFile,
+        );
 
         // Snappy via snzip if available
-        final snzipAvailable = Process.runSync('which', ['snzip']).exitCode == 0;
+        final snzipAvailable =
+            Process.runSync('which', ['snzip']).exitCode == 0;
         if (snzipAvailable) {
-          _benchmarkCli(dataset, 'Snappy-Raw', 'snzip', ['-t', 'snappy', '-k'], '.snappy', tmpFile);
+          _benchmarkCli(
+            dataset,
+            'Snappy-Raw',
+            'snzip',
+            ['-t', 'snappy', '-k'],
+            '.snappy',
+            tmpFile,
+          );
         }
 
         // Zstd if available
         final zstdAvailable = Process.runSync('which', ['zstd']).exitCode == 0;
         if (zstdAvailable) {
-          _benchmarkCli(dataset, 'Zstd-3', 'zstd', ['-3', '-f'], '.zst', tmpFile);
+          for (final level in _zstdLevels) {
+            _benchmarkCli(
+              dataset,
+              'Zstd-$level',
+              'zstd',
+              ['-$level', '-f'],
+              '.zst',
+              tmpFile,
+            );
+          }
         }
       } finally {
         if (tmpFile.existsSync()) tmpFile.deleteSync();
@@ -299,11 +427,17 @@ class BenchmarkReport {
 
       // Decompress to verify and measure
       final tmpDir = Directory.systemTemp;
-      final decompressedFile = File('${tmpDir.path}/benchmark_decompressed.dat');
+      final decompressedFile = File(
+        '${tmpDir.path}/benchmark_decompressed.dat',
+      );
       var bestDecompressMs = double.infinity;
 
       final decompressCmd = _getDecompressCommand(command);
-      final decompressArgs = _getDecompressArgs(command, compressedFile.path, decompressedFile.path);
+      final decompressArgs = _getDecompressArgs(
+        command,
+        compressedFile.path,
+        decompressedFile.path,
+      );
 
       for (var i = 0; i < 3; i++) {
         final start = DateTime.now();
@@ -322,42 +456,49 @@ class BenchmarkReport {
         final ms = end.difference(start).inMicroseconds / 1000.0;
         if (ms < bestDecompressMs) bestDecompressMs = ms;
 
-        if (i < 2 && decompressedFile.existsSync()) decompressedFile.deleteSync();
+        if (i < 2 && decompressedFile.existsSync()) {
+          decompressedFile.deleteSync();
+        }
       }
 
       final decompressed = decompressedFile.readAsBytesSync();
       final valid = _arraysEqual(decompressed, dataset.data);
 
-      final ratio = (dataset.data.length - compressedSize) * 100.0 / dataset.data.length;
+      final ratio =
+          (dataset.data.length - compressedSize) * 100.0 / dataset.data.length;
 
-      results.add(BenchmarkResult(
-        dataset: dataset.name,
-        codec: codecName,
-        implementation: 'CLI',
-        originalSize: dataset.data.length,
-        compressedSize: compressedSize,
-        compressTimeMs: bestCompressMs,
-        decompressTimeMs: bestDecompressMs,
-        compressionRatio: ratio,
-        valid: valid,
-      ));
+      results.add(
+        BenchmarkResult(
+          dataset: dataset.name,
+          codec: codecName,
+          implementation: 'CLI',
+          originalSize: dataset.data.length,
+          compressedSize: compressedSize,
+          compressTimeMs: bestCompressMs,
+          decompressTimeMs: bestDecompressMs,
+          compressionRatio: ratio,
+          valid: valid,
+        ),
+      );
 
       if (compressedFile.existsSync()) compressedFile.deleteSync();
       if (decompressedFile.existsSync()) decompressedFile.deleteSync();
     } catch (e) {
       // CLI tool not available or failed
-      results.add(BenchmarkResult(
-        dataset: dataset.name,
-        codec: codecName,
-        implementation: 'CLI',
-        originalSize: dataset.data.length,
-        compressedSize: 0,
-        compressTimeMs: 0,
-        decompressTimeMs: 0,
-        compressionRatio: 0,
-        valid: false,
-        error: 'N/A',
-      ));
+      results.add(
+        BenchmarkResult(
+          dataset: dataset.name,
+          codec: codecName,
+          implementation: 'CLI',
+          originalSize: dataset.data.length,
+          compressedSize: 0,
+          compressTimeMs: 0,
+          decompressTimeMs: 0,
+          compressionRatio: 0,
+          valid: false,
+          error: 'N/A',
+        ),
+      );
     }
   }
 
@@ -376,12 +517,21 @@ class BenchmarkReport {
     }
   }
 
-  List<String> _getDecompressArgs(final String compressCmd, final String input, final String output) {
+  List<String> _getDecompressArgs(
+    final String compressCmd,
+    final String input,
+    final String output,
+  ) {
     switch (compressCmd) {
       case 'lz4':
         return ['-d', input, output];
       case 'gzip':
-        return ['-d', '-c', input, output]; // Note: will redirect stdout manually
+        return [
+          '-d',
+          '-c',
+          input,
+          output,
+        ]; // Note: will redirect stdout manually
       case 'snzip':
         return ['-d', '-c', input, output];
       case 'zstd':
@@ -405,7 +555,9 @@ class BenchmarkReport {
       stdout.writeln('Benchmark: $valid/$total passed');
       if (failed.isNotEmpty) {
         for (final f in failed) {
-          stdout.writeln('  FAIL: ${f.codec}/${f.implementation} on ${f.dataset}');
+          stdout.writeln(
+            '  FAIL: ${f.codec}/${f.implementation} on ${f.dataset}',
+          );
         }
       }
       return;
@@ -420,11 +572,15 @@ class BenchmarkReport {
     // Print datasets summary
     stdout.writeln('DATASETS:');
     for (final category in ['Small', 'Medium', 'Large']) {
-      final datasets = testDatasets.where((d) => d.category == category).toList();
+      final datasets = testDatasets
+          .where((d) => d.category == category)
+          .toList();
       if (datasets.isNotEmpty) {
         stdout.writeln('  $category:');
         for (final dataset in datasets) {
-          stdout.writeln('    ${dataset.name.padRight(30)} ${_formatBytes(dataset.data.length)}');
+          stdout.writeln(
+            '    ${dataset.name.padRight(30)} ${_formatBytes(dataset.data.length)}',
+          );
         }
       }
     }
@@ -441,7 +597,8 @@ class BenchmarkReport {
       stdout.writeln('');
 
       // Header
-      final header = '${'Codec'.padRight(20)} ${'Impl'.padRight(6)} '
+      final header =
+          '${'Codec'.padRight(20)} ${'Impl'.padRight(6)} '
           '${'Ratio'.padLeft(8)} ${'Compressed'.padLeft(12)} '
           '${'Comp(ms)'.padLeft(10)} ${'Decomp(ms)'.padLeft(10)} '
           '${'Comp(MB/s)'.padLeft(12)} ${'Decomp(MB/s)'.padLeft(12)} Status';
@@ -449,8 +606,22 @@ class BenchmarkReport {
       stdout.writeln('-' * 120);
 
       for (final codec in codecNames) {
-        final dartResult = results.where((r) => r.dataset == dataset && r.codec == codec && r.implementation == 'Dart').firstOrNull;
-        final cliResult = results.where((r) => r.dataset == dataset && r.codec == codec && r.implementation == 'CLI').firstOrNull;
+        final dartResult = results
+            .where(
+              (r) =>
+                  r.dataset == dataset &&
+                  r.codec == codec &&
+                  r.implementation == 'Dart',
+            )
+            .firstOrNull;
+        final cliResult = results
+            .where(
+              (r) =>
+                  r.dataset == dataset &&
+                  r.codec == codec &&
+                  r.implementation == 'CLI',
+            )
+            .firstOrNull;
 
         if (dartResult != null) {
           stdout.writeln(_formatLine(dartResult));
@@ -468,18 +639,29 @@ class BenchmarkReport {
   }
 
   String _formatLine(final BenchmarkResult result) {
-    final codecImpl = '${result.codec.padRight(20)} ${result.implementation.padRight(6)}';
+    final codecImpl =
+        '${result.codec.padRight(20)} ${result.implementation.padRight(6)}';
     final ratio = '${result.compressionRatio.toStringAsFixed(1)}%'.padLeft(8);
     final compressed = _formatBytes(result.compressedSize).padLeft(12);
 
-    final compressMs = result.compressTimeMs < 0.01 ? '<0.01' : result.compressTimeMs.toStringAsFixed(2);
-    final decompressMs = result.decompressTimeMs < 0.01 ? '<0.01' : result.decompressTimeMs.toStringAsFixed(2);
+    final compressMs = result.compressTimeMs < 0.01
+        ? '<0.01'
+        : result.compressTimeMs.toStringAsFixed(2);
+    final decompressMs = result.decompressTimeMs < 0.01
+        ? '<0.01'
+        : result.decompressTimeMs.toStringAsFixed(2);
 
     final compressMbps = result.compressTimeMs > 0
-        ? (result.originalSize / (result.compressTimeMs / 1000.0) / (1024 * 1024)).toStringAsFixed(1)
+        ? (result.originalSize /
+                  (result.compressTimeMs / 1000.0) /
+                  (1024 * 1024))
+              .toStringAsFixed(1)
         : 'N/A';
     final decompressMbps = result.decompressTimeMs > 0
-        ? (result.originalSize / (result.decompressTimeMs / 1000.0) / (1024 * 1024)).toStringAsFixed(1)
+        ? (result.originalSize /
+                  (result.decompressTimeMs / 1000.0) /
+                  (1024 * 1024))
+              .toStringAsFixed(1)
         : 'N/A';
 
     final status = result.valid ? '✓' : (result.error != null ? 'ERROR' : '✗');
@@ -508,11 +690,7 @@ class Dataset {
   final String category;
   final Uint8List data;
 
-  Dataset({
-    required this.name,
-    required this.category,
-    required this.data,
-  });
+  Dataset({required this.name, required this.category, required this.data});
 }
 
 class BenchmarkResult {

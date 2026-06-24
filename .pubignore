@@ -1,8 +1,8 @@
 # Exclude test fixtures and tests (not needed for package consumers)
 test/
 
-# Exclude CLI tool (users can use it from source if needed)
-bin/
+# Note: bin/ is published so the `libcompress` executable (pubspec executables:)
+# is installable via `dart pub global activate libcompress`.
 
 # Ignore internal documentation files and any AI kibble
 AGENTS.md

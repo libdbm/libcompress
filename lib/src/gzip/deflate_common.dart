@@ -118,7 +118,25 @@ const List<int> distanceExtraBits = [
 
 /// Order of code length codes (for encoding Huffman trees)
 const List<int> codeLengthOrder = [
-  16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+  16,
+  17,
+  18,
+  0,
+  8,
+  7,
+  9,
+  6,
+  10,
+  5,
+  11,
+  4,
+  12,
+  3,
+  13,
+  2,
+  14,
+  1,
+  15,
 ];
 
 /// Computes hash value for LZ77 match finding
@@ -130,7 +148,10 @@ int hash(Uint8List data, int pos) {
       (hashSize - 1);
 }
 
-/// Encodes a length value into length code and extra bits
+/// Encodes a length value into length code and extra bits.
+///
+/// O(1) via a precomputed code table (built once with the canonical scan); the
+/// extra-bits/value decomposition is uniform across all codes.
 ///
 /// Throws [ArgumentError] if length is not between [minMatch] and [maxMatch].
 LengthCode encodeLength(int length) {
@@ -141,43 +162,66 @@ LengthCode encodeLength(int length) {
       'Must be between $minMatch and $maxMatch',
     );
   }
-
-  if (length < 11) {
-    return LengthCode(257 + length - 3, 0, 0);
-  }
-
-  for (var code = 0; code < lengthBase.length - 1; code++) {
-    if (length < lengthBase[code + 1]) {
-      final extra = length - lengthBase[code];
-      return LengthCode(257 + code, lengthExtraBits[code], extra);
-    }
-  }
-
-  // Length 258
-  return LengthCode(285, 0, 0);
+  final code = _lengthCodeFor[length];
+  final index = code - 257;
+  return LengthCode(code, lengthExtraBits[index], length - lengthBase[index]);
 }
 
-/// Encodes a distance value into distance code and extra bits
+/// Encodes a distance value into distance code and extra bits (O(1) lookup).
 DistanceCode encodeDistance(int distance) {
   if (distance < 1 || distance > maxDistance) {
-    throw DeflateFormatException('Invalid distance: $distance (must be 1-$maxDistance)');
+    throw DeflateFormatException(
+      'Invalid distance: $distance (must be 1-$maxDistance)',
+    );
   }
+  final code = _distanceCodeFor[distance];
+  return DistanceCode(
+    code,
+    distanceExtraBits[code],
+    distance - distanceBase[code],
+  );
+}
 
-  if (distance <= 4) {
-    return DistanceCode(distance - 1, 0, 0);
-  }
+/// `length (minMatch..maxMatch) -> length code (257..285)`, built once.
+final Uint16List _lengthCodeFor = _buildLengthCodeTable();
+final Uint8List _distanceCodeFor = _buildDistanceCodeTable();
 
-  // Check codes 4-28
-  for (var code = 4; code < 29; code++) {
-    if (distance < distanceBase[code + 1]) {
-      final extra = distance - distanceBase[code];
-      return DistanceCode(code, distanceExtraBits[code], extra);
+Uint16List _buildLengthCodeTable() {
+  final table = Uint16List(maxMatch + 1);
+  for (var length = minMatch; length <= maxMatch; length++) {
+    var code = 285; // length 258
+    if (length < 11) {
+      code = 257 + length - 3;
+    } else if (length < maxMatch) {
+      for (var c = 0; c < lengthBase.length - 1; c++) {
+        if (length < lengthBase[c + 1]) {
+          code = 257 + c;
+          break;
+        }
+      }
     }
+    table[length] = code;
   }
+  return table;
+}
 
-  // Code 29 handles distances 24577-32768
-  final extra = distance - distanceBase[29];
-  return DistanceCode(29, distanceExtraBits[29], extra);
+Uint8List _buildDistanceCodeTable() {
+  final table = Uint8List(maxDistance + 1);
+  for (var distance = 1; distance <= maxDistance; distance++) {
+    var code = 29; // distances 24577..32768
+    if (distance <= 4) {
+      code = distance - 1;
+    } else {
+      for (var c = 4; c < 29; c++) {
+        if (distance < distanceBase[c + 1]) {
+          code = c;
+          break;
+        }
+      }
+    }
+    table[distance] = code;
+  }
+  return table;
 }
 
 /// Represents an encoded length with code and extra bits

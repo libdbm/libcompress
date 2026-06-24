@@ -9,7 +9,6 @@
 ///
 /// All subclasses extend [FormatException] for consistency with Dart's
 /// standard library conventions.
-/// TODO: Maybe move these to the implementations?
 ///
 /// Example:
 /// ```dart
@@ -22,6 +21,33 @@
 abstract class CompressionFormatException extends FormatException {
   /// Creates a compression format exception with the given [message].
   const CompressionFormatException(super.message);
+}
+
+/// Runs [body], converting the *input-validation* errors a decoder throws on
+/// malformed data into a codec-specific [CompressionFormatException] via [wrap]:
+/// `StateError` (e.g. exhausted bit reader), `ArgumentError` (incl. its
+/// subtypes `RangeError`/`IndexError`, e.g. an out-of-window back-reference),
+/// and plain `FormatException`.
+///
+/// Other errors — `TypeError`, `NoSuchMethodError`, `AssertionError`, generic
+/// `Error`, etc. — are NOT caught: they indicate a library bug (corrupted
+/// internal state), and masking them as "bad compressed data" would destroy
+/// the signal. They propagate unchanged so callers/observability can see them.
+T guardFormat<T>(
+  final T Function() body,
+  final CompressionFormatException Function(String message) wrap,
+) {
+  try {
+    return body();
+  } on CompressionFormatException {
+    rethrow;
+  } on FormatException catch (e) {
+    throw wrap(e.message.toString());
+  } on ArgumentError catch (e) {
+    throw wrap(e.message?.toString() ?? e.toString());
+  } on StateError catch (e) {
+    throw wrap(e.message);
+  }
 }
 
 /// Exception thrown when invalid LZ4 data is encountered

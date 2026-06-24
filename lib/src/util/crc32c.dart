@@ -88,14 +88,20 @@ class Crc32c {
   ///
   /// To unmask, use [unmask].
   static int mask(int crc) {
-    return (((crc >> 15) | (crc << 17)) + 0xa282ead8) & 0xFFFFFFFF;
+    // 32-bit rotate-right-by-15, via multiplication so the result is exact and
+    // non-negative on both the VM and dart2js (`crc << 17` would sign/truncate
+    // on JS). Equivalent to ((crc >> 15) | (crc << 17)) on a uint32.
+    final c = crc % 0x100000000;
+    final rotated = (c ~/ 0x8000) + (c % 0x8000) * 0x20000;
+    return (rotated + 0xa282ead8) % 0x100000000;
   }
 
   /// Unmasks a masked CRC32C checksum
   ///
   /// Reverses the masking applied by [mask].
   static int unmask(int masked) {
-    final rot = (masked - 0xa282ead8) & 0xFFFFFFFF;
-    return ((rot >> 17) | (rot << 15)) & 0xFFFFFFFF;
+    final rot = (masked - 0xa282ead8) % 0x100000000;
+    // 32-bit rotate-left-by-15 (inverse of [mask]).
+    return (rot ~/ 0x20000) + (rot % 0x20000) * 0x8000;
   }
 }

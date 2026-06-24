@@ -1,7 +1,11 @@
 import 'dart:typed_data';
 
+import '../util/byte_utils.dart';
 import '../util/crc32c.dart';
 import 'snappy_decoder.dart';
+
+/// Snappy framing caps a single chunk's uncompressed data at 64 KB.
+const int _maxChunkUncompressed = 65536;
 
 /// Snappy streaming (framing format) decoder
 ///
@@ -23,10 +27,13 @@ class SnappyStreamDecoder {
   static const int chunkTypePadding = 0xfe;
 
   /// Maximum allowed uncompressed size per chunk
-  final int maxUncompressedSize;
+  final int? maxUncompressedSize;
 
   /// Whether we've seen a stream identifier (for incremental decoding)
   bool _seenIdentifier = false;
+
+  /// Whether the mandatory leading stream identifier has been decoded.
+  bool get seenIdentifier => _seenIdentifier;
 
   /// Creates a streaming decoder
   ///
@@ -112,17 +119,21 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Compressed chunk too small for checksum');
     }
 
-    // Read checksum (first 4 bytes, little-endian)
-    final checksum = chunk.data[0] |
-        (chunk.data[1] << 8) |
-        (chunk.data[2] << 16) |
-        (chunk.data[3] << 24);
+    // Read checksum (first 4 bytes, little-endian; readUint32LE is non-negative
+    // on both VM and dart2js, matching the masked CRC it's compared against).
+    final checksum = ByteUtils.readUint32LE(chunk.data, 0);
 
-    // Decompress the data (after checksum)
+    // Decompress the data (after checksum), bounded by the 64 KB per-chunk
+    // spec limit (and any smaller configured cap).
     final compressed = Uint8List.sublistView(chunk.data, 4);
+    final chunkLimit =
+        (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
+        : _maxChunkUncompressed;
     final decompressed = SnappyDecoder.decompress(
       compressed,
-      maxUncompressedSize: maxUncompressedSize,
+      maxUncompressedSize: chunkLimit,
     );
 
     // Validate checksum against uncompressed data
@@ -144,20 +155,22 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Uncompressed chunk too small for checksum');
     }
 
-    // Read checksum (first 4 bytes, little-endian)
-    final checksum = chunk.data[0] |
-        (chunk.data[1] << 8) |
-        (chunk.data[2] << 16) |
-        (chunk.data[3] << 24);
+    // Read checksum (first 4 bytes, little-endian; readUint32LE is non-negative
+    // on both VM and dart2js, matching the masked CRC it's compared against).
+    final checksum = ByteUtils.readUint32LE(chunk.data, 0);
 
     // Get uncompressed data (after checksum)
     final uncompressed = Uint8List.sublistView(chunk.data, 4);
 
-    // Validate maximum size
-    if (uncompressed.length > maxUncompressedSize) {
+    // Validate maximum size (the 64 KB per-chunk spec limit and any smaller cap)
+    final chunkLimit =
+        (maxUncompressedSize != null &&
+            maxUncompressedSize! < _maxChunkUncompressed)
+        ? maxUncompressedSize!
+        : _maxChunkUncompressed;
+    if (uncompressed.length > chunkLimit) {
       throw SnappyFormatException(
-        'Uncompressed chunk size ${uncompressed.length} '
-        'exceeds maximum $maxUncompressedSize',
+        'Uncompressed chunk size ${uncompressed.length} exceeds maximum $chunkLimit',
       );
     }
 
@@ -187,12 +200,23 @@ class SnappyStreamDecoder {
     reset();
 
     var cursor = 0;
-    final output = <int>[];
+    var total = 0;
+    // Typed accumulator (no per-byte boxing / final fromList copy) for large
+    // framed streams.
+    final output = BytesBuilder(copy: false);
 
     while (cursor < data.length) {
       final chunk = _readChunk(data, cursor);
       final decompressed = _processChunk(chunk, cursor);
-      output.addAll(decompressed);
+      total += decompressed.length;
+      // Cumulative cap across all chunks (each chunk alone is bounded by
+      // maxUncompressedSize, but an unbounded number of chunks is not).
+      if (maxUncompressedSize != null && total > maxUncompressedSize!) {
+        throw SnappyFormatException(
+          'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
+        );
+      }
+      output.add(decompressed);
       cursor += chunk.totalSize;
     }
 
@@ -200,7 +224,7 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Stream missing required stream identifier');
     }
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Read a chunk from the stream at the specified offset
@@ -210,9 +234,8 @@ class SnappyStreamDecoder {
     }
 
     final type = data[offset];
-    final length = data[offset + 1] |
-        (data[offset + 2] << 8) |
-        (data[offset + 3] << 16);
+    final length =
+        data[offset + 1] | (data[offset + 2] << 8) | (data[offset + 3] << 16);
 
     // Total chunk size = 4-byte header + length bytes
     final totalSize = 4 + length;
@@ -223,7 +246,11 @@ class SnappyStreamDecoder {
       );
     }
 
-    final chunkData = Uint8List.sublistView(data, offset + 4, offset + 4 + length);
+    final chunkData = Uint8List.sublistView(
+      data,
+      offset + 4,
+      offset + 4 + length,
+    );
 
     return _Chunk(type, length, totalSize, chunkData);
   }
@@ -231,7 +258,9 @@ class SnappyStreamDecoder {
   /// Validate stream identifier chunk
   void _validateStreamIdentifier(final Uint8List data) {
     if (data.length != 6) {
-      throw SnappyFormatException('Invalid stream identifier length: ${data.length}');
+      throw SnappyFormatException(
+        'Invalid stream identifier length: ${data.length}',
+      );
     }
 
     // Expected: "sNaPpY" = [0x73, 0x4e, 0x61, 0x50, 0x70, 0x59]
@@ -244,7 +273,6 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Invalid stream identifier content');
     }
   }
-
 }
 
 /// Internal representation of a chunk

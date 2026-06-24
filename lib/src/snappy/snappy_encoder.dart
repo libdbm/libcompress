@@ -189,7 +189,6 @@ class SnappyEncoder {
     return op;
   }
 
-
   /// Get maximum compressed length for given input size
   static int _getMaxCompressedLength(int sourceLength) {
     // Worst case: varint length + uncompressed data + 1 tag per 60 bytes

@@ -43,9 +43,8 @@ class GzipCodec extends CompressionCodec {
     this.comment,
     this.maxDecompressedSize = gzipDefaultMaxDecompressedSize,
   }) {
-    if (level < 1 || level > 9) {
-      throw ArgumentError.value(level, 'level', 'Must be between 1 and 9');
-    }
+    validateLevel(level, 1, 9);
+    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
   }
 
   /// Creates a GZIP codec from compression options
@@ -54,6 +53,7 @@ class GzipCodec extends CompressionCodec {
       level: options.level,
       filename: options.filename,
       comment: options.comment,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -95,6 +95,7 @@ class GzipOptions extends CompressionOptions {
   GzipOptions({
     super.level = 6,
     super.checksum = true,
+    super.maxDecompressedSize,
     this.filename,
     this.comment,
   }) {
@@ -103,4 +104,3 @@ class GzipOptions extends CompressionOptions {
     }
   }
 }
-

@@ -68,4 +68,68 @@ void main() {
       expect(reader.readBits(8), equals(0xA5));
     });
   });
+
+  group('BitStreamReader position and seek', () {
+    test('position reports byte and bit offsets', () {
+      final reader = BitStreamReader(Uint8List.fromList([0xAB, 0xCD]));
+      expect(reader.position.byte, equals(0));
+      expect(reader.position.bit, equals(0));
+      reader.readBits(3);
+      expect(reader.position.byte, equals(0));
+      expect(reader.position.bit, equals(3));
+      reader.readBits(8); // crosses into next byte
+      expect(reader.position.byte, equals(1));
+      expect(reader.position.bit, equals(3));
+    });
+
+    test('seek restores a captured position', () {
+      final reader = BitStreamReader(Uint8List.fromList([0x5F, 0x0A, 0xC3]));
+      reader.readBits(4);
+      final mark = reader.position;
+      final expected = reader.readBits(8);
+      reader.seek(mark);
+      expect(reader.readBits(8), equals(expected));
+    });
+
+    test('seek invalidates the peek-cache', () {
+      final reader = BitStreamReader(Uint8List.fromList([0xFF, 0x00]));
+      final mark = reader.position;
+      reader.readBits(4, reuseLast: false); // populate cache
+      reader.seek(mark);
+      // After seek, a reuseLast read must reflect the real stream, not stale bits.
+      expect(reader.readBits(4, reuseLast: true), equals(0xF));
+    });
+
+    test('seek out of range throws', () {
+      final reader = BitStreamReader(Uint8List.fromList([0x01, 0x02]));
+      expect(() => reader.seek(const BitPosition(3, 0)), throwsArgumentError);
+      expect(() => reader.seek(const BitPosition(2, 1)), throwsArgumentError);
+      expect(() => reader.seek(const BitPosition(0, 8)), throwsArgumentError);
+    });
+  });
+
+  group('BitStreamReader window', () {
+    test('reads only within [start, end) with relative positions', () {
+      final data = Uint8List.fromList([0xFF, 0xAB, 0xCD, 0xFF]);
+      final reader = BitStreamReader(data, start: 1, end: 3);
+      expect(reader.position.byte, equals(0));
+      expect(reader.readBits(8), equals(0xAB));
+      expect(reader.readBits(8), equals(0xCD));
+      expect(reader.isEndOfStream, isTrue);
+    });
+
+    test('reading past the window end throws', () {
+      final data = Uint8List.fromList([0xAB, 0xCD]);
+      final reader = BitStreamReader(data, start: 0, end: 1);
+      expect(reader.readBits(8), equals(0xAB));
+      expect(() => reader.readBits(1), throwsStateError);
+    });
+
+    test('reads a window over a plain List<int> without copying source', () {
+      final List<int> data = [0x11, 0x5F, 0x0A, 0x22];
+      final reader = BitStreamReader(data, start: 1, end: 3);
+      expect(reader.readBits(4), equals(0xF));
+      expect(reader.readBits(8), equals(0xA5));
+    });
+  });
 }

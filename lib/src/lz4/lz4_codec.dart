@@ -29,7 +29,11 @@ class Lz4Codec extends CompressionCodec {
     this.blockSize = lz4DefaultBlockSize,
     this.enableContentChecksum = true,
     this.maxDecompressedSize = lz4DefaultMaxDecompressedSize,
-  });
+  }) {
+    validateLevel(level, 1, 9);
+    validateRange(blockSize, 1, lz4BlockSize4M, 'blockSize');
+    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
+  }
 
   /// Creates an LZ4 codec from compression options
   factory Lz4Codec.fromOptions(Lz4Options options) {
@@ -37,6 +41,7 @@ class Lz4Codec extends CompressionCodec {
       level: options.level,
       blockSize: options.blockSize,
       enableContentChecksum: options.checksum,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -91,6 +96,7 @@ class Lz4Options extends CompressionOptions {
   Lz4Options({
     super.level = 1,
     super.checksum = true,
+    super.maxDecompressedSize,
     this.blockSize = lz4DefaultBlockSize,
   }) {
     if (level < 1 || level > 9) {

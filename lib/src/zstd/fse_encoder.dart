@@ -32,12 +32,18 @@ class SymbolStats {
   bool get isRle => distinct == 1;
 
   /// Check if distribution is suitable for predefined tables
-  bool shouldUsePredefined(final List<int> predefined, final int predefinedLog) {
+  bool shouldUsePredefined(
+    final List<int> predefined,
+    final int predefinedLog,
+  ) {
     if (total < 16) return true; // Too few samples
 
     // Compare entropy of custom vs predefined
     final custom = _entropy(counts, total);
-    final predefinedEntropy = _estimatePredefinedEntropy(predefined, predefinedLog);
+    final predefinedEntropy = _estimatePredefinedEntropy(
+      predefined,
+      predefinedLog,
+    );
 
     // Use predefined if custom isn't significantly better (>5% improvement)
     return custom >= predefinedEntropy * 0.95;
@@ -102,6 +108,10 @@ class FseEncoder {
   late List<int> normalized;
   late int tableLog;
   late int maxSymbol;
+
+  // Cached header bytes: encodeHeader is called once to measure the size and
+  // again to emit; the result is deterministic from normalized + tableLog.
+  Uint8List? _header;
 
   /// Gather statistics from symbol occurrences
   static SymbolStats stats(final List<int> symbols, final int maxSym) {
@@ -217,6 +227,9 @@ class FseEncoder {
   /// - 4 bits: Accuracy_Log - 5
   /// - Variable bits per symbol: count encoding with optional zero runs
   Uint8List encodeHeader() {
+    final cached = _header;
+    if (cached != null) return cached;
+
     final writer = ForwardBitWriter();
 
     // Write accuracy log (tableLog - 5)
@@ -292,7 +305,7 @@ class FseEncoder {
       symbol++;
     }
 
-    return writer.finish();
+    return _header = writer.finish();
   }
 
   /// Check if encoding will be smaller than predefined
@@ -311,7 +324,9 @@ class FseEncoder {
 /// - Bits 3-2: Match_Lengths_Mode
 /// - Bits 1-0: Reserved (must be 0)
 int encodeSymbolMode(final int llMode, final int ofMode, final int mlMode) {
-  return ((llMode & 0x03) << 6) | ((ofMode & 0x03) << 4) | ((mlMode & 0x03) << 2);
+  return ((llMode & 0x03) << 6) |
+      ((ofMode & 0x03) << 4) |
+      ((mlMode & 0x03) << 2);
 }
 
 /// Determines best encoding mode for each component

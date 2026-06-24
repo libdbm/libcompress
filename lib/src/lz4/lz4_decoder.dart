@@ -1,7 +1,13 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../exceptions.dart';
+import '../util/byte_pending.dart';
+import '../util/byte_sink.dart';
 import '../util/byte_utils.dart';
+import '../util/incremental_decompress_transformer.dart';
+import '../util/output_limit.dart';
+import '../util/window_buffer.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
 
@@ -16,13 +22,34 @@ class Lz4Decoder {
   /// Set to null to allow unlimited output (use with trusted input only).
   Lz4Decoder({this.maxSize = lz4DefaultMaxDecompressedSize});
 
-  Uint8List decompress(Uint8List input) {
+  Uint8List decompress(Uint8List input) =>
+      guardFormat(() => _decompress(input), Lz4FormatException.new);
+
+  Uint8List _decompress(Uint8List input) {
     if (input.isEmpty) {
       return Uint8List(0);
     }
 
     final reader = _FrameReader(input);
 
+    // Decode each concatenated frame into one output, enforcing maxSize
+    // cumulatively across frames (matching the GZIP/Zstd block decoders and the
+    // LZ4 streaming decoder, which all accept concatenated members/frames).
+    final frames = BytesBuilder(copy: false);
+    var total = 0;
+    while (!reader.isAtEnd) {
+      final remaining = maxSize != null ? maxSize! - total : null;
+      final frame = _decodeFrame(reader, remaining);
+      frames.add(frame);
+      total += frame.length;
+    }
+    return frames.takeBytes();
+  }
+
+  /// Decodes a single LZ4 frame at the reader's current position, bounding its
+  /// output to [remaining] (null = unlimited), and advances the reader past the
+  /// frame (end mark + optional content checksum).
+  Uint8List _decodeFrame(final _FrameReader reader, final int? remaining) {
     final magic = reader.readUint32();
     if (magic != lz4FrameMagic) {
       throw Lz4FormatException(
@@ -39,35 +66,32 @@ class Lz4Decoder {
       throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
     }
 
-    final blockIndependence = (flag & 0x20) != 0;
     final blockChecksumFlag = (flag & 0x10) != 0;
     final contentSizeFlag = (flag & 0x08) != 0;
     final contentChecksumFlag = (flag & 0x04) != 0;
     final dictIdFlag = (flag & 0x01) != 0;
     final bd = reader.readByte();
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
     final blockMaxSizeCode = (bd >> 4) & 0x07;
     final blockMaxSize = blockSizeFromCode(blockMaxSizeCode);
-    if (!blockIndependence) {
-      throw Lz4FormatException('Dependent blocks are not supported');
-    }
-
+    // Both independent and linked (dependent) blocks decode correctly: a single
+    // shared output buffer is used, and LZ4 match offsets are <= 64 KB.
     final headerBytes = <int>[flag, bd];
 
     int? expectedContentSize;
     if (contentSizeFlag) {
       final sizeBytes = reader.readBytes(8);
       headerBytes.addAll(sizeBytes);
-      var contentSize = 0;
-      for (var i = 0; i < 8; i++) {
-        contentSize |= sizeBytes[i] << (8 * i);
-      }
+      final contentSize = ByteUtils.readUintLE(sizeBytes, 0, 8);
       expectedContentSize = contentSize;
 
-      // Validate declared content size against limit early
-      if (maxSize != null && contentSize > maxSize!) {
+      // Validate declared content size against the remaining limit early
+      if (remaining != null && contentSize > remaining) {
         throw Lz4FormatException(
           'Declared content size $contentSize exceeds '
-          'maximum allowed size $maxSize',
+          'maximum allowed size $remaining',
         );
       }
     }
@@ -90,10 +114,10 @@ class Lz4Decoder {
     var initialCapacity = expectedContentSize != null
         ? math.max(256, math.min(expectedContentSize, blockMaxSize * 2))
         : blockMaxSize;
-    if (maxSize != null && initialCapacity > maxSize!) {
-      initialCapacity = maxSize!;
+    if (remaining != null && initialCapacity > remaining) {
+      initialCapacity = remaining;
     }
-    final output = GrowableBuffer(initialCapacity, maxSize);
+    final output = GrowableBuffer(initialCapacity, remaining);
     final blockDecoder = _BlockDecoder(output);
 
     while (true) {
@@ -139,10 +163,6 @@ class Lz4Decoder {
       }
     }
 
-    if (!reader.isAtEnd) {
-      throw Lz4FormatException('Trailing bytes after LZ4 frame');
-    }
-
     if (expectedContentSize != null &&
         decompressed.length != expectedContentSize) {
       throw Lz4FormatException(
@@ -151,6 +171,261 @@ class Lz4Decoder {
     }
 
     return decompressed;
+  }
+}
+
+/// Incremental, memory-bounded LZ4 frame decoder.
+///
+/// Emits one block at a time (LZ4 frame blocks are independent), so peak
+/// memory is roughly one block plus its decoded output rather than the whole
+/// frame and its whole output. Verifies the header checksum, optional
+/// per-block checksums, and the optional content checksum (streamed via
+/// [Xxh32Sink]). Supports concatenated frames, matching the streaming codec.
+class Lz4IncrementalDecoder implements IncrementalDecoder {
+  Lz4IncrementalDecoder({
+    this.maxSize,
+    required this.maxBufferSize,
+    this.verified = false,
+  });
+
+  final int? maxSize;
+  final int maxBufferSize;
+
+  /// When true, a frame's output is withheld until its content checksum and
+  /// size validate, then released (memory rises to one frame's output, bounded
+  /// by [maxSize]). The default emits as it decodes.
+  final bool verified;
+
+  // Holds a frame's output in verified mode until its trailer validates.
+  BytesBuilder? _hold;
+
+  // Cumulative output limit across all concatenated frames.
+  late final OutputLimit _limit = OutputLimit(maxSize);
+
+  final BytePending _pending = BytePending();
+  int _cursor = 0;
+
+  bool _inFrame = false;
+  bool _blockChecksum = false;
+  bool _contentChecksumFlag = false;
+  int _blockMaxSize = 0;
+  int? _expectedContentSize;
+  Xxh32Sink? _contentSink;
+  // One 64 KB window per frame (LZ4 match offsets are <= 64 KB), shared across
+  // blocks so linked (dependent) blocks resolve and independent blocks also
+  // decode correctly. Drained as it advances.
+  WindowBuffer? _output;
+  _BlockDecoder? _blockDecoder;
+  bool _sawEndMark = false;
+
+  int get _avail => _pending.length - _cursor;
+
+  int _u32(final int o) =>
+      _pending[o] +
+      _pending[o + 1] * 0x100 +
+      _pending[o + 2] * 0x10000 +
+      _pending[o + 3] * 0x1000000;
+
+  @override
+  void add(final Uint8List input, final void Function(Uint8List) emit) {
+    // Reject before appending so an oversized chunk can't force the
+    // allocation/copy in _pending.add ahead of the limit check.
+    if (_avail + input.length > maxBufferSize) {
+      throw Lz4FormatException(
+        'Stream buffer would exceed $maxBufferSize bytes - '
+        'frame too large or malformed',
+      );
+    }
+    _pending.add(input);
+    guardFormat(() => _drive(emit), Lz4FormatException.new);
+  }
+
+  @override
+  void close(final void Function(Uint8List) emit) {
+    guardFormat(() => _drive(emit), Lz4FormatException.new);
+    if (_inFrame || _avail != 0) {
+      throw Lz4FormatException('Incomplete LZ4 frame at end of stream');
+    }
+  }
+
+  void _drive(final void Function(Uint8List) emit) {
+    var progressed = true;
+    while (progressed) {
+      if (!_inFrame) {
+        progressed = _avail > 0 && _parseHeader();
+      } else if (_sawEndMark) {
+        progressed = _finishFrame(emit);
+      } else {
+        progressed = _decodeBlock(emit);
+      }
+    }
+    _compact();
+  }
+
+  bool _parseHeader() {
+    if (_avail < 6) return false;
+    final base = _cursor;
+    final magic = _u32(base);
+    if (magic != lz4FrameMagic) {
+      throw Lz4FormatException(
+        'Invalid LZ4 frame magic: 0x${magic.toRadixString(16)}',
+      );
+    }
+    final flag = _pending[base + 4];
+    if (flag >> 6 != 0x01) {
+      throw Lz4FormatException('Unsupported LZ4 frame version ${flag >> 6}');
+    }
+    if ((flag & 0x02) != 0) {
+      throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
+    }
+    final bd = _pending[base + 5];
+    if ((bd & 0x8F) != 0) {
+      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
+    }
+    final contentSizeFlag = (flag & 0x08) != 0;
+    final dictIdFlag = (flag & 0x01) != 0;
+    final needed = 6 + (contentSizeFlag ? 8 : 0) + (dictIdFlag ? 4 : 0) + 1;
+    if (_avail < needed) return false;
+
+    final headerBytes = <int>[flag, bd];
+    var p = base + 6;
+    int? expectedContentSize;
+    if (contentSizeFlag) {
+      for (var i = 0; i < 8; i++) {
+        headerBytes.add(_pending[p + i]);
+      }
+      final size = ByteUtils.readUintLE(_pending.bytes, p, 8);
+      p += 8;
+      expectedContentSize = size;
+      final budget = _limit.remaining;
+      if (budget != null && size > budget) {
+        throw Lz4FormatException(
+          'Declared content size $size exceeds remaining budget $budget '
+          '(maximum $maxSize)',
+        );
+      }
+    }
+    if (dictIdFlag) {
+      for (var i = 0; i < 4; i++) {
+        headerBytes.add(_pending[p + i]);
+      }
+      if (_u32(p) != 0) {
+        throw Lz4FormatException('External dictionaries are not supported');
+      }
+      p += 4;
+    }
+    if (_pending[p] != lz4HeaderChecksum(headerBytes)) {
+      throw Lz4FormatException('Invalid LZ4 header checksum');
+    }
+    p += 1;
+
+    _cursor = p;
+    _inFrame = true;
+    _sawEndMark = false;
+    _blockChecksum = (flag & 0x10) != 0;
+    _contentChecksumFlag = (flag & 0x04) != 0;
+    _blockMaxSize = blockSizeFromCode((bd >> 4) & 0x07);
+    _expectedContentSize = expectedContentSize;
+    _contentSink = _contentChecksumFlag ? Xxh32Sink() : null;
+    // 64 KB LZ4 window, capped at the remaining cumulative budget so a single
+    // block can't balloon memory before the post-decode check, and so many
+    // frames can't collectively exceed maxSize.
+    _output = WindowBuffer(1 << 16, maxSize: _limit.remaining);
+    _hold = verified ? BytesBuilder(copy: false) : null;
+    _blockDecoder = _BlockDecoder(_output!);
+    return true;
+  }
+
+  bool _decodeBlock(final void Function(Uint8List) emit) {
+    if (_avail < 4) return false;
+    final sizeField = _u32(_cursor);
+    if (sizeField == 0) {
+      _cursor += 4;
+      _sawEndMark = true;
+      return true;
+    }
+    final isCompressed = (sizeField & 0x80000000) == 0;
+    final blockSize = sizeField & 0x7FFFFFFF;
+    if (blockSize > _blockMaxSize) {
+      throw Lz4FormatException(
+        'Block size $blockSize exceeds maximum $_blockMaxSize',
+      );
+    }
+    final trailer = _blockChecksum ? 4 : 0;
+    if (_avail < 4 + blockSize + trailer) return false;
+
+    final start = _cursor + 4;
+    final blockBytes = _pending.slice(start, start + blockSize);
+    var p = start + blockSize;
+    if (_blockChecksum) {
+      if (_u32(p) != XXH32.hash(blockBytes)) {
+        throw Lz4FormatException('Block checksum mismatch');
+      }
+      p += 4;
+    }
+
+    final output = _output!;
+    // The window's maxSize (the remaining cumulative budget) enforces the limit
+    // *during* expansion below, before a whole block can balloon memory.
+    if (isCompressed) {
+      _blockDecoder!
+        ..reset(blockBytes)
+        ..decode();
+    } else {
+      output.addBytes(blockBytes, 0, blockBytes.length);
+    }
+    _cursor = p;
+    _flush(output.drain(), emit);
+    return true;
+  }
+
+  bool _finishFrame(final void Function(Uint8List) emit) {
+    final output = _output!;
+    _flush(output.finish(), emit);
+
+    if (_contentChecksumFlag) {
+      if (_avail < 4) return false;
+      if (_u32(_cursor) != _contentSink!.digest()) {
+        throw Lz4FormatException('Content checksum mismatch');
+      }
+      _cursor += 4;
+    }
+    if (_expectedContentSize != null && output.length != _expectedContentSize) {
+      throw Lz4FormatException(
+        'Decompressed size ${output.length} != expected $_expectedContentSize',
+      );
+    }
+    // Frame validated — in verified mode, release the held output now.
+    final hold = _hold;
+    if (hold != null) {
+      if (hold.isNotEmpty) emit(hold.takeBytes());
+      _hold = null;
+    }
+    _inFrame = false;
+    _sawEndMark = false;
+    _contentSink = null;
+    _output = null;
+    _blockDecoder = null;
+    return true;
+  }
+
+  void _flush(final Uint8List bytes, final void Function(Uint8List) emit) {
+    if (bytes.isEmpty) return;
+    _contentSink?.add(bytes);
+    _limit.record(bytes.length);
+    final hold = _hold;
+    if (hold != null) {
+      hold.add(bytes); // verified mode: release only after the frame validates
+    } else {
+      emit(bytes);
+    }
+  }
+
+  void _compact() {
+    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
+      _pending.discard(_cursor);
+      _cursor = 0;
+    }
   }
 }
 
@@ -187,7 +462,7 @@ class _FrameReader {
 class _BlockDecoder {
   _BlockDecoder(this._output);
 
-  final GrowableBuffer _output;
+  final ByteSink _output;
   late Uint8List _block;
 
   void reset(Uint8List block) {
@@ -242,11 +517,13 @@ class _BlockDecoder {
       // information disclosure (reading uninitialized buffer content)
       if (offset == 0) {
         throw Lz4FormatException(
-            'Invalid match offset: 0 (offset must be at least 1)');
+          'Invalid match offset: 0 (offset must be at least 1)',
+        );
       }
       if (offset > _output.length) {
         throw Lz4FormatException(
-            'Invalid match offset: $offset exceeds output length ${_output.length}');
+          'Invalid match offset: $offset exceeds output length ${_output.length}',
+        );
       }
 
       var matchLength = token & 0x0F;
@@ -262,7 +539,8 @@ class _BlockDecoder {
         }
         if (!complete) {
           throw Lz4FormatException(
-              'Unexpected end while reading match length extension');
+            'Unexpected end while reading match length extension',
+          );
         }
       }
       matchLength += lz4MinMatch;

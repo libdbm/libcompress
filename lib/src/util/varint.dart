@@ -72,9 +72,14 @@ class Varint {
   /// print(result.value);  // 300
   /// print(result.bytesRead);  // 2
   /// ```
-  static VarintResult decode(Uint8List data, int offset) {
+  /// [maxBytes] caps the encoding length (e.g. 5 for a 32-bit Snappy preamble),
+  /// rejecting over-long varints. Accumulation uses multiplication rather than
+  /// `<< shift`, so the result is exact and non-negative on both the VM and
+  /// dart2js (a shifted value past bit 31 would wrap/sign on JS, yielding a
+  /// negative size that could slip past a bounds check).
+  static VarintResult decode(Uint8List data, int offset, {int maxBytes = 10}) {
     var value = 0;
-    var shift = 0;
+    var multiplier = 1;
     var bytesRead = 0;
 
     while (true) {
@@ -82,22 +87,21 @@ class Varint {
         throw FormatException('Incomplete varint at offset $offset');
       }
 
-      if (bytesRead >= 10) {
-        // Maximum 10 bytes for a 64-bit value
+      if (bytesRead >= maxBytes) {
         throw FormatException('Varint too long at offset $offset');
       }
 
       final byte = data[offset + bytesRead];
       bytesRead++;
 
-      value |= (byte & 0x7f) << shift;
+      value += (byte & 0x7f) * multiplier;
 
       if ((byte & 0x80) == 0) {
         // No continuation bit, we're done
         return VarintResult(value, bytesRead);
       }
 
-      shift += 7;
+      multiplier *= 128;
     }
   }
 

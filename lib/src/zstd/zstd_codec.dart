@@ -8,7 +8,11 @@ import 'zstd_decoder.dart';
 
 /// Zstandard (Zstd) compression codec
 ///
-/// Pure Dart implementation of Zstandard compression per RFC 8878.
+/// Pure Dart implementation of a practical **subset** of Zstandard (RFC 8878) —
+/// not a full decoder. In particular **dictionary-compressed frames are
+/// rejected**: a `.zst` produced with `zstd -D <dict>` (or any frame carrying a
+/// Dictionary_ID) throws a [ZstdFormatException] on decode, so don't assume
+/// arbitrary `.zst` files will decode. See Supported / Not implemented below.
 ///
 /// Supported features:
 /// - Full frame format parsing with magic number validation
@@ -25,8 +29,9 @@ import 'zstd_decoder.dart';
 /// - Dictionary compression
 /// - Window sizes larger than frame content
 ///
-/// CLI compatibility: Files produced by this codec decompress correctly
-/// with the standard `zstd` CLI tool.
+/// CLI compatibility: Files produced by this codec decompress correctly with
+/// the standard `zstd` CLI tool, and non-dictionary `.zst` files from the CLI
+/// decode here. Dictionary frames (`zstd -D`) are the exception — they fail.
 class ZstdCodec extends CompressionCodec {
   /// Compression level (1-9)
   final int level;
@@ -47,6 +52,17 @@ class ZstdCodec extends CompressionCodec {
   /// to verify correctness. This doubles CPU work but is useful for debugging.
   final bool validate;
 
+  /// Fail loud if an unexpected error makes a compressed block fall back to raw
+  /// output, instead of silently degrading to raw framing. Independent of
+  /// [validate] (no decode cost). Default false (fall back, optionally observed
+  /// via [onFallback]).
+  final bool strict;
+
+  /// Hook invoked when an unexpected encode error makes a block fall back to a
+  /// raw block — wire a log/metric so the ratio collapse isn't silent; null =
+  /// no-op. Not called for the legitimate "incompressible" path.
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Creates a Zstd codec with specified options
   ZstdCodec({
     this.level = 3,
@@ -54,7 +70,13 @@ class ZstdCodec extends CompressionCodec {
     this.enableChecksum = false,
     this.maxDecompressedSize = zstdDefaultMaxDecompressedSize,
     this.validate = false,
-  });
+    this.strict = false,
+    this.onFallback,
+  }) {
+    validateLevel(level, 1, 22);
+    validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
+    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
+  }
 
   /// Creates a Zstd codec from compression options
   factory ZstdCodec.fromOptions(final ZstdOptions options) {
@@ -63,6 +85,7 @@ class ZstdCodec extends CompressionCodec {
       blockSize: options.blockSize,
       enableChecksum: options.checksum,
       validate: options.validate,
+      maxDecompressedSize: options.maxDecompressedSize,
     );
   }
 
@@ -73,6 +96,8 @@ class ZstdCodec extends CompressionCodec {
       blockSize: blockSize,
       enableChecksum: enableChecksum,
       validate: validate,
+      strict: strict,
+      onFallback: onFallback,
     );
     return compressor.compress(data);
   }
@@ -108,6 +133,7 @@ class ZstdOptions extends CompressionOptions {
   ZstdOptions({
     super.level = 3,
     super.checksum = false,
+    super.maxDecompressedSize,
     this.blockSize = 128 * 1024,
     this.validate = false,
   }) {
