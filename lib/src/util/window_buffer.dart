@@ -28,11 +28,11 @@ class WindowBuffer implements ByteSink {
   /// [maxSize], when set, caps the total produced size (a safety backstop
   /// against decompression bombs); exceeding it throws [StateError].
   WindowBuffer(this.window, {int? maxSize})
-      : assert(window > 0),
-        _maxSize = maxSize,
-        // Start modest and grow; `window` may be large (a Zstd frame window),
-        // so it bounds retention, not the initial allocation.
-        _buffer = Uint8List(window.clamp(1024, 1 << 16));
+    : assert(window > 0),
+      _maxSize = maxSize,
+      // Start modest and grow; `window` may be large (a Zstd frame window),
+      // so it bounds retention, not the initial allocation.
+      _buffer = Uint8List(window.clamp(1024, 1 << 16));
 
   /// Total bytes produced so far, including bytes already drained.
   @override
@@ -47,7 +47,11 @@ class WindowBuffer implements ByteSink {
 
   /// Appends [count] bytes from [bytes] starting at [offset].
   @override
-  void addBytes(final List<int> bytes, [final int offset = 0, final int? count]) {
+  void addBytes(
+    final List<int> bytes, [
+    final int offset = 0,
+    final int? count,
+  ]) {
     final n = count ?? bytes.length - offset;
     _ensure(_length + n);
     if (bytes is Uint8List) {
@@ -88,7 +92,9 @@ class WindowBuffer implements ByteSink {
   Uint8List drain() {
     final emittable = _length - window;
     if (emittable <= 0) return Uint8List(0);
-    final out = Uint8List.fromList(Uint8List.sublistView(_buffer, 0, emittable));
+    final out = Uint8List.fromList(
+      Uint8List.sublistView(_buffer, 0, emittable),
+    );
     _buffer.setRange(0, window, _buffer, emittable);
     _base += emittable;
     _length = window;

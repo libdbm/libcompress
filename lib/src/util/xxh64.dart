@@ -6,26 +6,11 @@ import 'dart:typed_data';
 /// Based on the XXHash specification: https://github.com/Cyan4973/xxHash
 class XXH64 {
   // XXH64 constants
-  static final BigInt _prime1 = BigInt.parse(
-    '9E3779B185EBCA87',
-    radix: 16,
-  );
-  static final BigInt _prime2 = BigInt.parse(
-    'C2B2AE3D27D4EB4F',
-    radix: 16,
-  );
-  static final BigInt _prime3 = BigInt.parse(
-    '165667B19E3779F9',
-    radix: 16,
-  );
-  static final BigInt _prime4 = BigInt.parse(
-    '85EBCA77C2B2AE63',
-    radix: 16,
-  );
-  static final BigInt _prime5 = BigInt.parse(
-    '27D4EB2F165667C5',
-    radix: 16,
-  );
+  static final BigInt _prime1 = BigInt.parse('9E3779B185EBCA87', radix: 16);
+  static final BigInt _prime2 = BigInt.parse('C2B2AE3D27D4EB4F', radix: 16);
+  static final BigInt _prime3 = BigInt.parse('165667B19E3779F9', radix: 16);
+  static final BigInt _prime4 = BigInt.parse('85EBCA77C2B2AE63', radix: 16);
+  static final BigInt _prime5 = BigInt.parse('27D4EB2F165667C5', radix: 16);
   static final BigInt _mask64 = (BigInt.one << 64) - BigInt.one;
   static final BigInt _mask32 = (BigInt.one << 32) - BigInt.one;
   static final BigInt _signBit64 = BigInt.one << 63;
@@ -245,9 +230,13 @@ class Xxh64Sink {
       h64 = XXH64._add64(
         XXH64._add64(
           XXH64._add64(
-              XXH64._rotateLeft64(_v1, 1), XXH64._rotateLeft64(_v2, 7)),
+            XXH64._rotateLeft64(_v1, 1),
+            XXH64._rotateLeft64(_v2, 7),
+          ),
           XXH64._add64(
-              XXH64._rotateLeft64(_v3, 12), XXH64._rotateLeft64(_v4, 18)),
+            XXH64._rotateLeft64(_v3, 12),
+            XXH64._rotateLeft64(_v4, 18),
+          ),
         ),
         BigInt.zero,
       );
@@ -269,8 +258,9 @@ class Xxh64Sink {
       k1 = XXH64._mult64(k1, XXH64._prime1);
       h64 ^= k1;
       h64 = XXH64._add64(
-          XXH64._mult64(XXH64._rotateLeft64(h64, 27), XXH64._prime1),
-          XXH64._prime4);
+        XXH64._mult64(XXH64._rotateLeft64(h64, 27), XXH64._prime1),
+        XXH64._prime4,
+      );
       index += 8;
     }
     while (index <= _buffered - 4) {
@@ -278,8 +268,9 @@ class Xxh64Sink {
       k1 = XXH64._mult64(k1, XXH64._prime1);
       h64 ^= k1;
       h64 = XXH64._add64(
-          XXH64._mult64(XXH64._rotateLeft64(h64, 23), XXH64._prime2),
-          XXH64._prime3);
+        XXH64._mult64(XXH64._rotateLeft64(h64, 23), XXH64._prime2),
+        XXH64._prime3,
+      );
       index += 4;
     }
     while (index < _buffered) {

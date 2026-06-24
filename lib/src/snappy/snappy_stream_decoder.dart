@@ -126,7 +126,8 @@ class SnappyStreamDecoder {
     // Decompress the data (after checksum), bounded by the 64 KB per-chunk
     // spec limit (and any smaller configured cap).
     final compressed = Uint8List.sublistView(chunk.data, 4);
-    final chunkLimit = (maxUncompressedSize != null &&
+    final chunkLimit =
+        (maxUncompressedSize != null &&
             maxUncompressedSize! < _maxChunkUncompressed)
         ? maxUncompressedSize!
         : _maxChunkUncompressed;
@@ -162,7 +163,8 @@ class SnappyStreamDecoder {
     final uncompressed = Uint8List.sublistView(chunk.data, 4);
 
     // Validate maximum size (the 64 KB per-chunk spec limit and any smaller cap)
-    final chunkLimit = (maxUncompressedSize != null &&
+    final chunkLimit =
+        (maxUncompressedSize != null &&
             maxUncompressedSize! < _maxChunkUncompressed)
         ? maxUncompressedSize!
         : _maxChunkUncompressed;
@@ -232,9 +234,8 @@ class SnappyStreamDecoder {
     }
 
     final type = data[offset];
-    final length = data[offset + 1] |
-        (data[offset + 2] << 8) |
-        (data[offset + 3] << 16);
+    final length =
+        data[offset + 1] | (data[offset + 2] << 8) | (data[offset + 3] << 16);
 
     // Total chunk size = 4-byte header + length bytes
     final totalSize = 4 + length;
@@ -245,7 +246,11 @@ class SnappyStreamDecoder {
       );
     }
 
-    final chunkData = Uint8List.sublistView(data, offset + 4, offset + 4 + length);
+    final chunkData = Uint8List.sublistView(
+      data,
+      offset + 4,
+      offset + 4 + length,
+    );
 
     return _Chunk(type, length, totalSize, chunkData);
   }
@@ -253,7 +258,9 @@ class SnappyStreamDecoder {
   /// Validate stream identifier chunk
   void _validateStreamIdentifier(final Uint8List data) {
     if (data.length != 6) {
-      throw SnappyFormatException('Invalid stream identifier length: ${data.length}');
+      throw SnappyFormatException(
+        'Invalid stream identifier length: ${data.length}',
+      );
     }
 
     // Expected: "sNaPpY" = [0x73, 0x4e, 0x61, 0x50, 0x70, 0x59]
@@ -266,7 +273,6 @@ class SnappyStreamDecoder {
       throw SnappyFormatException('Invalid stream identifier content');
     }
   }
-
 }
 
 /// Internal representation of a chunk

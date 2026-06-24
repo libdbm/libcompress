@@ -58,7 +58,9 @@ void _validateCodeLengths(List<int> lengths, bool allowIncomplete) {
       if (len > maxLen) maxLen = len;
     }
   }
-  if (numSymbols == 0) return; // empty table (e.g. no distance codes) is allowed
+  if (numSymbols == 0) {
+    return; // empty table (e.g. no distance codes) is allowed
+  }
 
   // Kraft inequality: the codes must not overflow the 2^len code space.
   var left = 1;

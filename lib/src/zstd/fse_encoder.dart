@@ -32,12 +32,18 @@ class SymbolStats {
   bool get isRle => distinct == 1;
 
   /// Check if distribution is suitable for predefined tables
-  bool shouldUsePredefined(final List<int> predefined, final int predefinedLog) {
+  bool shouldUsePredefined(
+    final List<int> predefined,
+    final int predefinedLog,
+  ) {
     if (total < 16) return true; // Too few samples
 
     // Compare entropy of custom vs predefined
     final custom = _entropy(counts, total);
-    final predefinedEntropy = _estimatePredefinedEntropy(predefined, predefinedLog);
+    final predefinedEntropy = _estimatePredefinedEntropy(
+      predefined,
+      predefinedLog,
+    );
 
     // Use predefined if custom isn't significantly better (>5% improvement)
     return custom >= predefinedEntropy * 0.95;
@@ -318,7 +324,9 @@ class FseEncoder {
 /// - Bits 3-2: Match_Lengths_Mode
 /// - Bits 1-0: Reserved (must be 0)
 int encodeSymbolMode(final int llMode, final int ofMode, final int mlMode) {
-  return ((llMode & 0x03) << 6) | ((ofMode & 0x03) << 4) | ((mlMode & 0x03) << 2);
+  return ((llMode & 0x03) << 6) |
+      ((ofMode & 0x03) << 4) |
+      ((mlMode & 0x03) << 2);
 }
 
 /// Determines best encoding mode for each component

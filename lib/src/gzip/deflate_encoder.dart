@@ -20,10 +20,7 @@ class DeflateEncoder {
   /// LZ77 encoder instance
   late final Lz77Encoder _lz77;
 
-  DeflateEncoder({
-    this.level = 6,
-    this.blockSize = 65535,
-  }) {
+  DeflateEncoder({this.level = 6, this.blockSize = 65535}) {
     // Configure LZ77 based on compression level
     final lazyMatch = level >= 4;
     final lazyMatchLevel = level >= 7 ? 8 : 4;
@@ -187,10 +184,14 @@ class DeflateEncoder {
     }
 
     // Generate code lengths (limited to 15 bits for DEFLATE)
-    final literalLengths =
-        HuffmanTreeBuilder.computeLimitedCodeLengths(literalFrequencies, 15);
-    final distanceLengths =
-        HuffmanTreeBuilder.computeLimitedCodeLengths(distanceFrequencies, 15);
+    final literalLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      literalFrequencies,
+      15,
+    );
+    final distanceLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      distanceFrequencies,
+      15,
+    );
 
     // Generate canonical codes (pre-reversed, typed arrays).
     final literalCodes = _buildCodes(literalLengths);
@@ -263,7 +264,10 @@ class DeflateEncoder {
     }
 
     // Build code length Huffman tree (limited to 7 bits per RFC 1951)
-    final clLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(codeLengthFrequencies, 7);
+    final clLengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      codeLengthFrequencies,
+      7,
+    );
     final clCodes = _buildCodes(clLengths);
 
     // Find number of code length codes to transmit
@@ -308,7 +312,9 @@ class DeflateEncoder {
       if (len == 0) {
         // Count consecutive zeros
         var count = 1;
-        while (i + count < lengths.length && lengths[i + count] == 0 && count < 138) {
+        while (i + count < lengths.length &&
+            lengths[i + count] == 0 &&
+            count < 138) {
           count++;
         }
 
@@ -353,10 +359,12 @@ class DeflateEncoder {
   }
 
   // Fixed Huffman code tables are RFC 1951 constants — built once, reused.
-  static final _HuffmanCodes _fixedLiteralCodes =
-      _buildCodes(_fixedLiteralLengths());
-  static final _HuffmanCodes _fixedDistanceCodes =
-      _buildCodes(List<int>.filled(30, 5));
+  static final _HuffmanCodes _fixedLiteralCodes = _buildCodes(
+    _fixedLiteralLengths(),
+  );
+  static final _HuffmanCodes _fixedDistanceCodes = _buildCodes(
+    List<int>.filled(30, 5),
+  );
 
   static List<int> _fixedLiteralLengths() {
     final lengths = List<int>.filled(288, 0);

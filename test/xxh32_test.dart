@@ -78,5 +78,38 @@ void main() {
         );
       }
     });
+
+    test('should handle edge-case lengths', () {
+      // Lengths around the 16-byte main-loop threshold and the 4-byte word.
+      for (final length in [0, 1, 4, 15, 16, 17, 32, 64, 100]) {
+        final data = Uint8List.fromList(List.generate(length, (i) => i & 0xFF));
+        expect(
+          XXH32.hash(data, 0),
+          isA<int>(),
+          reason: 'Failed for length $length',
+        );
+      }
+    });
+
+    test('should work with different seeds for same input', () {
+      final data = Uint8List.fromList('test'.codeUnits);
+      final results = <int>[];
+      for (final seed in [0, 1, 42, 0xFF, 0xDEADBEEF]) {
+        final result = XXH32.hash(data, seed);
+        expect(
+          results,
+          isNot(contains(result)),
+          reason: 'Duplicate hash for seed $seed',
+        );
+        results.add(result);
+      }
+    });
+
+    test('should handle very large inputs', () {
+      final largeData = Uint8List.fromList(
+        List.generate(10000, (i) => i & 0xFF),
+      );
+      expect(XXH32.hash(largeData, 0), isA<int>());
+    });
   });
 }

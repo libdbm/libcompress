@@ -53,12 +53,14 @@ class Crc32 {
     final t4 = _t8[4], t5 = _t8[5], t6 = _t8[6], t7 = _t8[7];
     var i = 0;
     while (i + 8 <= len) {
-      c = c ^
+      c =
+          c ^
           data[i] ^
           (data[i + 1] << 8) ^
           (data[i + 2] << 16) ^
           (data[i + 3] << 24);
-      c = t0[data[i + 7]] ^
+      c =
+          t0[data[i + 7]] ^
           t1[data[i + 6]] ^
           t2[data[i + 5]] ^
           t3[data[i + 4]] ^

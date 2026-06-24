@@ -222,7 +222,10 @@ class HuffmanEncoder {
       final s1 = literals[i - 3];
       final s0 = literals[i - 4];
 
-      if (_bits[s3] == 0 || _bits[s2] == 0 || _bits[s1] == 0 || _bits[s0] == 0) {
+      if (_bits[s3] == 0 ||
+          _bits[s2] == 0 ||
+          _bits[s1] == 0 ||
+          _bits[s0] == 0) {
         return null;
       }
 
@@ -334,13 +337,11 @@ class _Node {
   final _Node? left;
   final _Node? right;
 
-  _Node.leaf(this.symbol, this.count)
-      : left = null,
-        right = null;
+  _Node.leaf(this.symbol, this.count) : left = null, right = null;
 
   _Node.internal(_Node this.left, _Node this.right)
-      : symbol = -1,
-        count = left.count + right.count;
+    : symbol = -1,
+      count = left.count + right.count;
 }
 
 /// Forward bitstream writer (LSB-first accumulation, like Java BitOutputStream)

@@ -150,5 +150,4 @@ class ByteUtils {
         data[pos1 + 2] == data[pos2 + 2] &&
         data[pos1 + 3] == data[pos2 + 3];
   }
-
 }

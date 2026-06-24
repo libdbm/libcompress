@@ -200,12 +200,7 @@ class ZstdDecoder {
               'capacity ${limit - output.length} bytes',
             );
           }
-          offset = _decodeRawBlock(
-            data,
-            offset,
-            blockHeader.blockSize,
-            output,
-          );
+          offset = _decodeRawBlock(data, offset, blockHeader.blockSize, output);
           break;
         case ZstdBlockType.rle:
           // For RLE blocks, block size equals output size
@@ -215,12 +210,7 @@ class ZstdDecoder {
               'capacity ${limit - output.length} bytes',
             );
           }
-          offset = _decodeRleBlock(
-            data,
-            offset,
-            blockHeader.blockSize,
-            output,
-          );
+          offset = _decodeRleBlock(data, offset, blockHeader.blockSize, output);
           break;
         case ZstdBlockType.compressed:
           blockDecoder.decodeBlock(
@@ -485,8 +475,9 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     if (_avail < 5) return false; // magic + descriptor
     final descriptor = ZstdFrameHeaderDescriptor.parse(_pending[_cursor + 4]);
     final windowBytes = descriptor.singleSegment ? 0 : 1;
-    final dictIdBytes =
-        descriptor.dictionaryIdFlag > 0 ? 1 << (descriptor.dictionaryIdFlag - 1) : 0;
+    final dictIdBytes = descriptor.dictionaryIdFlag > 0
+        ? 1 << (descriptor.dictionaryIdFlag - 1)
+        : 0;
     final fcsBytes = descriptor.singleSegment
         ? const [1, 2, 4, 8][descriptor.contentSizeFlag]
         : const [0, 2, 4, 8][descriptor.contentSizeFlag];
@@ -551,8 +542,11 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   bool _decodeNextBlock(final void Function(Uint8List) emit) {
     if (_avail < 3) return false;
     final header = ZstdBlockHeader.parse(
-      Uint8List.fromList(
-          [_pending[_cursor], _pending[_cursor + 1], _pending[_cursor + 2]]),
+      Uint8List.fromList([
+        _pending[_cursor],
+        _pending[_cursor + 1],
+        _pending[_cursor + 2],
+      ]),
       0,
     );
     if (header.blockSize > zstdMaxBlockSize) {
@@ -560,7 +554,9 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
         'Block size ${header.blockSize} exceeds maximum $zstdMaxBlockSize bytes',
       );
     }
-    final content = header.blockType == ZstdBlockType.rle ? 1 : header.blockSize;
+    final content = header.blockType == ZstdBlockType.rle
+        ? 1
+        : header.blockSize;
     if (_avail < 3 + content) return false;
 
     final output = _output!;

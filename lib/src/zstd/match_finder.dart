@@ -68,8 +68,11 @@ class MatchFinder {
   /// Matches `input[from..end)`; `[0, from)` is a history prefix (seeds the
   /// hash, emits no tokens). [end] defaults to `input.length`; pass a smaller
   /// bound to match only a prefix of a larger (reused) buffer.
-  (List<ZstdMatch>, Uint8List) findMatches(final Uint8List input,
-      {final int from = 0, final int? end}) {
+  (List<ZstdMatch>, Uint8List) findMatches(
+    final Uint8List input, {
+    final int from = 0,
+    final int? end,
+  }) {
     _end = end ?? input.length;
     if (_end - from < minMatch) {
       return (<ZstdMatch>[], Uint8List.sublistView(input, from, _end));
@@ -112,11 +115,9 @@ class MatchFinder {
       if (bestLen >= minMatch) {
         // Emit match
         final litLen = pos - anchor;
-        matches.add(ZstdMatch(
-          offset: bestOffset,
-          length: bestLen,
-          literalLength: litLen,
-        ));
+        matches.add(
+          ZstdMatch(offset: bestOffset, length: bestLen, literalLength: litLen),
+        );
 
         // Update hash table for positions we're skipping
         for (var i = 1; i < bestLen && pos + i <= limit; i++) {
@@ -135,8 +136,12 @@ class MatchFinder {
     return (matches, trailing);
   }
 
-  void _update(final Uint8List input, final int pos, final List<int> hashTable,
-      final List<int> chainTable) {
+  void _update(
+    final Uint8List input,
+    final int pos,
+    final List<int> hashTable,
+    final List<int> chainTable,
+  ) {
     final h = _hash(input, pos);
     final prev = hashTable[h];
     if (prev >= 0 && pos - prev < _chainSize) {

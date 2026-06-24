@@ -48,7 +48,9 @@ class BitStreamWriter {
   /// pending sub-byte bits. Lets a streaming writer drain finished bytes
   /// between bit-packed blocks without disturbing the in-progress byte.
   Uint8List takeBytes() {
-    final result = Uint8List.fromList(Uint8List.sublistView(_bytes, 0, _length));
+    final result = Uint8List.fromList(
+      Uint8List.sublistView(_bytes, 0, _length),
+    );
     _length = 0;
     return result;
   }
@@ -98,9 +100,9 @@ class BitStreamReader {
   /// `[start, end)`. The window lets a reader consume a slice of a larger
   /// buffer without copying it; positions are reported relative to [start].
   BitStreamReader(this._data, {final int start = 0, final int? end})
-      : _start = start,
-        _end = end ?? _data.length,
-        _bytePos = start;
+    : _start = start,
+      _end = end ?? _data.length,
+      _bytePos = start;
 
   /// Returns the current byte position, relative to the window start.
   int get bytePosition => _bytePos - _start;
@@ -208,7 +210,9 @@ class BitStreamReader {
       final currentByte = _data[bytePos];
       final bitsAvailableInByte = 8 - bitPos;
       final bitsToRead = bitCount - bitsRead;
-      final bitsFromThisByte = bitsToRead < bitsAvailableInByte ? bitsToRead : bitsAvailableInByte;
+      final bitsFromThisByte = bitsToRead < bitsAvailableInByte
+          ? bitsToRead
+          : bitsAvailableInByte;
 
       // Extract bits from current byte (starting at bitPos)
       final mask = (1 << bitsFromThisByte) - 1;

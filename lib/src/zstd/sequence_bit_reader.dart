@@ -24,13 +24,13 @@ class SequenceBitReader {
   bool _overflow;
 
   SequenceBitReader(this.data, int endOffset, {int startOffset = 0})
-      : _startAddress = startOffset,
-        _endAddress = endOffset,
-        _currentAddress = 0,
-        _hi = 0,
-        _lo = 0,
-        _bitsConsumed = 0,
-        _overflow = false {
+    : _startAddress = startOffset,
+      _endAddress = endOffset,
+      _currentAddress = 0,
+      _hi = 0,
+      _lo = 0,
+      _bitsConsumed = 0,
+      _overflow = false {
     if (endOffset <= startOffset) {
       throw ZstdFormatException('Empty bitstream');
     }
@@ -176,7 +176,8 @@ class SequenceBitReader {
   int get bitsConsumed => _bitsConsumed;
 
   /// Check if more data is available
-  bool get hasMoreData => !_overflow && (_currentAddress > _startAddress || _bitsConsumed < 64);
+  bool get hasMoreData =>
+      !_overflow && (_currentAddress > _startAddress || _bitsConsumed < 64);
 
   /// Check if bitstream was fully consumed (all bits read, at start of stream)
   /// Returns true if exactly at start with no remaining bits.

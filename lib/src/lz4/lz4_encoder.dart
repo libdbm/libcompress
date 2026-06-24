@@ -97,8 +97,10 @@ class Lz4Encoder {
       return 1;
     }
 
-    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
-    final chainTable = Int32List(lz4MaxOffset + 1)..fillRange(0, lz4MaxOffset + 1, -1);
+    final hashTable = Int32List(lz4HashTableSize)
+      ..fillRange(0, lz4HashTableSize, -1);
+    final chainTable = Int32List(lz4MaxOffset + 1)
+      ..fillRange(0, lz4MaxOffset + 1, -1);
     var op = 0;
     final end = input.length;
     final limit = end - lz4MFLimit;
@@ -187,7 +189,8 @@ class Lz4Encoder {
       return 1;
     }
 
-    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
+    final hashTable = Int32List(lz4HashTableSize)
+      ..fillRange(0, lz4HashTableSize, -1);
     var op = 0;
     final end = input.length;
     final limit = end - lz4MFLimit;
@@ -390,7 +393,8 @@ class StreamingLz4Encoder implements StreamCompressor {
   Uint8List _compressLinked(final Uint8List buf, final int start) {
     final span = buf.length - start;
     final out = Uint8List(span + (span >> 8) + 64);
-    final hashTable = Int32List(lz4HashTableSize)..fillRange(0, lz4HashTableSize, -1);
+    final hashTable = Int32List(lz4HashTableSize)
+      ..fillRange(0, lz4HashTableSize, -1);
     var op = 0;
     final end = buf.length;
     final limit = end - lz4MFLimit;
@@ -440,10 +444,12 @@ class StreamingLz4Encoder implements StreamCompressor {
       anchor = index;
 
       if (index - 2 >= start && index - 2 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(buf, index - 2, 32 - lz4HashLog)] = index - 2;
+        hashTable[LZ77Hash.lz4Hash(buf, index - 2, 32 - lz4HashLog)] =
+            index - 2;
       }
       if (index - 1 >= start && index - 1 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(buf, index - 1, 32 - lz4HashLog)] = index - 1;
+        hashTable[LZ77Hash.lz4Hash(buf, index - 1, 32 - lz4HashLog)] =
+            index - 1;
       }
     }
 
@@ -471,9 +477,9 @@ class StreamingLz4Encoder implements StreamCompressor {
   }
 
   static Uint8List _u32le(final int v) => Uint8List.fromList([
-        v & 0xFF,
-        (v >> 8) & 0xFF,
-        (v >> 16) & 0xFF,
-        (v >> 24) & 0xFF,
-      ]);
+    v & 0xFF,
+    (v >> 8) & 0xFF,
+    (v >> 16) & 0xFF,
+    (v >> 24) & 0xFF,
+  ]);
 }

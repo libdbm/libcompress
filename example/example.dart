@@ -10,13 +10,20 @@ void main() async {
   // Block-based compression using CodecFactory
   print('=== Block-based Compression ===');
 
-  for (final type in [CodecType.lz4, CodecType.snappy, CodecType.gzip, CodecType.zstd]) {
+  for (final type in [
+    CodecType.lz4,
+    CodecType.snappy,
+    CodecType.gzip,
+    CodecType.zstd,
+  ]) {
     final codec = CodecFactory.codec(type);
     final compressed = codec.compress(data);
     final decompressed = codec.decompress(compressed);
 
-    print('${type.name}: ${data.length} -> ${compressed.length} bytes '
-        '(${(compressed.length / data.length * 100).toStringAsFixed(1)}%)');
+    print(
+      '${type.name}: ${data.length} -> ${compressed.length} bytes '
+      '(${(compressed.length / data.length * 100).toStringAsFixed(1)}%)',
+    );
     assert(
       decompressed.length == data.length,
       'Round-trip failed for ${type.name}',

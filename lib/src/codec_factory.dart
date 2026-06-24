@@ -106,19 +106,24 @@ class CodecFactory {
     return switch (type) {
       CodecType.noop => NoopStreamCodec(),
       CodecType.snappy => SnappyStreamCodec(
-          maxSize: maxDecompressedSize, maxBufferSize: maxBufferSize),
+        maxSize: maxDecompressedSize,
+        maxBufferSize: maxBufferSize,
+      ),
       CodecType.gzip => GzipStreamCodec(
-          maxSize: maxDecompressedSize,
-          maxBufferSize: maxBufferSize,
-          verified: verified),
+        maxSize: maxDecompressedSize,
+        maxBufferSize: maxBufferSize,
+        verified: verified,
+      ),
       CodecType.lz4 => Lz4StreamCodec(
-          maxSize: maxDecompressedSize,
-          maxBufferSize: maxBufferSize,
-          verified: verified),
+        maxSize: maxDecompressedSize,
+        maxBufferSize: maxBufferSize,
+        verified: verified,
+      ),
       CodecType.zstd => ZstdStreamCodec(
-          maxSize: maxDecompressedSize,
-          maxBufferSize: maxBufferSize,
-          verified: verified),
+        maxSize: maxDecompressedSize,
+        maxBufferSize: maxBufferSize,
+        verified: verified,
+      ),
     };
   }
 

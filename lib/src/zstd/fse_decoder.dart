@@ -100,7 +100,9 @@ class FseDecoder {
 
     // Verify remaining is exactly 1
     if (remaining != 1) {
-      throw ZstdFormatException('FSE: Invalid normalized counters - remaining=$remaining (should be 1)');
+      throw ZstdFormatException(
+        'FSE: Invalid normalized counters - remaining=$remaining (should be 1)',
+      );
     }
 
     // bytesConsumed already returns absolute offset, so don't add offset again
@@ -126,7 +128,11 @@ class FseDecoder {
     final tableMask = _tableSize - 1;
     final step = _tableStep(_tableSize);
     final symbols = List<int?>.filled(_tableSize, null, growable: false);
-    final symbolNext = List<int>.filled(normalizedCounters.length, 0, growable: false);
+    final symbolNext = List<int>.filled(
+      normalizedCounters.length,
+      0,
+      growable: false,
+    );
 
     var highThreshold = _tableSize - 1;
     var position = 0;
@@ -174,7 +180,9 @@ class FseDecoder {
     for (var state = 0; state < _tableSize; state++) {
       final symbol = symbols[state];
       if (symbol == null) {
-        throw ZstdFormatException('FSE: Incomplete decoding table (null symbol at state $state)');
+        throw ZstdFormatException(
+          'FSE: Incomplete decoding table (null symbol at state $state)',
+        );
       }
 
       var nextState = symbolNext[symbol];
@@ -243,7 +251,6 @@ class FseDecoder {
   FseState initializeState(FseBitReader reader) {
     return FseState(reader.readBits(_accuracyLog));
   }
-
 }
 
 /// FSE state for decoding
@@ -273,10 +280,10 @@ class FseBitReader {
   int get offset => _offset;
 
   FseBitReader(this._data, int offset, [int? endOffset])
-      : _offset = offset,
-        _endOffset = endOffset ?? _data.length,
-        _bitBuffer = 0,
-        _bitsInBuffer = 0;
+    : _offset = offset,
+      _endOffset = endOffset ?? _data.length,
+      _bitBuffer = 0,
+      _bitsInBuffer = 0;
 
   /// Read specified number of bits
   int readBits(final int count) {

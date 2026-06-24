@@ -44,7 +44,9 @@ class SnappyDecoder {
         // Snappy's uncompressed-length preamble is at most 32 bits (5 bytes).
         result = Varint.decode(compressed, sourceIndex, maxBytes: 5);
       } on FormatException catch (e) {
-        throw SnappyFormatException('Invalid Snappy length prefix: ${e.message}');
+        throw SnappyFormatException(
+          'Invalid Snappy length prefix: ${e.message}',
+        );
       }
       actualUncompressedLength = result.value;
       sourceIndex += result.bytesRead;
@@ -75,12 +77,16 @@ class SnappyDecoder {
           // Handle extended literal lengths
           if (literalLength == 60) {
             if (sourceIndex >= compressed.length) {
-              throw SnappyFormatException('Truncated literal length at offset $sourceIndex');
+              throw SnappyFormatException(
+                'Truncated literal length at offset $sourceIndex',
+              );
             }
             literalLength = compressed[sourceIndex++] + 1;
           } else if (literalLength == 61) {
             if (sourceIndex + 2 > compressed.length) {
-              throw SnappyFormatException('Truncated literal length at offset $sourceIndex');
+              throw SnappyFormatException(
+                'Truncated literal length at offset $sourceIndex',
+              );
             }
             literalLength =
                 (compressed[sourceIndex] | (compressed[sourceIndex + 1] << 8)) +
@@ -88,7 +94,9 @@ class SnappyDecoder {
             sourceIndex += 2;
           } else if (literalLength == 62) {
             if (sourceIndex + 3 > compressed.length) {
-              throw SnappyFormatException('Truncated literal length at offset $sourceIndex');
+              throw SnappyFormatException(
+                'Truncated literal length at offset $sourceIndex',
+              );
             }
             literalLength =
                 (compressed[sourceIndex] |
@@ -98,7 +106,9 @@ class SnappyDecoder {
             sourceIndex += 3;
           } else if (literalLength == 63) {
             if (sourceIndex + 4 > compressed.length) {
-              throw SnappyFormatException('Truncated literal length at offset $sourceIndex');
+              throw SnappyFormatException(
+                'Truncated literal length at offset $sourceIndex',
+              );
             }
             // Use ByteUtils for JS-safe 32-bit read (avoids signed overflow)
             literalLength = ByteUtils.readUint32LE(compressed, sourceIndex) + 1;
@@ -126,7 +136,9 @@ class SnappyDecoder {
 
         case 1: // Copy with 1-byte offset
           if (sourceIndex + 2 > compressed.length) {
-            throw SnappyFormatException('Truncated copy tag at offset $sourceIndex');
+            throw SnappyFormatException(
+              'Truncated copy tag at offset $sourceIndex',
+            );
           }
           final length = 4 + ((tag >> 2) & 7);
           final offset = ((tag & 0xe0) << 3) | compressed[sourceIndex + 1];
@@ -135,7 +147,8 @@ class SnappyDecoder {
           // Validate offset for 1-byte encoding (11-bit max = 2047)
           if (offset > 2047) {
             throw SnappyFormatException(
-                'Offset $offset exceeds 1-byte encoding max (2047)');
+              'Offset $offset exceeds 1-byte encoding max (2047)',
+            );
           }
 
           if (targetIndex + length > actualUncompressedLength) {
@@ -147,7 +160,9 @@ class SnappyDecoder {
 
         case 2: // Copy with 2-byte offset
           if (sourceIndex + 3 > compressed.length) {
-            throw SnappyFormatException('Truncated copy tag at offset $sourceIndex');
+            throw SnappyFormatException(
+              'Truncated copy tag at offset $sourceIndex',
+            );
           }
           final length = ((tag >> 2) & 0x3f) + 1;
           final offset =
@@ -157,7 +172,8 @@ class SnappyDecoder {
           // Validate offset for 2-byte encoding (16-bit max = 65535)
           if (offset > 65535) {
             throw SnappyFormatException(
-                'Offset $offset exceeds 2-byte encoding max (65535)');
+              'Offset $offset exceeds 2-byte encoding max (65535)',
+            );
           }
 
           if (targetIndex + length > actualUncompressedLength) {
@@ -169,7 +185,9 @@ class SnappyDecoder {
 
         case 3: // Copy with 4-byte offset
           if (sourceIndex + 5 > compressed.length) {
-            throw SnappyFormatException('Truncated copy tag at offset $sourceIndex');
+            throw SnappyFormatException(
+              'Truncated copy tag at offset $sourceIndex',
+            );
           }
           final length = ((tag >> 2) & 0x3f) + 1;
           // Use ByteUtils for JS-safe 32-bit read (avoids signed overflow)
@@ -202,10 +220,14 @@ class SnappyDecoder {
     int length,
   ) {
     if (offset <= 0) {
-      throw SnappyFormatException('Invalid offset: $offset at position $targetIndex');
+      throw SnappyFormatException(
+        'Invalid offset: $offset at position $targetIndex',
+      );
     }
     if (offset > targetIndex) {
-      throw SnappyFormatException('Invalid offset: $offset at position $targetIndex');
+      throw SnappyFormatException(
+        'Invalid offset: $offset at position $targetIndex',
+      );
     }
     if (targetIndex + length > output.length) {
       throw SnappyFormatException('Copy write exceeds output buffer');

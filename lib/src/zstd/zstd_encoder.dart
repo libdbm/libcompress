@@ -248,7 +248,13 @@ class ZstdEncoder {
     final Uint8List chunk,
     final bool isLastBlock,
   ) {
-    pos = _writeBlockHeader(output, pos, isLastBlock, ZstdBlockType.raw, chunk.length);
+    pos = _writeBlockHeader(
+      output,
+      pos,
+      isLastBlock,
+      ZstdBlockType.raw,
+      chunk.length,
+    );
     output.setRange(pos, pos + chunk.length, chunk);
     return pos + chunk.length;
   }
@@ -260,7 +266,13 @@ class ZstdEncoder {
     final Uint8List chunk,
     final bool isLastBlock,
   ) {
-    pos = _writeBlockHeader(output, pos, isLastBlock, ZstdBlockType.rle, chunk.length);
+    pos = _writeBlockHeader(
+      output,
+      pos,
+      isLastBlock,
+      ZstdBlockType.rle,
+      chunk.length,
+    );
     output[pos++] = chunk[0]; // Single byte value
     return pos;
   }

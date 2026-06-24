@@ -125,11 +125,11 @@ class Xxh32Sink {
   int _total = 0;
 
   Xxh32Sink([final int seed = 0])
-      : _seed = seed,
-        _v1 = (seed + XXH32._prime1 + XXH32._prime2) & _mask,
-        _v2 = (seed + XXH32._prime2) & _mask,
-        _v3 = seed & _mask,
-        _v4 = (seed - XXH32._prime1) & _mask;
+    : _seed = seed,
+      _v1 = (seed + XXH32._prime1 + XXH32._prime2) & _mask,
+      _v2 = (seed + XXH32._prime2) & _mask,
+      _v3 = seed & _mask,
+      _v4 = (seed - XXH32._prime1) & _mask;
 
   /// Feeds [count] bytes of [data] starting at [offset] (defaults to all).
   void add(final Uint8List data, [final int offset = 0, final int? count]) {
@@ -166,17 +166,23 @@ class Xxh32Sink {
   int digest() {
     var h32 = _total >= 16
         ? (XXH32._rotateLeft(_v1, 1) +
-                XXH32._rotateLeft(_v2, 7) +
-                XXH32._rotateLeft(_v3, 12) +
-                XXH32._rotateLeft(_v4, 18)) &
-            _mask
+                  XXH32._rotateLeft(_v2, 7) +
+                  XXH32._rotateLeft(_v3, 12) +
+                  XXH32._rotateLeft(_v4, 18)) &
+              _mask
         : (_seed + XXH32._prime5) & _mask;
 
     h32 = (h32 + _total) & _mask;
 
     var index = 0;
     while (index <= _buffered - 4) {
-      h32 = (h32 + XXH32._mul32(XXH32._readLittleEndian32(_stripe, index), XXH32._prime3)) & _mask;
+      h32 =
+          (h32 +
+              XXH32._mul32(
+                XXH32._readLittleEndian32(_stripe, index),
+                XXH32._prime3,
+              )) &
+          _mask;
       h32 = XXH32._mul32(XXH32._rotateLeft(h32, 17), XXH32._prime4);
       index += 4;
     }

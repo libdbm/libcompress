@@ -15,7 +15,8 @@ import 'deflate_encoder.dart';
 /// block, and retains the trailing window + carry — so peak input memory is
 /// roughly 32 KB plus one chunk.
 class StreamingDeflateEncoder {
-  StreamingDeflateEncoder({this.level = 6}) : _blocks = DeflateEncoder(level: level);
+  StreamingDeflateEncoder({this.level = 6})
+    : _blocks = DeflateEncoder(level: level);
 
   final int level;
   final DeflateEncoder _blocks; // reused only for token-based block writing
@@ -66,7 +67,11 @@ class StreamingDeflateEncoder {
   /// Tokenizes `buf[start..limit)` (a match may extend past [limit] into the
   /// held-back lookahead). Matches reference the preceding 32 KB. Returns the
   /// tokens and the position reached.
-  (List<Token>, int) _tokenize(final Uint8List buf, final int start, final int limit) {
+  (List<Token>, int) _tokenize(
+    final Uint8List buf,
+    final int start,
+    final int limit,
+  ) {
     final tokens = <Token>[];
     final head = Int32List(hashSize)..fillRange(0, hashSize, -1);
     final prev = Int32List(windowSize)..fillRange(0, windowSize, -1);
@@ -97,14 +102,24 @@ class StreamingDeflateEncoder {
     return (tokens, pos);
   }
 
-  void _insert(final Uint8List buf, final int pos, final Int32List head, final Int32List prev) {
+  void _insert(
+    final Uint8List buf,
+    final int pos,
+    final Int32List head,
+    final Int32List prev,
+  ) {
     if (pos + minMatch > buf.length) return;
     final h = hash(buf, pos);
     prev[pos & (windowSize - 1)] = head[h];
     head[h] = pos;
   }
 
-  (int, int)? _findMatch(final Uint8List buf, final int pos, final Int32List head, final Int32List prev) {
+  (int, int)? _findMatch(
+    final Uint8List buf,
+    final int pos,
+    final Int32List head,
+    final Int32List prev,
+  ) {
     if (pos + minMatch > buf.length) return null;
     final maxLen = math.min(maxMatch, buf.length - pos);
     var candidate = head[hash(buf, pos)];
@@ -135,7 +150,11 @@ class StreamingDeflateEncoder {
     return bestLen >= minMatch ? (bestLen, bestDist) : null;
   }
 
-  static Uint8List _concat(final Uint8List a, final Uint8List b, final Uint8List c) {
+  static Uint8List _concat(
+    final Uint8List a,
+    final Uint8List b,
+    final Uint8List c,
+  ) {
     final out = Uint8List(a.length + b.length + c.length);
     out.setRange(0, a.length, a);
     out.setRange(a.length, a.length + b.length, b);

@@ -71,7 +71,11 @@ void validatePositive(int value, String name) {
 /// Validates a nullable limit is either null (unlimited) or `> 0`.
 void validateOptionalPositive(int? value, String name) {
   if (value != null && value <= 0) {
-    throw ArgumentError.value(value, name, 'Must be positive, or null for unlimited');
+    throw ArgumentError.value(
+      value,
+      name,
+      'Must be positive, or null for unlimited',
+    );
   }
 }
 

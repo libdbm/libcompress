@@ -78,7 +78,8 @@ class GzipFrame {
 
     // Build header
     final flags = _buildFlags(filename: filename, comment: comment);
-    final mtime = modificationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    final mtime =
+        modificationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
     // Write header
     output.addByte(id1);
@@ -159,7 +160,9 @@ class GzipFrame {
     while (position < data.length) {
       // Check for minimum member size
       if (position + 10 > data.length) {
-        throw GzipFormatException('Incomplete GZIP member at position $position');
+        throw GzipFormatException(
+          'Incomplete GZIP member at position $position',
+        );
       }
 
       // Calculate remaining size limit for this member
@@ -206,7 +209,9 @@ class GzipFrame {
     // Read flags
     final flags = data[offset++];
     if ((flags & 0xE0) != 0) {
-      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+      throw GzipFormatException(
+        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
+      );
     }
 
     // Skip modification time (4 bytes)
@@ -234,7 +239,9 @@ class GzipFrame {
         offset++;
       }
       if (offset >= data.length) {
-        throw GzipFormatException('Truncated FNAME field: missing NUL terminator');
+        throw GzipFormatException(
+          'Truncated FNAME field: missing NUL terminator',
+        );
       }
       offset++; // Skip null terminator
     }
@@ -245,7 +252,9 @@ class GzipFrame {
         offset++;
       }
       if (offset >= data.length) {
-        throw GzipFormatException('Truncated FCOMMENT field: missing NUL terminator');
+        throw GzipFormatException(
+          'Truncated FCOMMENT field: missing NUL terminator',
+        );
       }
       offset++; // Skip null terminator
     }
@@ -275,7 +284,9 @@ class GzipFrame {
     final compressedStart = offset;
     final compressedData = Uint8List.sublistView(data, compressedStart);
     final decoder = DeflateDecoder(maxSize: maxSize);
-    final (decompressed, consumed) = decoder.decompressWithPosition(compressedData);
+    final (decompressed, consumed) = decoder.decompressWithPosition(
+      compressedData,
+    );
     offset = compressedStart + consumed;
 
     // Read and validate trailer (CRC32 + ISIZE)
@@ -284,7 +295,8 @@ class GzipFrame {
     }
 
     // Read CRC32
-    final expectedCrc = data[offset] |
+    final expectedCrc =
+        data[offset] |
         (data[offset + 1] << 8) |
         (data[offset + 2] << 16) |
         (data[offset + 3] << 24);
@@ -300,7 +312,8 @@ class GzipFrame {
     }
 
     // Read ISIZE (original file size mod 2^32)
-    final expectedSize = data[offset] |
+    final expectedSize =
+        data[offset] |
         (data[offset + 1] << 8) |
         (data[offset + 2] << 16) |
         (data[offset + 3] << 24);
@@ -309,7 +322,9 @@ class GzipFrame {
     // Verify size (modulo 2^32)
     final actualSize = decompressed.length & 0xFFFFFFFF;
     if (actualSize != expectedSize) {
-      throw GzipFormatException('Size mismatch: expected $expectedSize, got $actualSize');
+      throw GzipFormatException(
+        'Size mismatch: expected $expectedSize, got $actualSize',
+      );
     }
 
     return (decompressed, offset - start);

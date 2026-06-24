@@ -94,7 +94,11 @@ void main() {
 
       sub.resume();
       await Future<void>.delayed(Duration.zero);
-      expect(paused, isFalse, reason: 'consumer resume must propagate to source');
+      expect(
+        paused,
+        isFalse,
+        reason: 'consumer resume must propagate to source',
+      );
 
       await sub.cancel();
       await source.close();

@@ -20,8 +20,8 @@ class GrowableBuffer implements ByteSink {
   /// If [maxCapacity] is provided, the buffer will throw [StateError] if
   /// growth would exceed this limit (prevents OOM from malicious inputs).
   GrowableBuffer([int initialCapacity = 1024, int? maxCapacity])
-      : _maxCapacity = maxCapacity,
-        _buffer = Uint8List(initialCapacity > 0 ? initialCapacity : 1024);
+    : _maxCapacity = maxCapacity,
+      _buffer = Uint8List(initialCapacity > 0 ? initialCapacity : 1024);
 
   /// The current number of bytes in the buffer
   @override

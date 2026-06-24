@@ -44,8 +44,12 @@ export 'src/exceptions.dart';
 export 'src/lz4/lz4_codec.dart';
 export 'src/lz4/lz4_stream_codec.dart';
 export 'src/lz4/lz4_common.dart'
-    show lz4BlockSize64K, lz4BlockSize256K, lz4BlockSize1M,
-    lz4BlockSize4M, lz4DefaultBlockSize;
+    show
+        lz4BlockSize64K,
+        lz4BlockSize256K,
+        lz4BlockSize1M,
+        lz4BlockSize4M,
+        lz4DefaultBlockSize;
 
 // Snappy codec
 export 'src/snappy/snappy_codec.dart';

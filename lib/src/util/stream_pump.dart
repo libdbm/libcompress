@@ -17,7 +17,8 @@ import 'dart:typed_data';
 /// output subscription is cancelled.
 Stream<Uint8List> pumpBytes(
   final Stream<Uint8List> source, {
-  required final void Function(Uint8List chunk, void Function(Uint8List) emit) onData,
+  required final void Function(Uint8List chunk, void Function(Uint8List) emit)
+  onData,
   required final void Function(void Function(Uint8List) emit) onDone,
 }) {
   late final StreamController<Uint8List> controller;

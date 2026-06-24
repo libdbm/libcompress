@@ -35,7 +35,8 @@ void main() {
             // Back-reference within the window (and within produced bytes).
             final maxDistance = min(window, produced);
             final distance = 1 + random.nextInt(maxDistance);
-            final length = 1 + random.nextInt(30); // may exceed distance (overlap)
+            final length =
+                1 + random.nextInt(30); // may exceed distance (overlap)
             reference.copyFromHistory(distance, length);
             windowed.copyFromHistory(distance, length);
             produced += length;
@@ -64,15 +65,15 @@ void main() {
       // The retained window is [5,6,7,8]; a distance-4 back-ref must still work.
       buffer.copyFromHistory(4, 4); // copies 5,6,7,8
       final rest = [...buffer.drain(), ...buffer.finish()];
-      expect([...first, ...rest], orderedEquals([1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8]));
+      expect([
+        ...first,
+        ...rest,
+      ], orderedEquals([1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8]));
     });
 
     test('enforces maxSize backstop', () {
       final buffer = WindowBuffer(8, maxSize: 10);
-      expect(
-        () => buffer.addBytes(Uint8List(11)),
-        throwsStateError,
-      );
+      expect(() => buffer.addBytes(Uint8List(11)), throwsStateError);
     });
 
     test('rejects back-reference beyond retained window', () {

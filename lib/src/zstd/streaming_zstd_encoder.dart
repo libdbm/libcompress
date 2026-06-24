@@ -149,7 +149,11 @@ class StreamingZstdEncoder implements StreamCompressor {
   }
 
   /// 3-byte little-endian block header: last(1) | type(2) | size(21).
-  Uint8List _blockHeader({required final bool last, required final int type, required final int size}) {
+  Uint8List _blockHeader({
+    required final bool last,
+    required final int type,
+    required final int size,
+  }) {
     final h = (last ? 1 : 0) | (type << 1) | (size << 3);
     return Uint8List.fromList([h & 0xFF, (h >> 8) & 0xFF, (h >> 16) & 0xFF]);
   }
@@ -168,9 +172,9 @@ class StreamingZstdEncoder implements StreamCompressor {
   }
 
   static Uint8List _u32le(final int v) => Uint8List.fromList([
-        v & 0xFF,
-        (v >> 8) & 0xFF,
-        (v >> 16) & 0xFF,
-        (v >> 24) & 0xFF,
-      ]);
+    v & 0xFF,
+    (v >> 8) & 0xFF,
+    (v >> 16) & 0xFF,
+    (v >> 24) & 0xFF,
+  ]);
 }

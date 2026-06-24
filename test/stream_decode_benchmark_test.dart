@@ -17,8 +17,9 @@ Future<Uint8List> _decodeStream(
 ) async {
   final chunks = <Uint8List>[];
   for (var i = 0; i < compressed.length; i += chunkSize) {
-    final end =
-        (i + chunkSize) < compressed.length ? i + chunkSize : compressed.length;
+    final end = (i + chunkSize) < compressed.length
+        ? i + chunkSize
+        : compressed.length;
     chunks.add(Uint8List.sublistView(compressed, i, end));
   }
   final out = BytesBuilder(copy: false);
@@ -65,8 +66,10 @@ void main() {
         if (_verbose) {
           final mbps = (data.length / 1e6) / (best / 1000.0);
           // ignore: avoid_print
-          print('${entry.key} streaming decode: '
-              '${best.toStringAsFixed(1)}ms  ${mbps.toStringAsFixed(1)} MB/s');
+          print(
+            '${entry.key} streaming decode: '
+            '${best.toStringAsFixed(1)}ms  ${mbps.toStringAsFixed(1)} MB/s',
+          );
         }
       });
     }

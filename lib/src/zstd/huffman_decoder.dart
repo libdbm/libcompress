@@ -161,7 +161,10 @@ class HuffmanDecoder {
     final start3 = start2 + size2;
     final start4 = start3 + size3;
 
-    if (start1 >= start2 || start2 >= start3 || start3 >= start4 || start4 > end) {
+    if (start1 >= start2 ||
+        start2 >= start3 ||
+        start3 >= start4 ||
+        start4 > end) {
       throw ZstdFormatException('Invalid 4-stream jump table');
     }
 
@@ -262,12 +265,12 @@ class HuffmanBitReader {
   bool _overflow = false;
 
   HuffmanBitReader(this._data, final int start, final int end)
-      : _start = start,
-        _end = end,
-        _current = 0,
-        _hi = 0,
-        _lo = 0,
-        _consumed = 0 {
+    : _start = start,
+      _end = end,
+      _current = 0,
+      _hi = 0,
+      _lo = 0,
+      _consumed = 0 {
     if (end <= start) {
       throw ZstdFormatException('Empty Huffman stream');
     }

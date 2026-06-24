@@ -18,7 +18,7 @@ Future<void> main(final List<String> args) async {
 
   try {
     if (config.streaming) {
-      await process(file, config);
+      await _streaming(file, config);
     } else {
       await _buffered(file, config);
     }
@@ -34,8 +34,9 @@ Future<void> main(final List<String> args) async {
 Future<void> _buffered(final File file, final Config config) async {
   final data = file.readAsBytesSync();
   // Decode/encode first (may throw on corrupt input) before touching the output.
-  final result =
-      config.decompress ? decompress(data, config) : compress(data, config);
+  final result = config.decompress
+      ? decompress(data, config)
+      : compress(data, config);
 
   final temp = _tempPath(config.output);
   try {
@@ -47,14 +48,16 @@ Future<void> _buffered(final File file, final Config config) async {
   }
 
   final operation = config.decompress ? 'Decompressed' : 'Compressed';
-  print('$operation ${config.input} -> ${config.output} '
-        '(${data.length} -> ${result.length} bytes)');
+  print(
+    '$operation ${config.input} -> ${config.output} '
+    '(${data.length} -> ${result.length} bytes)',
+  );
 }
 
 // Streaming processing: write to a temp file, atomically rename on success, and
 // clean up the temp file on any error so a mid-stream failure (e.g. a checksum
 // mismatch) never leaves a partial output file behind.
-Future<void> process(final File file, final Config config) async {
+Future<void> _streaming(final File file, final Config config) async {
   final temp = _tempPath(config.output);
   final input = file.openRead().cast<Uint8List>();
   final output = File(temp).openWrite();
@@ -85,8 +88,10 @@ Future<void> process(final File file, final Config config) async {
 
   final size = await file.length();
   final operation = config.decompress ? 'Decompressed' : 'Compressed';
-  print('$operation (streaming) ${config.input} -> ${config.output} '
-        '($size -> $bytes bytes)');
+  print(
+    '$operation (streaming) ${config.input} -> ${config.output} '
+    '($size -> $bytes bytes)',
+  );
 }
 
 /// Sibling temp path for atomic output (same directory, so rename stays within
@@ -107,25 +112,23 @@ void _cleanup(final String temp) {
 CompressionStreamCodec _getStreamCodec(final Config config) {
   return switch (config.codec) {
     CodecType.lz4 => Lz4StreamCodec(
-        level: config.level,
-        blockSize: config.lz4BlockSize,
-        maxSize: config.maxSize,
-        verified: config.verified,
-      ),
-    CodecType.snappy => SnappyStreamCodec(
-        maxSize: config.maxSize ?? (1 << 30),
-      ),
+      level: config.level,
+      blockSize: config.lz4BlockSize,
+      maxSize: config.maxSize,
+      verified: config.verified,
+    ),
+    CodecType.snappy => SnappyStreamCodec(maxSize: config.maxSize ?? (1 << 30)),
     CodecType.gzip => GzipStreamCodec(
-        level: config.level,
-        maxSize: config.maxSize,
-        verified: config.verified,
-      ),
+      level: config.level,
+      maxSize: config.maxSize,
+      verified: config.verified,
+    ),
     CodecType.zstd => ZstdStreamCodec(
-        level: config.level,
-        blockSize: config.zstdBlockSize,
-        maxSize: config.maxSize,
-        verified: config.verified,
-      ),
+      level: config.level,
+      blockSize: config.zstdBlockSize,
+      maxSize: config.maxSize,
+      verified: config.verified,
+    ),
     CodecType.noop => NoopStreamCodec(),
   };
 }
@@ -133,17 +136,17 @@ CompressionStreamCodec _getStreamCodec(final Config config) {
 Uint8List compress(final Uint8List data, final Config config) {
   return switch (config.codec) {
     CodecType.lz4 => Lz4Codec(
-        level: config.level,
-        blockSize: config.lz4BlockSize,
-      ).compress(data),
+      level: config.level,
+      blockSize: config.lz4BlockSize,
+    ).compress(data),
     CodecType.snappy => SnappyCodec(
-        framing: config.snappyStreaming,
-      ).compress(data),
+      framing: config.snappyStreaming,
+    ).compress(data),
     CodecType.gzip => GzipCodec(level: config.level).compress(data),
     CodecType.zstd => ZstdCodec(
-        level: config.level,
-        blockSize: config.zstdBlockSize,
-      ).compress(data),
+      level: config.level,
+      blockSize: config.zstdBlockSize,
+    ).compress(data),
     CodecType.noop => data,
   };
 }
@@ -152,13 +155,19 @@ Uint8List decompress(final Uint8List data, final Config config) {
   // Snappy doesn't support null maxSize, use a large value instead
   final snappyMax = config.maxSize ?? 1 << 30; // 1GB if unlimited
   return switch (config.codec) {
-    CodecType.lz4 => Lz4Codec(maxDecompressedSize: config.maxSize).decompress(data),
+    CodecType.lz4 => Lz4Codec(
+      maxDecompressedSize: config.maxSize,
+    ).decompress(data),
     CodecType.snappy => SnappyCodec(
-        framing: config.snappyStreaming,
-        maxSize: snappyMax,
-      ).decompress(data),
-    CodecType.gzip => GzipCodec(maxDecompressedSize: config.maxSize).decompress(data),
-    CodecType.zstd => ZstdCodec(maxDecompressedSize: config.maxSize).decompress(data),
+      framing: config.snappyStreaming,
+      maxSize: snappyMax,
+    ).decompress(data),
+    CodecType.gzip => GzipCodec(
+      maxDecompressedSize: config.maxSize,
+    ).decompress(data),
+    CodecType.zstd => ZstdCodec(
+      maxDecompressedSize: config.maxSize,
+    ).decompress(data),
     CodecType.noop => data,
   };
 }
@@ -301,8 +310,12 @@ void usage() {
   print('  --gzip              Use GZIP codec');
   print('  --zstd              Use Zstd codec');
   print('  --stream            Use streaming mode for large files');
-  print('  --verified          Withhold streamed output until checksums validate');
-  print('                      (all-or-nothing; buffers up to one frame of output)');
+  print(
+    '  --verified          Withhold streamed output until checksums validate',
+  );
+  print(
+    '                      (all-or-nothing; buffers up to one frame of output)',
+  );
   print('  -h, --help          Show this help');
   print('');
   print('LZ4 Options:');

@@ -17,7 +17,8 @@ void main() {
       Process.runSync('dart', ['run', 'bin/libcompress.dart', ...args]);
 
   final sample = Uint8List.fromList(
-      List.generate(50000, (i) => 'the quick brown fox '.codeUnitAt(i % 20)));
+    List.generate(50000, (i) => 'the quick brown fox '.codeUnitAt(i % 20)),
+  );
 
   test('dart run :libcompress --help exits and prints usage', () {
     final r = run(['--help']);
@@ -27,10 +28,15 @@ void main() {
   test('streaming round-trip works and renames into place', () {
     File(p('in.txt')).writeAsBytesSync(sample);
     expect(run(['--gzip', '--stream', p('in.txt'), p('c.gz')]).exitCode, 0);
-    expect(run(['--gzip', '--stream', '-d', p('c.gz'), p('out.txt')]).exitCode, 0);
+    expect(
+      run(['--gzip', '--stream', '-d', p('c.gz'), p('out.txt')]).exitCode,
+      0,
+    );
     expect(File(p('out.txt')).readAsBytesSync(), orderedEquals(sample));
-    expect(Directory(dir.path).listSync().where((e) => e.path.contains('.tmp-')),
-        isEmpty);
+    expect(
+      Directory(dir.path).listSync().where((e) => e.path.contains('.tmp-')),
+      isEmpty,
+    );
   });
 
   test('corrupt input fails without leaving output or temp files', () {
@@ -47,16 +53,29 @@ void main() {
 
     final r = run(['--gzip', '--stream', '-d', p('c.gz'), p('out.txt')]);
     expect(r.exitCode, isNot(0));
-    expect(File(p('out.txt')).readAsStringSync(), 'STALE',
-        reason: 'failed decompress must not overwrite the existing output');
-    expect(Directory(dir.path).listSync().where((e) => e.path.contains('.tmp-')),
-        isEmpty, reason: 'temp file must be cleaned up on error');
+    expect(
+      File(p('out.txt')).readAsStringSync(),
+      'STALE',
+      reason: 'failed decompress must not overwrite the existing output',
+    );
+    expect(
+      Directory(dir.path).listSync().where((e) => e.path.contains('.tmp-')),
+      isEmpty,
+      reason: 'temp file must be cleaned up on error',
+    );
   });
 
   test('--verified round-trips valid data', () {
     File(p('in.txt')).writeAsBytesSync(sample);
     expect(run(['--zstd', '--stream', p('in.txt'), p('c.zst')]).exitCode, 0);
-    final r = run(['--zstd', '--stream', '-d', '--verified', p('c.zst'), p('out.txt')]);
+    final r = run([
+      '--zstd',
+      '--stream',
+      '-d',
+      '--verified',
+      p('c.zst'),
+      p('out.txt'),
+    ]);
     expect(r.exitCode, 0);
     expect(File(p('out.txt')).readAsBytesSync(), orderedEquals(sample));
   });

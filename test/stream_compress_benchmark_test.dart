@@ -6,7 +6,8 @@ import 'package:libcompress/libcompress.dart';
 /// Quantifies streaming-COMPRESS overhead (per-chunk window re-hash + per-block
 /// table builds + allocations) by comparing whole-buffer block compression to
 /// streaming compression on the same data. Gated: RUN_BENCHMARKS=1 to print.
-final bool _verbose = Platform.environment['RUN_BENCHMARKS'] == '1' ||
+final bool _verbose =
+    Platform.environment['RUN_BENCHMARKS'] == '1' ||
     Platform.environment['BENCHMARK_VERBOSE'] == '1';
 
 Future<int> _timeStreamCompress(
@@ -20,8 +21,7 @@ Future<int> _timeStreamCompress(
   return produced;
 }
 
-double _mbps(final int bytes, final double ms) =>
-    (bytes / 1e6) / (ms / 1000.0);
+double _mbps(final int bytes, final double ms) => (bytes / 1e6) / (ms / 1000.0);
 
 void main() {
   group('Streaming compress throughput vs block', () {
@@ -32,7 +32,10 @@ void main() {
       if (exists)
         for (var i = 0; i < data.length; i += 65536)
           Uint8List.sublistView(
-              data, i, (i + 65536) < data.length ? i + 65536 : data.length),
+            data,
+            i,
+            (i + 65536) < data.length ? i + 65536 : data.length,
+          ),
     ];
 
     final cases = <String, (CompressionCodec, CompressionStreamCodec)>{
@@ -77,9 +80,11 @@ void main() {
 
         if (_verbose) {
           // ignore: avoid_print
-          print('${entry.key}: block ${_mbps(data.length, bestBlock).toStringAsFixed(1)} MB/s, '
-              'stream ${_mbps(data.length, bestStream).toStringAsFixed(1)} MB/s '
-              '(stream ${(bestStream / bestBlock).toStringAsFixed(2)}x slower)');
+          print(
+            '${entry.key}: block ${_mbps(data.length, bestBlock).toStringAsFixed(1)} MB/s, '
+            'stream ${_mbps(data.length, bestStream).toStringAsFixed(1)} MB/s '
+            '(stream ${(bestStream / bestBlock).toStringAsFixed(2)}x slower)',
+          );
         }
       });
     }

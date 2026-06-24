@@ -83,7 +83,7 @@ class GzipStreamCodec extends CompressionStreamCodec {
 /// streamed CRC32 + ISIZE trailer).
 class _GzipStreamCompressor implements StreamCompressor {
   _GzipStreamCompressor(this._level)
-      : _deflate = StreamingDeflateEncoder(level: _level);
+    : _deflate = StreamingDeflateEncoder(level: _level);
 
   final int _level;
   final StreamingDeflateEncoder _deflate;

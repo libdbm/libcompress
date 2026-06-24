@@ -7,7 +7,21 @@ void main() {
   group('Xxh64Sink', () {
     test('matches one-shot XXH64 for many lengths and chunkings', () {
       final random = Random(13);
-      for (final length in [0, 1, 8, 31, 32, 33, 63, 64, 65, 100, 1000, 8192, 9001]) {
+      for (final length in [
+        0,
+        1,
+        8,
+        31,
+        32,
+        33,
+        63,
+        64,
+        65,
+        100,
+        1000,
+        8192,
+        9001,
+      ]) {
         final data = Uint8List.fromList(
           List.generate(length, (_) => random.nextInt(256)),
         );
@@ -19,10 +33,16 @@ void main() {
           for (var i = 0; i < length; i += chunk) {
             sink.add(data, i, min(chunk, length - i));
           }
-          expect(sink.digest(), equals(expectedFull),
-              reason: 'full length=$length chunk=$chunk');
-          expect(sink.digestLow32(), equals(expectedLow),
-              reason: 'low32 length=$length chunk=$chunk');
+          expect(
+            sink.digest(),
+            equals(expectedFull),
+            reason: 'full length=$length chunk=$chunk',
+          );
+          expect(
+            sink.digestLow32(),
+            equals(expectedLow),
+            reason: 'low32 length=$length chunk=$chunk',
+          );
         }
       }
     });

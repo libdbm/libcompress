@@ -49,7 +49,8 @@ class LZ77Hash {
     if (pos + 3 >= data.length) {
       return 0;
     }
-    final value = data[pos] |
+    final value =
+        data[pos] |
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
@@ -61,7 +62,8 @@ class LZ77Hash {
     if (pos + 3 >= data.length) {
       return 0;
     }
-    final value = data[pos] |
+    final value =
+        data[pos] |
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);

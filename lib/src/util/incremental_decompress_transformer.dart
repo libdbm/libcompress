@@ -29,10 +29,6 @@ class IncrementalDecompressTransformer
   @override
   Stream<Uint8List> bind(final Stream<Uint8List> stream) {
     final decoder = create();
-    return pumpBytes(
-      stream,
-      onData: decoder.add,
-      onDone: decoder.close,
-    );
+    return pumpBytes(stream, onData: decoder.add, onDone: decoder.close);
   }
 }

@@ -517,11 +517,13 @@ class _BlockDecoder {
       // information disclosure (reading uninitialized buffer content)
       if (offset == 0) {
         throw Lz4FormatException(
-            'Invalid match offset: 0 (offset must be at least 1)');
+          'Invalid match offset: 0 (offset must be at least 1)',
+        );
       }
       if (offset > _output.length) {
         throw Lz4FormatException(
-            'Invalid match offset: $offset exceeds output length ${_output.length}');
+          'Invalid match offset: $offset exceeds output length ${_output.length}',
+        );
       }
 
       var matchLength = token & 0x0F;
@@ -537,7 +539,8 @@ class _BlockDecoder {
         }
         if (!complete) {
           throw Lz4FormatException(
-              'Unexpected end while reading match length extension');
+            'Unexpected end while reading match length extension',
+          );
         }
       }
       matchLength += lz4MinMatch;

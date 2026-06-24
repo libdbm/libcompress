@@ -5,12 +5,7 @@ class HuffmanNode implements Comparable<HuffmanNode> {
   final HuffmanNode? left;
   final HuffmanNode? right;
 
-  HuffmanNode({
-    this.symbol,
-    required this.frequency,
-    this.left,
-    this.right,
-  });
+  HuffmanNode({this.symbol, required this.frequency, this.left, this.right});
 
   bool get isLeaf => left == null && right == null;
 
@@ -373,4 +368,3 @@ class PriorityQueue<T extends Comparable> {
     _heap[j] = temp;
   }
 }
-

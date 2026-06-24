@@ -6,7 +6,7 @@ import 'dart:typed_data';
 /// `BitStreamReader` can read its [bytes] backing directly.
 class BytePending {
   BytePending([final int initialCapacity = 1024])
-      : _backing = Uint8List(initialCapacity < 64 ? 64 : initialCapacity);
+    : _backing = Uint8List(initialCapacity < 64 ? 64 : initialCapacity);
 
   Uint8List _backing;
   int _length = 0;

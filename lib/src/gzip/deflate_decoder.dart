@@ -88,7 +88,10 @@ class DeflateDecoder {
   }
 
   /// Reads a stored (uncompressed) block
-  void _readStoredBlock(final BitStreamReader input, final GrowableBuffer output) {
+  void _readStoredBlock(
+    final BitStreamReader input,
+    final GrowableBuffer output,
+  ) {
     // Skip to byte boundary
     input.flushToByte();
 
@@ -120,7 +123,12 @@ class DeflateDecoder {
     final GrowableBuffer output,
   ) {
     // Reuse the shared fixed Huffman decode tables (RFC 1951 constants)
-    _decodeHuffmanBlock(input, output, fixedLiteralDecoder, fixedDistanceDecoder);
+    _decodeHuffmanBlock(
+      input,
+      output,
+      fixedLiteralDecoder,
+      fixedDistanceDecoder,
+    );
   }
 
   /// Reads a block compressed with dynamic Huffman codes
@@ -159,7 +167,9 @@ class DeflateDecoder {
         final prev = codeLengths.last;
         final repeat = input.readBits(2) + 3;
         if (repeat > totalLength - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(prev);
@@ -168,7 +178,9 @@ class DeflateDecoder {
         // Repeat zero 3-10 times
         final repeat = input.readBits(3) + 3;
         if (repeat > totalLength - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
@@ -177,7 +189,9 @@ class DeflateDecoder {
         // Repeat zero 11-138 times
         final repeat = input.readBits(7) + 11;
         if (repeat > totalLength - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);

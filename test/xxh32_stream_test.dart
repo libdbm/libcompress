@@ -7,7 +7,21 @@ void main() {
   group('Xxh32Sink', () {
     test('matches one-shot XXH32.hash for many lengths and chunkings', () {
       final random = Random(11);
-      for (final length in [0, 1, 4, 15, 16, 17, 31, 32, 33, 100, 1000, 4096, 5000]) {
+      for (final length in [
+        0,
+        1,
+        4,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        100,
+        1000,
+        4096,
+        5000,
+      ]) {
         final data = Uint8List.fromList(
           List.generate(length, (_) => random.nextInt(256)),
         );

@@ -5,12 +5,21 @@ import 'match_finder.dart';
 
 // Predefined (mode 0) FSE tables are built from compile-time constants and are
 // immutable during encoding, so they are built once and shared across blocks.
-final FseCompressionTable _predefinedLlTable =
-    FseCompressionTable.create(seq.llDefaultNorm, seq.llDefaultNormLog, 35);
-final FseCompressionTable _predefinedOfTable =
-    FseCompressionTable.create(seq.ofDefaultNorm, seq.ofDefaultNormLog, 31);
-final FseCompressionTable _predefinedMlTable =
-    FseCompressionTable.create(seq.mlDefaultNorm, seq.mlDefaultNormLog, 52);
+final FseCompressionTable _predefinedLlTable = FseCompressionTable.create(
+  seq.llDefaultNorm,
+  seq.llDefaultNormLog,
+  35,
+);
+final FseCompressionTable _predefinedOfTable = FseCompressionTable.create(
+  seq.ofDefaultNorm,
+  seq.ofDefaultNormLog,
+  31,
+);
+final FseCompressionTable _predefinedMlTable = FseCompressionTable.create(
+  seq.mlDefaultNorm,
+  seq.mlDefaultNormLog,
+  52,
+);
 
 /// Largest index `i` with `bases[i] <= value`, for the strictly-increasing
 /// literal-length and match-length base tables. Binary search replacing the
@@ -147,7 +156,8 @@ class SequenceEncoder {
         }
 
         // Flush if needed (when bits accumulate)
-        final totalBits = token.offsetExtraBits +
+        final totalBits =
+            token.offsetExtraBits +
             token.matchExtraBits +
             token.literalExtraBits;
         if (totalBits >= 64 - 7 - 17) {
@@ -265,7 +275,6 @@ class SequenceEncoder {
     }
     throw StateError('Unable to encode offset $offset');
   }
-
 }
 
 class _OffsetEncoding {
@@ -305,11 +314,9 @@ class SequenceSymbols {
     for (final match in matches) {
       llSymbols.add(_getLiteralLengthSymbol(match.literalLength));
       mlSymbols.add(_getMatchLengthSymbol(match.length));
-      ofSymbols.add(_encodeOffsetSymbol(
-        match.literalLength,
-        match.offset,
-        prevOffsets,
-      ));
+      ofSymbols.add(
+        _encodeOffsetSymbol(match.literalLength, match.offset, prevOffsets),
+      );
     }
 
     return SequenceSymbols(
@@ -414,10 +421,9 @@ class FseCompressionTable {
     var position = 0;
 
     for (var symbol = 0; symbol <= maxSymbol; symbol++) {
-      final count =
-          (symbol < normalized.length && normalized[symbol] > 0)
-              ? normalized[symbol]
-              : 0;
+      final count = (symbol < normalized.length && normalized[symbol] > 0)
+          ? normalized[symbol]
+          : 0;
       for (var i = 0; i < count; i++) {
         table[position] = symbol;
         do {
@@ -440,8 +446,7 @@ class FseCompressionTable {
     var total = 0;
 
     for (var symbol = 0; symbol <= maxSymbol; symbol++) {
-      final count =
-          (symbol < normalized.length) ? normalized[symbol] : 0;
+      final count = (symbol < normalized.length) ? normalized[symbol] : 0;
       if (count == 0) {
         deltaNumberOfBits[symbol] = ((log + 1) << 16) - tableSize;
       } else if (count == -1 || count == 1) {

@@ -118,7 +118,25 @@ const List<int> distanceExtraBits = [
 
 /// Order of code length codes (for encoding Huffman trees)
 const List<int> codeLengthOrder = [
-  16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+  16,
+  17,
+  18,
+  0,
+  8,
+  7,
+  9,
+  6,
+  10,
+  5,
+  11,
+  4,
+  12,
+  3,
+  13,
+  2,
+  14,
+  1,
+  15,
 ];
 
 /// Computes hash value for LZ77 match finding
@@ -152,10 +170,16 @@ LengthCode encodeLength(int length) {
 /// Encodes a distance value into distance code and extra bits (O(1) lookup).
 DistanceCode encodeDistance(int distance) {
   if (distance < 1 || distance > maxDistance) {
-    throw DeflateFormatException('Invalid distance: $distance (must be 1-$maxDistance)');
+    throw DeflateFormatException(
+      'Invalid distance: $distance (must be 1-$maxDistance)',
+    );
   }
   final code = _distanceCodeFor[distance];
-  return DistanceCode(code, distanceExtraBits[code], distance - distanceBase[code]);
+  return DistanceCode(
+    code,
+    distanceExtraBits[code],
+    distance - distanceBase[code],
+  );
 }
 
 /// `length (minMatch..maxMatch) -> length code (257..285)`, built once.

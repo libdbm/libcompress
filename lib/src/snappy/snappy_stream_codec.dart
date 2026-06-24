@@ -63,7 +63,10 @@ class SnappyStreamCodec extends CompressionStreamCodec {
 /// a time. Chunk-type validation (incl. the leading stream identifier) is
 /// enforced by [SnappyStreamDecoder].
 class SnappyIncrementalDecoder implements IncrementalDecoder {
-  SnappyIncrementalDecoder({required this.maxSize, required this.maxBufferSize});
+  SnappyIncrementalDecoder({
+    required this.maxSize,
+    required this.maxBufferSize,
+  });
 
   final int? maxSize;
   final int maxBufferSize;
@@ -74,8 +77,9 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
 
   final BytePending _pending = BytePending();
   int _cursor = 0;
-  late final SnappyStreamDecoder _decoder =
-      SnappyStreamDecoder(maxUncompressedSize: maxSize);
+  late final SnappyStreamDecoder _decoder = SnappyStreamDecoder(
+    maxUncompressedSize: maxSize,
+  );
 
   int get _avail => _pending.length - _cursor;
 
@@ -91,7 +95,8 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
     }
     _pending.add(input);
     while (_avail >= 4) {
-      final length = _pending[_cursor + 1] |
+      final length =
+          _pending[_cursor + 1] |
           (_pending[_cursor + 2] << 8) |
           (_pending[_cursor + 3] << 16);
       final chunkSize = 4 + length;
@@ -128,7 +133,7 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
 /// spec), emitting the stream identifier first.
 class _SnappyStreamCompressor implements StreamCompressor {
   _SnappyStreamCompressor(this._chunkSize)
-      : _encoder = SnappyStreamEncoder(chunkSize: _chunkSize);
+    : _encoder = SnappyStreamEncoder(chunkSize: _chunkSize);
 
   final int _chunkSize;
   final SnappyStreamEncoder _encoder;
@@ -145,7 +150,9 @@ class _SnappyStreamCompressor implements StreamCompressor {
     final out = BytesBuilder(copy: false);
     var cursor = 0;
     while (_buf.length - cursor >= _chunkSize) {
-      out.add(_encoder.compressChunkOnly(_buf.slice(cursor, cursor + _chunkSize)));
+      out.add(
+        _encoder.compressChunkOnly(_buf.slice(cursor, cursor + _chunkSize)),
+      );
       cursor += _chunkSize;
     }
     if (cursor > 0) _buf.discard(cursor);

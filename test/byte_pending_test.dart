@@ -42,7 +42,10 @@ void main() {
         }
       }
       expect(p.length, expected.length);
-      expect(Uint8List.sublistView(p.bytes, 0, p.length), orderedEquals(expected));
+      expect(
+        Uint8List.sublistView(p.bytes, 0, p.length),
+        orderedEquals(expected),
+      );
     });
   });
 }

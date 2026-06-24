@@ -117,11 +117,15 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       throw GzipFormatException('Invalid GZIP magic number at offset $p');
     }
     if (_pending[p + 2] != GzipFrame.cmDeflate) {
-      throw GzipFormatException('Unsupported compression method: ${_pending[p + 2]}');
+      throw GzipFormatException(
+        'Unsupported compression method: ${_pending[p + 2]}',
+      );
     }
     final flags = _pending[p + 3];
     if ((flags & 0xE0) != 0) {
-      throw GzipFormatException('Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}');
+      throw GzipFormatException(
+        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
+      );
     }
     p += 10; // magic(2) + cm(1) + flg(1) + mtime(4) + xfl(1) + os(1)
 
@@ -187,8 +191,11 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   bool _runDeflate(final void Function(Uint8List) emit) {
     final output = _output!;
-    final input = BitStreamReader(_pending.bytes, start: _cursor, end: _pending.length)
-      ..seek(BitPosition(0, _bitOffset));
+    final input = BitStreamReader(
+      _pending.bytes,
+      start: _cursor,
+      end: _pending.length,
+    )..seek(BitPosition(0, _bitOffset));
 
     var madeProgress = false;
     {
@@ -273,7 +280,10 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
   }
 
   /// Decodes one literal/match. Returns true at end-of-block.
-  bool _decodeOneSymbol(final BitStreamReader input, final WindowBuffer output) {
+  bool _decodeOneSymbol(
+    final BitStreamReader input,
+    final WindowBuffer output,
+  ) {
     final symbol = _decodeSymbol(input, _litDecoder!);
     if (symbol < 256) {
       output.addByte(symbol);
@@ -331,7 +341,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
         final previous = codeLengths.last;
         final repeat = input.readBits(2) + 3;
         if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(previous);
@@ -339,7 +351,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       } else if (symbol == 17) {
         final repeat = input.readBits(3) + 3;
         if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
@@ -347,7 +361,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       } else if (symbol == 18) {
         final repeat = input.readBits(7) + 11;
         if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException('Run-length code overruns code-length table');
+          throw DeflateFormatException(
+            'Run-length code overruns code-length table',
+          );
         }
         for (var i = 0; i < repeat; i++) {
           codeLengths.add(0);
@@ -391,11 +407,13 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     _emit(_output!.finish(), emit);
 
     final p = _cursor;
-    final expectedCrc = _pending[p] |
+    final expectedCrc =
+        _pending[p] |
         (_pending[p + 1] << 8) |
         (_pending[p + 2] << 16) |
         (_pending[p + 3] << 24);
-    final expectedSize = _pending[p + 4] |
+    final expectedSize =
+        _pending[p + 4] |
         (_pending[p + 5] << 8) |
         (_pending[p + 6] << 16) |
         (_pending[p + 7] << 24);
@@ -408,7 +426,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       );
     }
     if (_isize != expectedSize) {
-      throw GzipFormatException('Size mismatch: expected $expectedSize, got $_isize');
+      throw GzipFormatException(
+        'Size mismatch: expected $expectedSize, got $_isize',
+      );
     }
 
     // Member validated — in verified mode, release the held output now.
@@ -431,7 +451,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     _limit.record(bytes.length);
     final hold = _hold;
     if (hold != null) {
-      hold.add(bytes); // verified mode: release only after the trailer validates
+      hold.add(
+        bytes,
+      ); // verified mode: release only after the trailer validates
     } else {
       emit(bytes);
     }
