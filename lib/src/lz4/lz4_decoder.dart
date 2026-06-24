@@ -25,6 +25,26 @@ class Lz4Decoder {
   Uint8List decompress(Uint8List input) =>
       guardFormat(() => _decompress(input), Lz4FormatException.new);
 
+  /// Decompresses a single raw LZ4 block (no frame header, block-size prefix,
+  /// end mark, or checksum) — the bare LZ77 token stream produced by
+  /// [Lz4Encoder.compressBlock] and by containers such as Parquet `LZ4_RAW`.
+  /// The whole [input] is treated as one block and decoded until consumed.
+  /// Output is bounded by [maxSize] (defaults to this decoder's [maxSize]).
+  Uint8List decompressBlock(Uint8List input, {int? maxSize}) => guardFormat(
+      () => _decompressBlock(input, maxSize ?? this.maxSize),
+      Lz4FormatException.new);
+
+  Uint8List _decompressBlock(final Uint8List input, final int? cap) {
+    if (input.isEmpty) return Uint8List(0);
+    var initial = input.length * 3 + 64; // rough guess; grows as needed.
+    if (cap != null && initial > cap) initial = cap;
+    final output = GrowableBuffer(initial, cap);
+    _BlockDecoder(output)
+      ..reset(input)
+      ..decode();
+    return output.toBytes();
+  }
+
   Uint8List _decompress(Uint8List input) {
     if (input.isEmpty) {
       return Uint8List(0);

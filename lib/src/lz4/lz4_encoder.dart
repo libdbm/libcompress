@@ -89,6 +89,18 @@ class Lz4Encoder {
     return Uint8List.sublistView(output, 0, pos);
   }
 
+  /// Compresses [input] as a single raw LZ4 block (no frame header, block-size
+  /// prefix, end mark, or checksum). This is the bare LZ77 token stream defined
+  /// by the LZ4 block format, suitable for containers that supply their own
+  /// framing (e.g. Parquet `LZ4_RAW`). Use [compress] for the standard frame.
+  Uint8List compressBlock(final Uint8List input) {
+    if (input.isEmpty) return Uint8List(0);
+    final out = Uint8List(input.length + (input.length ~/ 255) + 16);
+    final length =
+        level >= 9 ? _compressBlockHC(input, out) : _compressBlock(input, out);
+    return Uint8List.sublistView(out, 0, length);
+  }
+
   /// Compresses a block using high-compression mode (level >= 9)
   /// Writes to [out] buffer and returns the number of bytes written.
   int _compressBlockHC(final Uint8List input, final Uint8List out) {
