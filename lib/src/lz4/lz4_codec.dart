@@ -72,6 +72,22 @@ class Lz4Codec extends CompressionCodec {
     return Lz4Decoder(maxSize: maxDecompressedSize).decompress(data);
   }
 
+  /// Compresses [data] as a single raw LZ4 block — the bare LZ77 token stream of
+  /// the LZ4 block format, with no frame header, block-size prefix, end mark, or
+  /// checksum. Use this for containers that carry their own framing and sizes
+  /// (e.g. Parquet `LZ4_RAW`); use [compress] for the standard frame format.
+  Uint8List compressBlock(Uint8List data) {
+    return Lz4Encoder(level: level).compressBlock(data);
+  }
+
+  /// Decompresses a single raw LZ4 block produced by [compressBlock] (or any
+  /// `LZ4_RAW`-style bare block). [maxSize] bounds the output, defaulting to
+  /// this codec's [maxDecompressedSize]. The counterpart to [compressBlock].
+  Uint8List decompressBlock(Uint8List data, {int? maxSize}) {
+    return Lz4Decoder(maxSize: maxDecompressedSize)
+        .decompressBlock(data, maxSize: maxSize);
+  }
+
   @override
   String get name => 'LZ4';
 
