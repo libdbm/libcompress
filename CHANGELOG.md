@@ -11,3 +11,9 @@
 - Observability: Zstd exposes a compressed-block fallback counter, `onFallback` hook, and opt-in `strict` mode
 - CLI tool (`libcompress`) for all codecs, with atomic output (temp file + rename, cleanup on error) and an opt-in `--verified` flag
 - CLI compatibility verified with the native lz4, gzip, snzip, and zstd tools
+
+## 1.1.0
+
+- Major cleanup and bug fixes.
+- Better streaming and more deterministic behavior
+
