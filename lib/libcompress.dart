@@ -67,3 +67,7 @@ export 'src/zstd/zstd_common.dart';
 // Noop codec (pass-through, for testing)
 export 'src/noop/noop_codec.dart';
 export 'src/noop/noop_stream_codec.dart';
+
+// Checksums
+export 'src/util/crc32.dart';
+export 'src/util/crc32c.dart';

@@ -20,3 +20,8 @@
 ## 1.2.0
 
 - **LZ4**: `Lz4Codec.compressBlock`/`decompressBlock` expose the raw LZ4 block format (the bare LZ77 token stream, no frame header/checksum) for containers that supply their own framing.
+
+## 1.2.1
+
+- **crc32**: Expose `crc32.dart` via the public API.
+

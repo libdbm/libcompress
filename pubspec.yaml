@@ -1,6 +1,6 @@
 name: libcompress
 description: Pure Dart implementations of LZ4, Snappy, GZIP, and Zstd compression algorithms with no native dependencies.
-version: 1.2.0
+version: 1.2.1
 repository: https://github.com/libdbm/libcompress
 issue_tracker: https://github.com/libdbm/libcompress/issues
 
