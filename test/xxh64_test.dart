@@ -123,4 +123,45 @@ void main() {
       expect(result, isA<int>());
     });
   });
+
+  group('XXH64 reference vectors (xxhsum -H64)', () {
+    // Prefixes of (i * 31 + 7) & 0xFF, covering every length class the
+    // algorithm branches on: tail bytes, 4- and 8-byte tails, and 32-byte
+    // stripes.
+    final data = Uint8List.fromList(
+      List.generate(1000, (i) => (i * 31 + 7) & 0xFF),
+    );
+    const vectors = <int, int>{
+      0: 0xef46db3751d8e999,
+      1: 0xa96c7f0ce858bbb7,
+      3: 0x56e6957632a487f9,
+      4: 0xc60d15b1e3ff8f04,
+      7: 0xafbefc3d6c6f9a8e,
+      8: 0x3da5c7aa269683e0,
+      31: 0x4a74f3a1a39ad4a1,
+      32: 0x8d57d6a4671cc43d,
+      33: 0x62c9fd21ed857664,
+      63: 0x5c320a0d2707057f,
+      64: 0x7bbabbc45729d17e,
+      100: 0xefa0ad2d3e70c151,
+      1000: 0x99594f4828043d35,
+    };
+
+    for (final entry in vectors.entries) {
+      test('length ${entry.key}', () {
+        final input = Uint8List.sublistView(data, 0, entry.key);
+        expect(XXH64.hash(input), entry.value);
+        expect(XXH64.hashLow32(input), entry.value & 0xFFFFFFFF);
+        for (final piece in [1, 7, 32, 33]) {
+          final sink = Xxh64Sink();
+          for (var o = 0; o < input.length; o += piece) {
+            final end = o + piece < input.length ? o + piece : input.length;
+            sink.add(input, o, end - o);
+          }
+          expect(sink.digest(), entry.value, reason: 'pieces of $piece');
+          expect(sink.digestLow32(), entry.value & 0xFFFFFFFF);
+        }
+      });
+    }
+  });
 }

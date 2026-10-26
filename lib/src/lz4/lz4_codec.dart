@@ -84,8 +84,9 @@ class Lz4Codec extends CompressionCodec {
   /// `LZ4_RAW`-style bare block). [maxSize] bounds the output, defaulting to
   /// this codec's [maxDecompressedSize]. The counterpart to [compressBlock].
   Uint8List decompressBlock(Uint8List data, {int? maxSize}) {
-    return Lz4Decoder(maxSize: maxDecompressedSize)
-        .decompressBlock(data, maxSize: maxSize);
+    return Lz4Decoder(
+      maxSize: maxDecompressedSize,
+    ).decompressBlock(data, maxSize: maxSize);
   }
 
   @override

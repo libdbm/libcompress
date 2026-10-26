@@ -33,7 +33,7 @@ import 'zstd_decoder.dart';
 /// the standard `zstd` CLI tool, and non-dictionary `.zst` files from the CLI
 /// decode here. Dictionary frames (`zstd -D`) are the exception — they fail.
 class ZstdCodec extends CompressionCodec {
-  /// Compression level (1-9)
+  /// Compression level (1-22)
   final int level;
 
   /// Block size for compression

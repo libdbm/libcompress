@@ -1,3 +1,18 @@
+/// Thrown by the output buffers when decoding would exceed a size limit.
+///
+/// Distinct from [StateError], which the incremental decoders use to signal
+/// exhausted input, so a limit breach is never mistaken for "wait for more
+/// data". Codec boundaries (`guardFormat`, `gzipBoundary`) convert it into the
+/// codec's format exception.
+final class OutputLimitException implements Exception {
+  const OutputLimitException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'OutputLimitException: $message';
+}
+
 /// Cumulative decompressed-output limit shared by the streaming decoders.
 ///
 /// Streaming codecs decode a sequence of members/frames, each into its own

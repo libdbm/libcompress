@@ -1,13 +1,13 @@
 import 'dart:typed_data';
 
 import '../exceptions.dart';
-import '../util/bit_stream.dart';
 import '../util/byte_pending.dart';
 import '../util/crc32.dart';
 import '../util/incremental_decompress_transformer.dart';
 import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
 import 'deflate_common.dart';
+import 'deflate_reader.dart';
 import 'gzip_frame.dart';
 import 'huffman_tables.dart';
 
@@ -191,100 +191,109 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   bool _runDeflate(final void Function(Uint8List) emit) {
     final output = _output!;
-    final input = BitStreamReader(
+    final input = DeflateReader(
       _pending.bytes,
       start: _cursor,
       end: _pending.length,
-    )..seek(BitPosition(0, _bitOffset));
+      bit: _bitOffset,
+      partial: true,
+    );
 
     var madeProgress = false;
-    {
-      while (!_deflateDone) {
-        if (_blockStored) {
-          // Copy stored-block bytes; each copied byte is committed.
-          while (_storedRemaining > 0) {
-            if (input.isEndOfStream) {
-              _commit(input, output, emit);
-              return madeProgress;
-            }
-            output.addByte(input.readBits(8));
-            _storedRemaining--;
-            madeProgress = true;
-          }
-          _blockStored = false;
-          if (_blockFinal) _deflateDone = true;
-          continue;
-        }
-
-        if (!_blockReady) {
-          // Parse the next block header (atomic: rewind on exhaustion).
-          final mark = input.position;
-          try {
-            _blockFinal = input.readBits(1) == 1;
-            final type = input.readBits(2);
-            switch (type) {
-              case 0:
-                input.flushToByte();
-                final len = input.readBits(8) | (input.readBits(8) << 8);
-                final nlen = input.readBits(8) | (input.readBits(8) << 8);
-                if ((len ^ nlen) != 0xFFFF) {
-                  throw DeflateFormatException('Stored block length mismatch');
-                }
-                _blockStored = true;
-                _storedRemaining = len;
-                break;
-              case 1:
-                _litDecoder = fixedLiteralDecoder;
-                _distDecoder = fixedDistanceDecoder;
-                _blockReady = true;
-                break;
-              case 2:
-                _parseDynamicTables(input);
-                _blockReady = true;
-                break;
-              default:
-                throw DeflateFormatException('Invalid block type: $type');
-            }
-          } on StateError {
-            input.seek(mark);
-            _commit(input, output, emit);
-            return madeProgress;
-          }
+    while (!_deflateDone) {
+      if (_blockStored) {
+        // Copy the stored bytes that have arrived; each copied byte is
+        // committed.
+        final available = input.available;
+        final count = _storedRemaining < available
+            ? _storedRemaining
+            : available;
+        if (count > 0) {
+          output.addBytes(input.take(count));
+          _storedRemaining -= count;
           madeProgress = true;
-          continue;
         }
-
-        // Decode one Huffman symbol; rewind if it can't complete.
-        final mark = input.position;
-        try {
-          final done = _decodeOneSymbol(input, output);
-          madeProgress = true;
-          if (done) {
-            // End of block.
-            _blockReady = false;
-            if (_blockFinal) _deflateDone = true;
-          }
-        } on StateError {
-          input.seek(mark);
+        if (_storedRemaining > 0) {
           _commit(input, output, emit);
           return madeProgress;
         }
+        _blockStored = false;
+        if (_blockFinal) _deflateDone = true;
+        continue;
       }
 
-      // Final block decoded: align to the trailer byte boundary.
-      input.flushToByte();
-      _commit(input, output, emit);
-      _phase = _Phase.trailer;
-      return true;
+      if (!_blockReady) {
+        // Parse the next block header (atomic: rewind on exhaustion).
+        final mark = input.consumed;
+        try {
+          _blockFinal = input.read(1) == 1;
+          final type = input.read(2);
+          switch (type) {
+            case 0:
+              input.align();
+              final len = input.read(16);
+              final nlen = input.read(16);
+              if ((len ^ nlen) != 0xFFFF) {
+                throw DeflateFormatException('Stored block length mismatch');
+              }
+              _blockStored = true;
+              _storedRemaining = len;
+              break;
+            case 1:
+              _litDecoder = fixedLiteralDecoder;
+              _distDecoder = fixedDistanceDecoder;
+              _blockReady = true;
+              break;
+            case 2:
+              final (literals, distances) = readDynamicTables(input);
+              _litDecoder = literals;
+              _distDecoder = distances;
+              _blockReady = true;
+              break;
+            default:
+              throw DeflateFormatException('Invalid block type: $type');
+          }
+        } on StateError {
+          input.rewind(mark);
+          _commit(input, output, emit);
+          return madeProgress;
+        }
+        madeProgress = true;
+        continue;
+      }
+
+      // Decode symbols until the block ends; a symbol that cannot complete
+      // rewinds to the last checkpoint. Each symbol reads all its bits before
+      // writing output, so a rewind never leaves partial output behind.
+      var mark = input.consumed;
+      try {
+        while (true) {
+          final done = _decodeOneSymbol(input, output);
+          mark = input.consumed;
+          madeProgress = true;
+          if (done) {
+            _blockReady = false;
+            if (_blockFinal) _deflateDone = true;
+            break;
+          }
+        }
+      } on StateError {
+        input.rewind(mark);
+        _commit(input, output, emit);
+        return madeProgress;
+      }
     }
+
+    // Final block decoded: align to the trailer byte boundary.
+    input.align();
+    _commit(input, output, emit);
+    _phase = _Phase.trailer;
+    return true;
   }
 
   /// Decodes one literal/match. Returns true at end-of-block.
-  bool _decodeOneSymbol(
-    final BitStreamReader input,
-    final WindowBuffer output,
-  ) {
-    final symbol = _decodeSymbol(input, _litDecoder!);
+  bool _decodeOneSymbol(final DeflateReader input, final WindowBuffer output) {
+    final symbol = input.decode(_litDecoder!);
     if (symbol < 256) {
       output.addByte(symbol);
       return false;
@@ -298,15 +307,15 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     final code = symbol - 257;
     var length = lengthBase[code];
     final extra = lengthExtraBits[code];
-    if (extra > 0) length += input.readBits(extra);
+    if (extra > 0) length += input.read(extra);
 
-    final distanceCode = _decodeSymbol(input, _distDecoder!);
+    final distanceCode = input.decode(_distDecoder!);
     if (distanceCode >= 30) {
       throw DeflateFormatException('Invalid distance code: $distanceCode');
     }
     var distance = distanceBase[distanceCode];
     final distExtra = distanceExtraBits[distanceCode];
-    if (distExtra > 0) distance += input.readBits(distExtra);
+    if (distExtra > 0) distance += input.read(distExtra);
 
     if (distance > output.length || distance > _deflateWindow) {
       throw DeflateFormatException(
@@ -317,87 +326,17 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     return false;
   }
 
-  void _parseDynamicTables(final BitStreamReader input) {
-    final hlit = input.readBits(5) + 257;
-    final hdist = input.readBits(5) + 1;
-    final hclen = input.readBits(4) + 4;
-
-    final clLengths = List<int>.filled(19, 0);
-    for (var i = 0; i < hclen; i++) {
-      clLengths[codeLengthOrder[i]] = input.readBits(3);
-    }
-    final clDecoder = buildDecoder(clLengths);
-
-    final codeLengths = <int>[];
-    final total = hlit + hdist;
-    while (codeLengths.length < total) {
-      final symbol = _decodeSymbol(input, clDecoder);
-      if (symbol < 16) {
-        codeLengths.add(symbol);
-      } else if (symbol == 16) {
-        if (codeLengths.isEmpty) {
-          throw DeflateFormatException('Invalid repeat code at start');
-        }
-        final previous = codeLengths.last;
-        final repeat = input.readBits(2) + 3;
-        if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException(
-            'Run-length code overruns code-length table',
-          );
-        }
-        for (var i = 0; i < repeat; i++) {
-          codeLengths.add(previous);
-        }
-      } else if (symbol == 17) {
-        final repeat = input.readBits(3) + 3;
-        if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException(
-            'Run-length code overruns code-length table',
-          );
-        }
-        for (var i = 0; i < repeat; i++) {
-          codeLengths.add(0);
-        }
-      } else if (symbol == 18) {
-        final repeat = input.readBits(7) + 11;
-        if (repeat > total - codeLengths.length) {
-          throw DeflateFormatException(
-            'Run-length code overruns code-length table',
-          );
-        }
-        for (var i = 0; i < repeat; i++) {
-          codeLengths.add(0);
-        }
-      } else {
-        throw DeflateFormatException('Invalid code length symbol: $symbol');
-      }
-    }
-
-    _litDecoder = buildDecoder(codeLengths.sublist(0, hlit));
-    _distDecoder = buildDecoder(codeLengths.sublist(hlit, hlit + hdist));
-  }
-
-  int _decodeSymbol(final BitStreamReader input, final HuffmanDecoder decoder) {
-    var code = 0;
-    var bits = 0;
-    while (bits < 15) {
-      code = (code << 1) | input.readBits(1);
-      bits++;
-      final symbol = decoder.decode(code, bits);
-      if (symbol != null) return symbol;
-    }
-    throw DeflateFormatException('Invalid Huffman code');
-  }
-
-  /// Persists the reader's position (rounding down to a byte; the residual bit
-  /// offset is kept) and emits any drained output, updating CRC/ISIZE.
+  /// Persists the reader's position (whole bytes into [_cursor], the residual
+  /// bit offset into [_bitOffset]) and emits any drained output, updating
+  /// CRC/ISIZE.
   void _commit(
-    final BitStreamReader input,
+    final DeflateReader input,
     final WindowBuffer output,
     final void Function(Uint8List) emit,
   ) {
-    _cursor += input.bytePosition;
-    _bitOffset = input.bitOffset;
+    final consumed = input.consumed;
+    _cursor += consumed >> 3;
+    _bitOffset = consumed & 7;
     _emit(output.drain(), emit);
   }
 

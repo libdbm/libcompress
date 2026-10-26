@@ -8,6 +8,9 @@ import 'package:libcompress/libcompress.dart';
 // which inspects the `fallbacks` getter not exposed on the public codecs.
 import 'package:libcompress/src/zstd/zstd_encoder.dart';
 import 'package:libcompress/src/zstd/streaming_zstd_encoder.dart';
+// Literal-section tests drive the block and Huffman encoders directly.
+import 'package:libcompress/src/zstd/compressed_block_encoder.dart';
+import 'package:libcompress/src/zstd/huffman_encoder.dart';
 
 import 'test_utils.dart';
 
@@ -71,6 +74,30 @@ void main() {
           expectRoundTrip(codec, data);
         });
       }
+    });
+
+    group('no raw-block fallbacks', () {
+      // A compressed-block encode error silently degrades to a raw block, so
+      // round trips stay green while the ratio collapses; strict mode surfaces
+      // it. kennedy.xls exercises matches ending at the block boundary.
+      const fixtures = [...standardFixtures, 'canterbury/kennedy.xls'];
+      for (final level in [1, 3, 6, 19]) {
+        test('level $level never falls back', () {
+          for (final path in fixtures) {
+            final data = readDataFixture(path);
+            expectRoundTrip(ZstdCodec(level: level, strict: true), data);
+          }
+        });
+      }
+
+      test('level 6+ ratio is not worse than level 3', () {
+        final data = readDataFixture('canterbury/kennedy.xls');
+        final base = ZstdCodec(level: 3).compress(data).length;
+        for (final level in [6, 9, 19]) {
+          final size = ZstdCodec(level: level).compress(data).length;
+          expect(size, lessThanOrEqualTo(base), reason: 'level $level');
+        }
+      });
     });
 
     group('block sizes', () {
@@ -699,6 +726,28 @@ void main() {
       );
     });
 
+    test('stream maxSize breach reports the limit', () {
+      // Streaming-compressed, so the frame declares no content size and the
+      // limit is hit while decoding rather than at the header.
+      final frame = StreamingZstdEncoder();
+      final data = bytes(List.generate(300000, (i) => i % 251));
+      final blob = bytes([
+        ...frame.header(),
+        ...frame.addChunk(data),
+        ...frame.finish(),
+      ]);
+      expect(
+        collect(ZstdStreamCodec(maxSize: 5000).decompress(Stream.value(blob))),
+        throwsA(
+          isA<ZstdFormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('exceeds maximum'),
+          ),
+        ),
+      );
+    });
+
     test(
       'healthy block compression: zero fallbacks and actually compresses',
       () {
@@ -1177,6 +1226,49 @@ void main() {
   });
 
   group('Zstd format', () {
+    group('Huffman literals', () {
+      test('deep trees are limited to 11-bit codes', () {
+        // Fibonacci counts give an unconstrained tree of depth 23.
+        final counts = List<int>.filled(256, 0);
+        var previous = 1, current = 1;
+        for (var symbol = 0; symbol < 24; symbol++) {
+          counts[0x41 + symbol] = previous;
+          final next = previous + current;
+          previous = current;
+          current = next;
+        }
+        final encoder = HuffmanEncoder()..buildFromCounts(counts, 0x41 + 23);
+        expect(encoder.maxBits, lessThanOrEqualTo(11));
+      });
+
+      test('codes use the optimal number of bits', () {
+        // Lengths 1, 2, 3, 4, 4 for counts 8:4:2:1:1: 30 bits per 16 symbols.
+        final pattern = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 4];
+        final literals = bytes([for (var i = 0; i < 100; i++) ...pattern]);
+        final counts = List<int>.filled(256, 0);
+        for (final byte in literals) {
+          counts[byte]++;
+        }
+        final encoder = HuffmanEncoder()..buildFromCounts(counts, 4);
+        expect(encoder.encodeSingle(literals)!.length, lessThanOrEqualTo(376));
+      });
+
+      for (final path in ['large/bible.txt', 'large/world192.txt']) {
+        test('$path text blocks use Huffman-compressed literals', () {
+          final data = readDataFixture(path);
+          final encoder = CompressedBlockEncoder(searchDepth: 32, minMatch: 4);
+          for (var offset = 0; offset < data.length; offset += 128 * 1024) {
+            final end = min(offset + 128 * 1024, data.length);
+            final block = encoder.encodeBlock(
+              Uint8List.sublistView(data, offset, end),
+            );
+            // Literals_Block_Type is the low two bits: 2 = Compressed.
+            expect(block[0] & 0x03, 2, reason: 'block at $offset');
+          }
+        });
+      }
+    });
+
     final codec = ZstdCodec();
 
     test('emits the correct magic number', () {

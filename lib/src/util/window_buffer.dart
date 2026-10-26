@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'byte_sink.dart';
+import 'output_limit.dart';
 
 /// A sliding-window output buffer for incremental decompression.
 ///
@@ -26,7 +27,7 @@ class WindowBuffer implements ByteSink {
   /// Creates a buffer retaining at least [window] trailing bytes.
   ///
   /// [maxSize], when set, caps the total produced size (a safety backstop
-  /// against decompression bombs); exceeding it throws [StateError].
+  /// against decompression bombs); exceeding it throws [OutputLimitException].
   WindowBuffer(this.window, {int? maxSize})
     : assert(window > 0),
       _maxSize = maxSize,
@@ -114,7 +115,7 @@ class WindowBuffer implements ByteSink {
     // allocate the full (bomb-sized) buffer and only then be rejected.
     final max = _maxSize;
     if (max != null && _base + required > max) {
-      throw StateError('Decompressed size exceeds maximum $max');
+      throw OutputLimitException('Decompressed size exceeds maximum $max');
     }
     if (required <= _buffer.length) return;
     var capacity = _buffer.length;

@@ -14,14 +14,21 @@ const int snappyDefaultMaxDecompressedSize = 256 * 1024 * 1024;
 /// Native Dart implementation of Snappy decompression
 /// Based on the Snappy format specification and jsnappy Java implementation
 class SnappyDecoder {
-  /// Maximum allowed uncompressed size (default: 100MB)
+  /// Maximum allowed uncompressed size, shared with the codecs (256 MB).
   /// Can be overridden by passing a different value to decompress()
-  static const int defaultMaxSize = 100 * 1024 * 1024;
+  static const int defaultMaxSize = snappyDefaultMaxDecompressedSize;
+
+  /// Largest output a single body byte can contribute: a 3-byte copy element
+  /// emits at most 64 bytes, and no element does better.
+  static const int _maxExpansionNumerator = 64;
+  static const int _maxExpansionDenominator = 3;
 
   /// Decompress Snappy compressed data
   ///
   /// [maxUncompressedSize] sets a safety limit on the declared uncompressed
-  /// length to prevent memory exhaustion attacks. Defaults to 100MB.
+  /// length to prevent memory exhaustion attacks. Defaults to 256MB. A
+  /// declared length larger than the body could ever expand to is rejected
+  /// before the output is allocated.
   static Uint8List decompress(
     final Uint8List compressed, {
     final int? maxUncompressedSize = defaultMaxSize,
@@ -58,6 +65,19 @@ class SnappyDecoder {
         actualUncompressedLength > maxUncompressedSize) {
       throw SnappyFormatException(
         'Uncompressed size $actualUncompressedLength exceeds maximum $maxUncompressedSize',
+      );
+    }
+
+    // Reject a declared length the body cannot produce before allocating it,
+    // so a few bytes of input cannot force a large allocation.
+    final expansion =
+        (compressed.length - sourceIndex) *
+        _maxExpansionNumerator ~/
+        _maxExpansionDenominator;
+    if (actualUncompressedLength > expansion) {
+      throw SnappyFormatException(
+        'Declared length $actualUncompressedLength exceeds the maximum '
+        'expansion ($expansion) of ${compressed.length - sourceIndex} bytes',
       );
     }
 

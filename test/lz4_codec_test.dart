@@ -434,6 +434,20 @@ void main() {
         throwsA(isA<CompressionFormatException>()),
       );
     });
+
+    test('stream maxSize breach reports the limit', () {
+      final frame = Lz4Codec().compress(bytes(List.filled(300000, 0x41)));
+      expect(
+        streamDecompress(Lz4StreamCodec(maxSize: 5000), frame),
+        throwsA(
+          isA<Lz4FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('exceeds maximum'),
+          ),
+        ),
+      );
+    });
   });
 
   group('LZ4 CLI compatibility', () {

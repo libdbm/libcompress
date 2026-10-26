@@ -2,6 +2,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:libcompress/src/util/growable_buffer.dart';
+import 'package:libcompress/src/util/output_limit.dart';
 import 'package:libcompress/src/util/window_buffer.dart';
 
 void main() {
@@ -73,7 +74,18 @@ void main() {
 
     test('enforces maxSize backstop', () {
       final buffer = WindowBuffer(8, maxSize: 10);
-      expect(() => buffer.addBytes(Uint8List(11)), throwsStateError);
+      expect(
+        () => buffer.addBytes(Uint8List(11)),
+        throwsA(isA<OutputLimitException>()),
+      );
+    });
+
+    test('GrowableBuffer enforces maxCapacity with the same limit type', () {
+      final buffer = GrowableBuffer(4, 10);
+      expect(
+        () => buffer.addBytes(Uint8List(11)),
+        throwsA(isA<OutputLimitException>()),
+      );
     });
 
     test('rejects back-reference beyond retained window', () {

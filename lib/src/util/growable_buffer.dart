@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'byte_sink.dart';
+import 'output_limit.dart';
 
 /// A growable byte buffer optimized for decompression operations
 ///
@@ -17,7 +18,7 @@ class GrowableBuffer implements ByteSink {
   /// Creates a buffer with the specified initial capacity
   ///
   /// If [initialCapacity] is 0, a default capacity of 1024 bytes is used.
-  /// If [maxCapacity] is provided, the buffer will throw [StateError] if
+  /// If [maxCapacity] is provided, the buffer will throw [OutputLimitException] if
   /// growth would exceed this limit (prevents OOM from malicious inputs).
   GrowableBuffer([int initialCapacity = 1024, int? maxCapacity])
     : _maxCapacity = maxCapacity,
@@ -134,7 +135,7 @@ class GrowableBuffer implements ByteSink {
 
     // Check max capacity limit before growing
     if (_maxCapacity != null && requiredCapacity > _maxCapacity) {
-      throw StateError(
+      throw OutputLimitException(
         'Buffer growth would exceed maximum capacity: '
         'required=$requiredCapacity, max=$_maxCapacity',
       );

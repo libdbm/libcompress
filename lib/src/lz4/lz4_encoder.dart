@@ -96,8 +96,9 @@ class Lz4Encoder {
   Uint8List compressBlock(final Uint8List input) {
     if (input.isEmpty) return Uint8List(0);
     final out = Uint8List(input.length + (input.length ~/ 255) + 16);
-    final length =
-        level >= 9 ? _compressBlockHC(input, out) : _compressBlock(input, out);
+    final length = level >= 9
+        ? _compressBlockHC(input, out)
+        : _compressBlock(input, out);
     return Uint8List.sublistView(out, 0, length);
   }
 

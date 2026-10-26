@@ -1,21 +1,19 @@
+import 'dart:typed_data';
+
 import '../exceptions.dart';
 import '../util/huffman.dart';
 
 /// Huffman decoder using lookup tables
 class HuffmanDecoder {
-  /// Maps code length -> code -> symbol
-  final Map<int, Map<int, int>> _codeToSymbol;
+  /// Single-level lookup table indexed by the next [bits] input bits in
+  /// DEFLATE's LSB-first order (that is, by bit-reversed codes). Each entry
+  /// is `symbol << 4 | length`; 0 marks an index no code maps to.
+  final Uint16List table;
 
-  HuffmanDecoder(this._codeToSymbol);
+  /// Longest code length, and the number of bits [table] is indexed by.
+  final int bits;
 
-  /// Decodes a symbol from a code of given length
-  ///
-  /// Returns null if no symbol matches.
-  int? decode(int code, int length) {
-    final table = _codeToSymbol[length];
-    if (table == null) return null;
-    return table[code];
-  }
+  HuffmanDecoder(this.table, this.bits);
 }
 
 /// Builds a Huffman decoder from code lengths.
@@ -33,15 +31,26 @@ HuffmanDecoder buildDecoder(List<int> lengths, {bool allowIncomplete = false}) {
   final codes = HuffmanTreeBuilder.generateCanonicalCodes(lengths);
 
   // Build lookup table
-  final codeToSymbol = <int, Map<int, int>>{};
-  for (final entry in codes.entries) {
-    final symbol = entry.key;
-    final code = entry.value;
-
-    codeToSymbol.putIfAbsent(code.length, () => {})[code.code] = symbol;
+  var bits = 0;
+  for (final code in codes.values) {
+    if (code.length > bits) bits = code.length;
   }
 
-  return HuffmanDecoder(codeToSymbol);
+  // Each code of length L owns every index whose low L bits are its
+  // bit-reversed value.
+  final table = Uint16List(1 << bits);
+  for (final entry in codes.entries) {
+    final length = entry.value.length;
+    var reversed = 0;
+    for (var i = 0; i < length; i++) {
+      reversed = (reversed << 1) | ((entry.value.code >> i) & 1);
+    }
+    for (var index = reversed; index < table.length; index += 1 << length) {
+      table[index] = (entry.key << 4) | length;
+    }
+  }
+
+  return HuffmanDecoder(table, bits);
 }
 
 void _validateCodeLengths(List<int> lengths, bool allowIncomplete) {

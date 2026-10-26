@@ -31,8 +31,9 @@ class Lz4Decoder {
   /// The whole [input] is treated as one block and decoded until consumed.
   /// Output is bounded by [maxSize] (defaults to this decoder's [maxSize]).
   Uint8List decompressBlock(Uint8List input, {int? maxSize}) => guardFormat(
-      () => _decompressBlock(input, maxSize ?? this.maxSize),
-      Lz4FormatException.new);
+    () => _decompressBlock(input, maxSize ?? this.maxSize),
+    Lz4FormatException.new,
+  );
 
   Uint8List _decompressBlock(final Uint8List input, final int? cap) {
     if (input.isEmpty) return Uint8List(0);

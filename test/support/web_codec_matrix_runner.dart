@@ -7,14 +7,26 @@ import 'package:libcompress/libcompress.dart';
 Future<void> main() async {
   final results = <String, Object?>{};
   for (final type in CodecFactory.types) {
-    results[type.name] = await _runCodec(type);
+    results[type.name] = await _runCodec(
+      type,
+      CodecFactory.codec(type),
+      CodecFactory.streaming(type),
+    );
   }
+  // The factory leaves the Zstd content checksum off; cover XXH64 explicitly.
+  results['zstdChecksum'] = await _runCodec(
+    CodecType.zstd,
+    ZstdCodec(enableChecksum: true),
+    ZstdStreamCodec(checksum: true),
+  );
   print(jsonEncode(results));
 }
 
-Future<Map<String, Object?>> _runCodec(CodecType type) async {
-  final blockCodec = CodecFactory.codec(type);
-  final streamCodec = CodecFactory.streaming(type);
+Future<Map<String, Object?>> _runCodec(
+  CodecType type,
+  CompressionCodec blockCodec,
+  CompressionStreamCodec streamCodec,
+) async {
   final cases = _dataCases();
   final blockResults = <Map<String, Object?>>[];
   final streamResults = <Map<String, Object?>>[];
@@ -28,9 +40,9 @@ Future<Map<String, Object?>> _runCodec(CodecType type) async {
     }
     blockResults.add(<String, Object?>{
       'case': entry.key,
-      'input': _b64(data),
-      'compressed': _b64(_normalizeCompressed(type, compressed)),
-      'decompressed': _b64(decompressed),
+      'input': _encode(data),
+      'compressed': _encode(_normalizeCompressed(type, compressed)),
+      'decompressed': _encode(decompressed),
     });
 
     final compressedChunks = await streamCodec
@@ -46,9 +58,9 @@ Future<Map<String, Object?>> _runCodec(CodecType type) async {
     }
     streamResults.add(<String, Object?>{
       'case': entry.key,
-      'input': _b64(data),
-      'compressed': _b64(_normalizeCompressed(type, streamCompressed)),
-      'decompressed': _b64(streamDecompressed),
+      'input': _encode(data),
+      'compressed': _encode(_normalizeCompressed(type, streamCompressed)),
+      'decompressed': _encode(streamDecompressed),
     });
   }
 
@@ -67,7 +79,24 @@ Map<String, Uint8List> _dataCases() {
     'binary': Uint8List.fromList(
       List<int>.generate(1024, (index) => (index * 37 + 11) & 0xff),
     ),
+    'large': _large(),
   };
+}
+
+/// 600 KB alternating 1500-byte pseudo-random runs with repeats of them, so
+/// Zstd sequences carry long literal runs and large offsets (many extra bits
+/// per sequence). The generator's products stay below 2^53, so the VM and
+/// dart2js produce identical input.
+Uint8List _large() {
+  final data = Uint8List(600000);
+  var seed = 7;
+  for (var index = 0; index < data.length; index++) {
+    seed = (seed * 48271) % 2147483647;
+    data[index] = (index % 3000 < 1500)
+        ? (seed >> 8) & 0xff
+        : data[index - 1500];
+  }
+  return data;
 }
 
 List<Uint8List> _splitData(Uint8List data) {
@@ -148,7 +177,16 @@ Uint8List _concat(List<Uint8List> chunks) {
   return result;
 }
 
-String _b64(Uint8List bytes) => base64Encode(bytes);
+/// Small payloads are compared byte for byte; large ones by length and digest
+/// to keep the VM/JS comparison output small.
+String _encode(Uint8List bytes) {
+  if (bytes.length <= 4096) return base64Encode(bytes);
+  var digest = 17;
+  for (final byte in bytes) {
+    digest = (digest * 31 + byte) % 1000000007;
+  }
+  return '${bytes.length}:$digest';
+}
 
 bool _bytesEqual(Uint8List left, Uint8List right) {
   if (left.length != right.length) {

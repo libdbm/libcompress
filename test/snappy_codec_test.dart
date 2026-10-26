@@ -339,6 +339,52 @@ void main() {
       expect(SnappyCodec(maxSize: null).maxSize, isNull);
     });
 
+    test('decoders share the 256MB default', () {
+      expect(SnappyStreamDecoder().maxUncompressedSize, 256 * 1024 * 1024);
+      expect(SnappyDecoder.defaultMaxSize, 256 * 1024 * 1024);
+    });
+
+    test('rejects a declared length beyond the maximum expansion', () {
+      // A varint preamble declaring 200 MB followed by a single byte: no
+      // Snappy body of 1 byte can expand that far, so decoding must refuse
+      // before allocating the declared output.
+      final bomb = bytes([0x80, 0x80, 0x80, 0x60, 0x00]);
+      expect(
+        () => SnappyCodec().decompress(bomb),
+        throwsA(
+          isA<SnappyFormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('maximum expansion'),
+          ),
+        ),
+      );
+    });
+
+    test('decodes a stream at the maximum expansion ratio', () {
+      // One literal byte, then 3-byte copies of 64 bytes at offset 1: the
+      // highest output-per-input ratio the format allows.
+      const copies = 2000;
+      final declared = 1 + 64 * copies;
+      final preamble = <int>[];
+      for (var value = declared; ; value >>= 7) {
+        if (value < 0x80) {
+          preamble.add(value);
+          break;
+        }
+        preamble.add((value & 0x7F) | 0x80);
+      }
+      final stream = bytes([
+        ...preamble,
+        0x00, 0x41, // literal 'A'
+        for (var i = 0; i < copies; i++) ...[0xFE, 0x01, 0x00], // copy 64 @ 1
+      ]);
+      expect(
+        SnappyCodec().decompress(stream),
+        equals(List<int>.filled(declared, 0x41)),
+      );
+    });
+
     test('block: small limit rejects, null allows', () {
       final compressed = SnappyCodec().compress(data);
       expect(

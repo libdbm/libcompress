@@ -168,13 +168,15 @@ class CompressedBlockEncoder {
     }
 
     // The current Huffman weights encoder only supports the direct 4-bit
-    // representation, whose header can encode at most 128 weights.
-    if (maxSym + 1 > 128) {
+    // representation, whose header can encode at most 128 weights. Symbols
+    // 0..maxSym-1 are written; the last symbol's weight is implicit
+    // (RFC 8878 Section 4.2.1.1).
+    if (maxSym > 128) {
       return null;
     }
 
     // Encode weights header
-    final header = encoder.encodeWeightsHeader(maxSym + 1);
+    final header = encoder.encodeWeightsHeader(maxSym);
 
     // Encode literals (use 4 streams for larger inputs)
     Uint8List? encoded;
@@ -241,11 +243,13 @@ class CompressedBlockEncoder {
     }
 
     // Build header as little-endian value. This can require more than 32 bits
-    // for size format 3, so avoid JS bitwise operators after dart2js.
-    final sizeMask = (BigInt.one << bitsPerSize) - BigInt.one;
-    var header = BigInt.from((type & 0x03) | ((sizeFormat & 0x03) << 2));
-    header |= (BigInt.from(regeneratedSize) & sizeMask) << 4;
-    header |= (BigInt.from(compressedSize) & sizeMask) << (4 + bitsPerSize);
+    // for size format 3, so combine with multiplication rather than JS-unsafe
+    // bitwise operators (exact up to 2^53 on dart2js).
+    final sizeRange = 1 << bitsPerSize;
+    var header =
+        ((type & 0x03) | ((sizeFormat & 0x03) << 2)) +
+        (regeneratedSize % sizeRange) * 16 +
+        (compressedSize % sizeRange) * (1 << (4 + bitsPerSize));
 
     final output = Uint8List(
       headerSize + weightsHeader.length + compressedStreams.length,
@@ -253,7 +257,8 @@ class CompressedBlockEncoder {
 
     // Convert to bytes (little-endian).
     for (var i = 0; i < headerSize; i++) {
-      output[i] = ((header >> (i * 8)) & BigInt.from(0xff)).toInt();
+      output[i] = header % 256;
+      header ~/= 256;
     }
 
     var pos = headerSize;

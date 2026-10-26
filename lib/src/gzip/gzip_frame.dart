@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 import '../exceptions.dart';
 import '../util/crc32.dart';
+import '../util/output_limit.dart';
 import 'deflate_encoder.dart';
 import 'deflate_decoder.dart';
 
@@ -25,6 +26,8 @@ T gzipBoundary<T>(T Function() body) {
   } on ArgumentError catch (e) {
     throw GzipFormatException(e.message?.toString() ?? e.toString());
   } on StateError catch (e) {
+    throw GzipFormatException(e.message);
+  } on OutputLimitException catch (e) {
     throw GzipFormatException(e.message);
   }
   // Other errors (library bugs) propagate unchanged — see [guardFormat].

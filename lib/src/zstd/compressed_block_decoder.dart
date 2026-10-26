@@ -516,17 +516,19 @@ class CompressedBlockDecoder {
       );
     }
 
-    var value = BigInt.zero;
+    // Up to 40 bits: assemble with multiplication and split with integer
+    // division, which are exact on the VM and dart2js alike (JS bitwise
+    // operators truncate to 32 bits).
+    var value = 0;
+    var scale = 1;
     for (var i = 0; i < headerSize; i++) {
-      value |= BigInt.from(data[offset + i] & 0xff) << (8 * i);
+      value += data[offset + i] * scale;
+      scale *= 256;
     }
 
-    final regeneratedMask = (BigInt.one << bitsPerSize) - BigInt.one;
-    final compressedMask = regeneratedMask;
-    final regeneratedSize = ((value >> 4) & regeneratedMask).toInt();
-    final compressedShift = 4 + bitsPerSize;
-    final compressedSize = ((value >> compressedShift) & compressedMask)
-        .toInt();
+    final sizeRange = 1 << bitsPerSize;
+    final regeneratedSize = (value ~/ 16) % sizeRange;
+    final compressedSize = (value ~/ (1 << (4 + bitsPerSize))) % sizeRange;
 
     return _CompressedLiteralHeader(
       headerSize: headerSize,

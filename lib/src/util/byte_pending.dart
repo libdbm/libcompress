@@ -3,7 +3,7 @@ import 'dart:typed_data';
 /// A contiguous, `Uint8List`-backed pending-input buffer for incremental
 /// decoders: append at the end, read by absolute index, and discard a consumed
 /// prefix (compacting). Unboxed (unlike a `List<int>`) and contiguous, so a
-/// `BitStreamReader` can read its [bytes] backing directly.
+/// `DeflateReader` can read its [bytes] backing directly.
 class BytePending {
   BytePending([final int initialCapacity = 1024])
     : _backing = Uint8List(initialCapacity < 64 ? 64 : initialCapacity);

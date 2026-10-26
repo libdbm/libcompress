@@ -147,44 +147,19 @@ class HuffmanTreeBuilder {
     return codes;
   }
 
-  /// Computes optimal code lengths limited to maxBits
+  /// Computes Huffman code lengths limited to [maxBits].
   ///
-  /// Builds a Huffman tree and applies a length-limiting adjustment to
-  /// ensure no code exceeds maxBits. This is required for DEFLATE which
-  /// limits literal/length codes to 15 bits and distance codes to 15 bits.
+  /// Builds an unconstrained Huffman tree; while its longest code exceeds
+  /// [maxBits], halves every non-zero frequency (rounding up, so no symbol
+  /// drops out) and rebuilds. Every result is a real Huffman tree, so the code
+  /// is always complete (Kraft sum exactly 1) and never over-subscribed. The
+  /// loop terminates: once all frequencies reach 1 the tree is balanced, with
+  /// depth ceil(log2(symbols)). This trades a little optimality for
+  /// guaranteed validity (RFC 1951 Section 3.2.2, RFC 8878 Section 4.2.1).
   ///
-  /// ## Algorithm
-  ///
-  /// This implementation uses a two-phase approach:
-  ///
-  /// 1. **Build optimal tree**: First constructs an unconstrained Huffman tree
-  ///    using the standard algorithm, which may produce codes longer than maxBits.
-  ///
-  /// 2. **Apply length limiting**: If any codes exceed maxBits, redistributes
-  ///    bit lengths using a heuristic based on the Kraft inequality. Codes that
-  ///    are too long are shortened to maxBits, and shorter codes are lengthened
-  ///    to maintain a valid prefix-free code.
-  ///
-  /// The redistribution ensures:
-  /// - Sum of 2^(-length) for all codes equals 1.0 (Kraft inequality)
-  /// - No code exceeds maxBits
-  /// - Symbols with lower frequencies get longer codes
-  ///
-  /// ## Parameters
-  ///
-  /// - [frequencies]: Symbol frequency counts (index = symbol value)
-  /// - [maxBits]: Maximum allowed code length (typically 15 for DEFLATE)
-  ///
-  /// ## Returns
-  ///
-  /// List where `result[symbol]` is the bit length for that symbol.
-  /// Symbols with zero frequency have length 0 (no code assigned).
-  ///
-  /// ## References
-  ///
-  /// - RFC 1951 Section 3.2.2 (DEFLATE Huffman coding)
-  /// - Larmore & Hirschberg, "A Fast Algorithm for Optimal Length-Limited
-  ///   Huffman Codes" (for the theoretical background)
+  /// Returns `result[symbol]` = code length, 0 for zero-frequency symbols. A
+  /// single used symbol gets length 1. Throws [ArgumentError] if [maxBits] is
+  /// not positive or the used symbols cannot fit in [maxBits] bits.
   static List<int> computeLimitedCodeLengths(
     List<int> frequencies,
     int maxBits,
@@ -192,108 +167,30 @@ class HuffmanTreeBuilder {
     if (maxBits <= 0) {
       throw ArgumentError('maxBits must be positive');
     }
-
-    final n = frequencies.length;
-    final lengths = List<int>.filled(n, 0);
-    final symbols = <int>[];
-
-    for (var i = 0; i < n; i++) {
-      if (frequencies[i] > 0) {
-        symbols.add(i);
-      }
+    final used = frequencies.where((frequency) => frequency > 0).length;
+    if (maxBits < 31 && used > (1 << maxBits)) {
+      throw ArgumentError('$used symbols cannot fit in $maxBits-bit codes');
     }
 
-    if (symbols.isEmpty) {
-      return lengths;
+    var scaled = frequencies;
+    while (true) {
+      final lengths = _codeLengths(scaled);
+      if (lengths.every((length) => length <= maxBits)) return lengths;
+      scaled = [
+        for (final frequency in scaled)
+          frequency > 0 ? (frequency + 1) >> 1 : 0,
+      ];
     }
+  }
 
-    if (symbols.length == 1) {
-      lengths[symbols.first] = 1;
-      return lengths;
-    }
-
-    final tree = build(frequencies);
-    if (tree == null) {
-      return lengths;
-    }
-
-    final codes = generateCodes(tree, n);
-    var maxLen = 0;
+  /// Unconstrained Huffman code lengths for [frequencies].
+  static List<int> _codeLengths(List<int> frequencies) {
+    final lengths = List<int>.filled(frequencies.length, 0);
+    final codes = generateCodes(build(frequencies), frequencies.length);
     for (final entry in codes.entries) {
-      final len = entry.value.length;
-      lengths[entry.key] = len;
-      if (len > maxLen) {
-        maxLen = len;
-      }
+      lengths[entry.key] = entry.value.length;
     }
-
-    if (maxLen <= maxBits) {
-      return lengths;
-    }
-
-    final blCount = List<int>.filled(maxBits + 1, 0);
-    var overflow = 0;
-
-    for (final len in lengths) {
-      if (len == 0) {
-        continue;
-      }
-      if (len > maxBits) {
-        overflow++;
-        blCount[maxBits]++;
-      } else {
-        blCount[len]++;
-      }
-    }
-
-    while (overflow > 0) {
-      var bits = maxBits - 1;
-      while (bits > 0 && blCount[bits] == 0) {
-        bits--;
-      }
-      if (bits == 0) {
-        break;
-      }
-
-      blCount[bits]--;
-      blCount[bits + 1] += 2;
-      blCount[maxBits]--;
-      overflow -= 2;
-    }
-
-    var total = 0;
-    for (var bits = 1; bits <= maxBits; bits++) {
-      total += blCount[bits];
-    }
-    if (total < symbols.length) {
-      blCount[maxBits] += symbols.length - total;
-    } else if (total > symbols.length) {
-      var extra = total - symbols.length;
-      for (var bits = maxBits; bits >= 1 && extra > 0; bits--) {
-        final reduce = extra < blCount[bits] ? extra : blCount[bits];
-        blCount[bits] -= reduce;
-        extra -= reduce;
-      }
-    }
-
-    symbols.sort((a, b) {
-      final freqCompare = frequencies[a].compareTo(frequencies[b]);
-      return freqCompare != 0 ? freqCompare : a.compareTo(b);
-    });
-
-    final limited = List<int>.filled(n, 0);
-    var symbolIndex = 0;
-    for (var bits = maxBits; bits >= 1; bits--) {
-      final count = blCount[bits];
-      for (var i = 0; i < count; i++) {
-        if (symbolIndex >= symbols.length) {
-          break;
-        }
-        limited[symbols[symbolIndex++]] = bits;
-      }
-    }
-
-    return limited;
+    return lengths;
   }
 }
 

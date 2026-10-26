@@ -8,7 +8,7 @@ dependencies - works on all Dart platforms.
 - **LZ4 Compression**: Fast compression/decompression with LZ4 Frame format
   - Block-based compression with configurable block sizes (64KB, 256KB, 1MB, 4MB)
   - Optional content checksums using XXH32
-  - High-compression (HC) mode with levels 1-9
+  - Compression levels 1-9: level 9 uses high-compression (HC) mode, levels 1-8 the fast compressor
   - Compatible with command-line `lz4` tool
 
 - **Snappy Compression**: High-speed compression optimized for throughput
@@ -26,7 +26,7 @@ dependencies - works on all Dart platforms.
 - **Zstd Compression**: Zstandard implementation (RFC 8878)
   - Compressed blocks with Huffman/FSE entropy coding
   - Sequence encoding (literal lengths, offsets, match lengths)
-  - Repeat offset optimization
+  - Repeat offsets decoded (the encoder emits absolute offsets)
   - Hash chain match finding with configurable depth
   - Compression levels 1-22
   - Optional XXH64 content checksums
@@ -122,7 +122,7 @@ dart run :libcompress --lz4 -9 --block-size 1M input.txt output.lz4
 - FSE (Finite State Entropy) encoding
 - Huffman-compressed literals
 - Hash chain match finding (depth 4-1024 based on level)
-- Repeat offset tracking for better compression
+- Repeat offsets are decoded; the encoder emits absolute offsets only
 - 128KB maximum block size per spec
 
 ## Testing

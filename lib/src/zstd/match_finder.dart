@@ -171,8 +171,10 @@ class MatchFinder {
     while (candidate >= 0 &&
         pos - candidate < _maxOffset &&
         depth < searchDepth) {
-      // Quick 4-byte check before full match
-      if (candidate + 3 < end &&
+      // Quick 4-byte check before full match. candidate < pos, so bounding pos
+      // keeps both reads inside the live region (pos can be end - 3 when
+      // minMatch is 3).
+      if (pos + 3 < end &&
           ByteUtils.readUint32LE(input, candidate) ==
               ByteUtils.readUint32LE(input, pos)) {
         final len = _matchLength(input, candidate, pos, end);

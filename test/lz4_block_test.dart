@@ -17,7 +17,8 @@ void main() {
       // Larger than the default frame block size: a single raw block must still
       // represent the whole input (the frame format would split into blocks).
       'repetitive 1M': bytes(
-          List.generate(1 << 20, (i) => 'the quick '.codeUnitAt(i % 10))),
+        List.generate(1 << 20, (i) => 'the quick '.codeUnitAt(i % 10)),
+      ),
       'incompressible 2M': pseudoRandom(2 << 20, 0xABCDEF),
     };
 
@@ -32,7 +33,8 @@ void main() {
     test('round-trips with HC mode (level 9)', () {
       final codec = Lz4Codec(level: 9);
       final data = bytes(
-          List.generate(50000, (i) => 'the quick brown '.codeUnitAt(i % 16)));
+        List.generate(50000, (i) => 'the quick brown '.codeUnitAt(i % 16)),
+      );
       final block = codec.compressBlock(data);
       expect(codec.decompressBlock(block), orderedEquals(data));
     });
@@ -41,26 +43,27 @@ void main() {
       final block = Lz4Codec().compressBlock(bytes('hello world'.codeUnits));
       // No LZ4 frame magic (0x184D2204, little-endian) at the start.
       expect(block.length, greaterThanOrEqualTo(4));
-      final notFrame = !(block[0] == 0x04 &&
-          block[1] == 0x22 &&
-          block[2] == 0x4d &&
-          block[3] == 0x18);
+      final notFrame =
+          !(block[0] == 0x04 &&
+              block[1] == 0x22 &&
+              block[2] == 0x4d &&
+              block[3] == 0x18);
       expect(notFrame, isTrue);
     });
 
     test('compresses repetitive data well', () {
-      final data =
-          bytes(List.generate(10000, (i) => 'ab'.codeUnitAt(i % 2)));
+      final data = bytes(List.generate(10000, (i) => 'ab'.codeUnitAt(i % 2)));
       final block = Lz4Codec().compressBlock(data);
       expect(block.length, lessThan(data.length));
     });
 
     test('decompressBlock enforces maxSize', () {
-      final data =
-          bytes(List.generate(10000, (i) => 'ab'.codeUnitAt(i % 2)));
+      final data = bytes(List.generate(10000, (i) => 'ab'.codeUnitAt(i % 2)));
       final block = Lz4Codec().compressBlock(data);
-      expect(() => Lz4Codec().decompressBlock(block, maxSize: 16),
-          throwsA(isA<Object>()));
+      expect(
+        () => Lz4Codec().decompressBlock(block, maxSize: 16),
+        throwsA(isA<Object>()),
+      );
     });
 
     test('empty input yields empty block and empty output', () {

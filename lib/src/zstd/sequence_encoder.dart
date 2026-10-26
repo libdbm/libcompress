@@ -506,10 +506,15 @@ class BitOutputStream {
   final _bytes = GrowableBuffer();
 
   /// Add bits to the stream (LSB accumulation)
+  ///
+  /// Complete bytes are flushed on every add, so the container holds at most
+  /// 7 + 22 bits (the widest field is an offset's extra bits) and stays a
+  /// non-negative 32-bit value; dart2js truncates `<<` results to 32 bits.
   void addBits(final int value, final int bits) {
     if (bits <= 0) return;
     _container |= (value & ((1 << bits) - 1)) << _bitCount;
     _bitCount += bits;
+    flush();
   }
 
   /// Flush complete bytes to output

@@ -1,3 +1,5 @@
+import 'util/output_limit.dart';
+
 /// Base exception class for compression format errors
 ///
 /// This is the common base class for all compression-related format exceptions.
@@ -27,7 +29,7 @@ abstract class CompressionFormatException extends FormatException {
 /// malformed data into a codec-specific [CompressionFormatException] via [wrap]:
 /// `StateError` (e.g. exhausted bit reader), `ArgumentError` (incl. its
 /// subtypes `RangeError`/`IndexError`, e.g. an out-of-window back-reference),
-/// and plain `FormatException`.
+/// plain `FormatException`, and [OutputLimitException] (a size limit was hit).
 ///
 /// Other errors — `TypeError`, `NoSuchMethodError`, `AssertionError`, generic
 /// `Error`, etc. — are NOT caught: they indicate a library bug (corrupted
@@ -46,6 +48,8 @@ T guardFormat<T>(
   } on ArgumentError catch (e) {
     throw wrap(e.message?.toString() ?? e.toString());
   } on StateError catch (e) {
+    throw wrap(e.message);
+  } on OutputLimitException catch (e) {
     throw wrap(e.message);
   }
 }

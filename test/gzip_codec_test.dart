@@ -3,6 +3,10 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:libcompress/libcompress.dart';
+import 'package:libcompress/src/gzip/deflate_common.dart';
+import 'package:libcompress/src/gzip/deflate_decoder.dart';
+import 'package:libcompress/src/gzip/deflate_encoder.dart';
+import 'package:libcompress/src/util/bit_stream.dart';
 import 'package:test/test.dart';
 
 import 'test_utils.dart';
@@ -286,6 +290,30 @@ void main() {
       expect(restored, isEmpty);
     });
 
+    test('any chunking decodes like the block decoder', () async {
+      // Native-gzip fixtures plus our own output at each strategy, fed in
+      // chunk sizes that split symbols, block headers and trailers.
+      final members = <String, Uint8List>{
+        for (final path in standardFixtures)
+          'gzip CLI $path': readCodecFixture('gzip', '$path.gz'),
+        for (final level in [1, 6, 9])
+          'level $level alice29': GzipCodec(
+            level: level,
+          ).compress(readDataFixture('canterbury/alice29.txt')),
+      };
+      for (final entry in members.entries) {
+        final expected = GzipCodec().decompress(entry.value);
+        for (final chunk in [1, 7, 13, 4093]) {
+          final actual = await decodeChunked(
+            GzipStreamCodec(),
+            entry.value,
+            chunk: chunk,
+          );
+          expect(actual, equals(expected), reason: '${entry.key} @ $chunk');
+        }
+      }
+    });
+
     test('fragmented 1-byte round-trips compressible text', () async {
       const pattern = 'the quick brown fox jumps over the lazy dog. ';
       final data = bytes(
@@ -470,6 +498,27 @@ void main() {
       final out = await decodeChunked(GzipStreamCodec(maxSize: 5000), two);
       expect(out.length, 2000);
     });
+
+    for (final chunk in [65536, 1]) {
+      test('stream maxSize breach reports the limit ($chunk-byte chunks)', () {
+        // A member far larger than the cap must fail as a size-limit error,
+        // not be mistaken for truncated input.
+        final size = chunk == 1 ? 20000 : 300000;
+        final member = GzipCodec().compress(
+          bytes(List.generate(size, (i) => 'limit test '.codeUnitAt(i % 11))),
+        );
+        expect(
+          decodeChunked(GzipStreamCodec(maxSize: 5000), member, chunk: chunk),
+          throwsA(
+            isA<GzipFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('exceeds maximum'),
+            ),
+          ),
+        );
+      });
+    }
   });
 
   group('GZIP CLI compatibility', () {
@@ -887,7 +936,132 @@ void main() {
     });
   });
 
+  group('DEFLATE decoding', () {
+    // Raw DEFLATE body of a GZIP member (10-byte header, 8-byte trailer).
+    Uint8List body(final Uint8List member) =>
+        Uint8List.sublistView(member, 10, member.length - 8);
+
+    final text = bytes(
+      List.generate(3000, (i) => 'deflate edge cases '.codeUnitAt(i % 19)),
+    );
+
+    test('stored blocks of maximum and zero length decode', () {
+      final first = bytes(List.generate(65535, (i) => (i * 7) & 0xFF));
+      final last = bytes(List.generate(1000, (i) => (i * 13) & 0xFF));
+      final writer = BitStreamWriter();
+      void stored(final Uint8List data, {required final bool last}) {
+        writer.writeBits(last ? 1 : 0, 1);
+        writer.writeBits(0, 2);
+        writer.flushToByte();
+        writer.writeBits(data.length, 16);
+        writer.writeBits(~data.length & 0xFFFF, 16);
+        for (final byte in data) {
+          writer.writeBits(byte, 8);
+        }
+      }
+
+      stored(first, last: false);
+      stored(Uint8List(0), last: false);
+      stored(last, last: true);
+      expect(
+        DeflateDecoder().decompress(writer.toBytes()),
+        equals([...first, ...last]),
+      );
+    });
+
+    for (final distance in [30, 31]) {
+      test('fixed block rejects unassigned distance code $distance', () {
+        // BFINAL=1, BTYPE=01, literal 'A', length code 257, distance code.
+        // Fixed Huffman codes are written MSB-first, so reverse them.
+        int reverse(final int code, final int length) {
+          var result = 0;
+          for (var i = 0; i < length; i++) {
+            result = (result << 1) | ((code >> i) & 1);
+          }
+          return result;
+        }
+
+        final writer = BitStreamWriter()
+          ..writeBits(1, 1)
+          ..writeBits(1, 2)
+          ..writeBits(reverse(0x30 + 0x41, 8), 8)
+          ..writeBits(reverse(1, 7), 7)
+          ..writeBits(reverse(distance, 5), 5)
+          ..writeBits(0, 16);
+        expect(
+          () => DeflateDecoder().decompress(writer.toBytes()),
+          throwsA(isA<DeflateFormatException>()),
+        );
+      });
+    }
+
+    for (final level in [1, 6]) {
+      test('every truncation fails cleanly (level $level)', () {
+        final deflate = body(GzipCodec(level: level).compress(text));
+        expect(DeflateDecoder().decompress(deflate), equals(text));
+        for (var length = 0; length < deflate.length; length++) {
+          expect(
+            () => DeflateDecoder().decompress(
+              Uint8List.sublistView(deflate, 0, length),
+            ),
+            throwsA(isA<DeflateFormatException>()),
+            reason: 'prefix of $length bytes',
+          );
+        }
+      });
+    }
+  });
+
   group('GZIP format', () {
+    test('dynamic block with a deep Huffman tree stays decodable', () async {
+      // Fibonacci literal frequencies push the unconstrained tree past 15
+      // bits, so the encoder must limit code lengths without over-subscribing
+      // the code space.
+      final frequencies = <int>[1, 1];
+      while (frequencies.length < 26) {
+        frequencies.add(
+          frequencies[frequencies.length - 1] +
+              frequencies[frequencies.length - 2],
+        );
+      }
+      final tokens = <Token>[];
+      final literals = <int>[];
+      for (var symbol = 0; symbol < frequencies.length; symbol++) {
+        for (var i = 0; i < frequencies[symbol]; i++) {
+          tokens.add(LiteralToken(symbol));
+          literals.add(symbol);
+        }
+      }
+      final writer = BitStreamWriter();
+      DeflateEncoder().writeDynamicBlock(writer, tokens, isFinal: true);
+      final deflate = writer.toBytes();
+      expect(DeflateDecoder().decompress(deflate), equals(literals));
+
+      if (!await cliAvailableCached('gzip')) return;
+      final original = bytes(literals);
+      final crc = Crc32.hash(original);
+      final member = bytes([
+        0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, //
+        ...deflate,
+        crc & 0xFF, (crc >> 8) & 0xFF, (crc >> 16) & 0xFF, crc >> 24, //
+        original.length & 0xFF, (original.length >> 8) & 0xFF,
+        (original.length >> 16) & 0xFF, original.length >> 24,
+      ]);
+      final path = '/tmp/libcompress_gzip_deep_tree.gz';
+      try {
+        await File(path).writeAsBytes(member);
+        final result = await Process.run('gzip', [
+          '-d',
+          '-c',
+          path,
+        ], stdoutEncoding: null);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        expect(result.stdout as List<int>, equals(original));
+      } finally {
+        await cleanup([path]);
+      }
+    });
+
     test('header has correct magic and method', () {
       final compressed = GzipCodec().compress(
         bytes('Hello, GZIP world!'.codeUnits),

@@ -1,4 +1,7 @@
 import 'dart:typed_data';
+import 'package:libcompress/src/gzip/deflate_common.dart';
+import 'package:libcompress/src/gzip/deflate_reader.dart';
+import 'package:libcompress/src/gzip/huffman_tables.dart';
 import 'package:libcompress/src/util/bit_stream.dart';
 import 'package:test/test.dart';
 
@@ -25,13 +28,15 @@ void main() {
       }
 
       final Uint8List bytes = writer.toBytes();
-      final reader = BitStreamReader(bytes);
+      final reader = DeflateReader(bytes);
 
-      // Read the data back and verify it.
+      // Read the data back and verify it (reads are at most 16 bits).
       for (final item in testData) {
         final value = item[0];
         final bitCount = item[1];
-        final readValue = reader.readBits(bitCount);
+        final readValue = bitCount > 16
+            ? reader.read(16) | (reader.read(bitCount - 16) << 16)
+            : reader.read(bitCount);
         expect(
           readValue,
           equals(value),
@@ -47,8 +52,8 @@ void main() {
       final bytes = writer.toBytes();
       expect(bytes, equals(Uint8List.fromList([0xAB])));
 
-      final reader = BitStreamReader(bytes);
-      expect(reader.readBits(8), equals(0xAB));
+      final reader = DeflateReader(bytes);
+      expect(reader.read(8), equals(0xAB));
     });
 
     test('write and read across byte boundaries', () {
@@ -63,73 +68,58 @@ void main() {
       // Second byte: upper 4 bits of 0xA5 -> 1010 -> 0x0A
       expect(bytes, equals(Uint8List.fromList([0x5F, 0x0A])));
 
-      final reader = BitStreamReader(bytes);
-      expect(reader.readBits(4), equals(0xF));
-      expect(reader.readBits(8), equals(0xA5));
+      final reader = DeflateReader(bytes);
+      expect(reader.read(4), equals(0xF));
+      expect(reader.read(8), equals(0xA5));
     });
   });
 
-  group('BitStreamReader position and seek', () {
-    test('position reports byte and bit offsets', () {
-      final reader = BitStreamReader(Uint8List.fromList([0xAB, 0xCD]));
-      expect(reader.position.byte, equals(0));
-      expect(reader.position.bit, equals(0));
-      reader.readBits(3);
-      expect(reader.position.byte, equals(0));
-      expect(reader.position.bit, equals(3));
-      reader.readBits(8); // crosses into next byte
-      expect(reader.position.byte, equals(1));
-      expect(reader.position.bit, equals(3));
+  group('DeflateReader', () {
+    test('rewind restores a checkpoint, including a bit offset', () {
+      final reader = DeflateReader(Uint8List.fromList([0x5F, 0x0A, 0xC3]));
+      expect(reader.read(3), 0x7);
+      final mark = reader.consumed;
+      expect(mark, 3);
+      final first = reader.read(9);
+      reader.read(5);
+      reader.rewind(mark);
+      expect(reader.read(9), first);
     });
 
-    test('seek restores a captured position', () {
-      final reader = BitStreamReader(Uint8List.fromList([0x5F, 0x0A, 0xC3]));
-      reader.readBits(4);
-      final mark = reader.position;
-      final expected = reader.readBits(8);
-      reader.seek(mark);
-      expect(reader.readBits(8), equals(expected));
+    test('starts at a byte and bit offset within a larger buffer', () {
+      final data = Uint8List.fromList([0xFF, 0x5F, 0x0A]);
+      final reader = DeflateReader(data, start: 1, bit: 4);
+      expect(reader.read(8), 0xA5);
+      expect(reader.consumed, 12);
     });
 
-    test('seek invalidates the peek-cache', () {
-      final reader = BitStreamReader(Uint8List.fromList([0xFF, 0x00]));
-      final mark = reader.position;
-      reader.readBits(4, reuseLast: false); // populate cache
-      reader.seek(mark);
-      // After seek, a reuseLast read must reflect the real stream, not stale bits.
-      expect(reader.readBits(4, reuseLast: true), equals(0xF));
+    test('running out is a format error for complete input', () {
+      final reader = DeflateReader(Uint8List.fromList([0xAB]));
+      reader.read(4);
+      expect(() => reader.read(8), throwsA(isA<DeflateFormatException>()));
     });
 
-    test('seek out of range throws', () {
-      final reader = BitStreamReader(Uint8List.fromList([0x01, 0x02]));
-      expect(() => reader.seek(const BitPosition(3, 0)), throwsArgumentError);
-      expect(() => reader.seek(const BitPosition(2, 1)), throwsArgumentError);
-      expect(() => reader.seek(const BitPosition(0, 8)), throwsArgumentError);
-    });
-  });
-
-  group('BitStreamReader window', () {
-    test('reads only within [start, end) with relative positions', () {
-      final data = Uint8List.fromList([0xFF, 0xAB, 0xCD, 0xFF]);
-      final reader = BitStreamReader(data, start: 1, end: 3);
-      expect(reader.position.byte, equals(0));
-      expect(reader.readBits(8), equals(0xAB));
-      expect(reader.readBits(8), equals(0xCD));
-      expect(reader.isEndOfStream, isTrue);
+    test('running out signals more input for partial input', () {
+      final reader = DeflateReader(Uint8List.fromList([0xAB]), partial: true);
+      reader.read(4);
+      expect(() => reader.read(8), throwsStateError);
     });
 
-    test('reading past the window end throws', () {
-      final data = Uint8List.fromList([0xAB, 0xCD]);
-      final reader = BitStreamReader(data, start: 0, end: 1);
-      expect(reader.readBits(8), equals(0xAB));
-      expect(() => reader.readBits(1), throwsStateError);
+    test('a code split across the available input waits for more', () {
+      // Literal 0xFF has the 9-bit fixed code 111111111; give only 8 bits.
+      final reader = DeflateReader(Uint8List.fromList([0xFF]), partial: true);
+      expect(() => reader.decode(fixedLiteralDecoder), throwsStateError);
+      final whole = DeflateReader(Uint8List.fromList([0xFF, 0x01]));
+      expect(whole.decode(fixedLiteralDecoder), 0xFF);
     });
 
-    test('reads a window over a plain List<int> without copying source', () {
-      final List<int> data = [0x11, 0x5F, 0x0A, 0x22];
-      final reader = BitStreamReader(data, start: 1, end: 3);
-      expect(reader.readBits(4), equals(0xF));
-      expect(reader.readBits(8), equals(0xA5));
+    test('take returns aligned bytes and rejects overruns', () {
+      final reader = DeflateReader(Uint8List.fromList([1, 2, 3, 4]));
+      reader.read(3);
+      reader.align();
+      expect(reader.take(2), [2, 3]);
+      expect(reader.available, 1);
+      expect(() => reader.take(2), throwsA(isA<DeflateFormatException>()));
     });
   });
 }

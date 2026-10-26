@@ -21,11 +21,12 @@
 ///
 /// ## Available Codecs
 ///
-/// - **LZ4**: Fast compression with good ratios. Supports levels 1-9 (HC mode).
+/// - **LZ4**: Fast compression with good ratios. Supports levels 1-9 (level 9
+///   uses HC mode).
 /// - **Snappy**: Very fast compression. Supports raw block and framing formats.
 /// - **GZIP**: Full DEFLATE implementation with GZIP framing (RFC 1952).
-/// - **Zstd**: Full Zstandard support (RFC 8878) including compressed blocks
-///   with Huffman/FSE encoding, sequence encoding, and repeat offsets.
+/// - **Zstd**: Zstandard (RFC 8878) without dictionaries, including compressed
+///   blocks with Huffman/FSE encoding and sequence encoding.
 ///
 /// All codecs are CLI-compatible with their respective command-line tools
 /// (lz4, snzip, gzip, zstd).

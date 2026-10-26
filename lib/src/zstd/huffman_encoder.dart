@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import '../util/huffman.dart';
+
 /// Huffman encoder for Zstd literal compression
 ///
 /// Uses backward bitstream encoding as per RFC 8878:
@@ -11,6 +13,9 @@ import 'dart:typed_data';
 /// symbols are assigned codes in symbol-value order within each bit-length group.
 class HuffmanEncoder {
   static const int maxTableLog = 12;
+
+  /// Longest permitted literal code (RFC 8878 Section 4.2.1).
+  static const int maxCodeLength = 11;
   static const int minTableLog = 5;
   static const int maxSymbol = 255;
 
@@ -54,93 +59,31 @@ class HuffmanEncoder {
       return;
     }
 
-    // Build Huffman tree and get bit lengths
-    final numBits = _buildTree(counts, maxSym);
+    // Length-limited Huffman lengths; always a complete prefix code.
+    final lengths = HuffmanTreeBuilder.computeLimitedCodeLengths(
+      counts.sublist(0, maxSym + 1),
+      maxCodeLength,
+    );
 
-    // Limit depth and get weights
-    _limitDepth(numBits, maxSym, maxTableLog);
-
-    // Find max bits (to calculate weights)
     _maxBits = 1;
-    for (var i = 0; i <= maxSym; i++) {
-      if (numBits[i] > _maxBits) _maxBits = numBits[i];
+    for (final length in lengths) {
+      if (length > _maxBits) _maxBits = length;
     }
 
-    // Calculate weights (weight = maxBits + 1 - numBits)
+    // Weight = maxBits + 1 - length (0 for unused symbols).
     final weights = List.filled(maxSym + 1, 0);
     for (var i = 0; i <= maxSym; i++) {
-      if (numBits[i] > 0) {
-        weights[i] = _maxBits + 1 - numBits[i];
+      if (lengths[i] > 0) {
+        weights[i] = _maxBits + 1 - lengths[i];
       }
     }
 
-    // Calculate tableLog from weights (same as decoder)
-    var total = 0;
-    for (var i = 0; i <= maxSym; i++) {
-      if (weights[i] > 0) {
-        total += (1 << weights[i]) >> 1;
-      }
-    }
-    _tableLog = _highestBit(total) + 1;
+    // For a complete code the weights, including the last symbol's, sum to
+    // exactly 2^maxBits, so the decoder's table log equals maxBits.
+    _tableLog = _maxBits;
 
     // Generate codes to match decoder's table building
     _generateCodesFromWeights(weights, maxSym);
-  }
-
-  /// Build Huffman tree and return bit lengths for each symbol
-  List<int> _buildTree(final List<int> counts, final int maxSym) {
-    // Create sorted list of (count, symbol) pairs
-    final symbols = <_Symbol>[];
-    for (var i = 0; i <= maxSym; i++) {
-      if (counts[i] > 0) {
-        symbols.add(_Symbol(i, counts[i]));
-      }
-    }
-    symbols.sort((a, b) => a.count.compareTo(b.count));
-
-    // Build tree using classic Huffman algorithm
-    final nodes = <_Node>[];
-    for (final sym in symbols) {
-      nodes.add(_Node.leaf(sym.symbol, sym.count));
-    }
-
-    while (nodes.length > 1) {
-      nodes.sort((a, b) => a.count.compareTo(b.count));
-      final left = nodes.removeAt(0);
-      final right = nodes.removeAt(0);
-      nodes.add(_Node.internal(left, right));
-    }
-
-    // Extract bit lengths
-    final numBits = List.filled(maxSym + 1, 0);
-    if (nodes.isNotEmpty) {
-      _assignDepths(nodes[0], 0, numBits);
-    }
-
-    return numBits;
-  }
-
-  void _assignDepths(final _Node node, final int depth, final List<int> bits) {
-    if (node.symbol >= 0) {
-      bits[node.symbol] = depth > 0 ? depth : 1;
-    } else {
-      _assignDepths(node.left!, depth + 1, bits);
-      _assignDepths(node.right!, depth + 1, bits);
-    }
-  }
-
-  /// Limit code lengths to maxDepth
-  void _limitDepth(final List<int> bits, final int maxSym, final int maxDepth) {
-    for (var i = 0; i <= maxSym; i++) {
-      if (bits[i] > maxDepth) {
-        bits[i] = maxDepth;
-      }
-    }
-  }
-
-  static int _highestBit(final int v) {
-    if (v == 0) return 0;
-    return v.bitLength - 1;
   }
 
   /// Generate codes that match the decoder's table building algorithm
@@ -323,34 +266,17 @@ class HuffmanEncoder {
   }
 }
 
-/// Helper class for building Huffman tree
-class _Symbol {
-  final int symbol;
-  final int count;
-  _Symbol(this.symbol, this.count);
-}
-
-/// Node in Huffman tree
-class _Node {
-  final int symbol; // -1 for internal nodes
-  final int count;
-  final _Node? left;
-  final _Node? right;
-
-  _Node.leaf(this.symbol, this.count) : left = null, right = null;
-
-  _Node.internal(_Node this.left, _Node this.right)
-    : symbol = -1,
-      count = left.count + right.count;
-}
-
 /// Forward bitstream writer (LSB-first accumulation, like Java BitOutputStream)
 ///
 /// Writes bits LSB-first into a container, flushing complete bytes forward.
 /// The final stream includes a sentinel bit for the decoder.
+///
+/// Complete bytes are written on every [addBits], so the container never holds
+/// more than 7 + 11 bits (codes are at most 11 bits) and stays a non-negative
+/// 32-bit value on both the VM and dart2js.
 class _BitWriter {
   final Uint8List _buffer;
-  BigInt _container = BigInt.zero;
+  int _container = 0;
   int _bitCount = 0;
   int _pos = 0;
 
@@ -358,18 +284,17 @@ class _BitWriter {
 
   void addBits(final int value, final int bits) {
     if (bits <= 0) return;
-    final mask = (BigInt.one << bits) - BigInt.one;
-    _container |= (BigInt.from(value) & mask) << _bitCount;
+    _container |= (value & ((1 << bits) - 1)) << _bitCount;
     _bitCount += bits;
+    flush();
   }
 
   void flush() {
-    final bytes = _bitCount >> 3;
-    for (var i = 0; i < bytes && _pos < _buffer.length; i++) {
-      _buffer[_pos++] = (_container & BigInt.from(0xFF)).toInt();
+    while (_bitCount >= 8) {
+      if (_pos < _buffer.length) _buffer[_pos++] = _container & 0xFF;
       _container >>= 8;
+      _bitCount -= 8;
     }
-    _bitCount &= 7;
   }
 
   Uint8List? close() {
@@ -379,7 +304,7 @@ class _BitWriter {
 
     // Write any remaining bits
     if (_bitCount > 0 && _pos < _buffer.length) {
-      _buffer[_pos++] = (_container & BigInt.from(0xFF)).toInt();
+      _buffer[_pos++] = _container & 0xFF;
     }
 
     if (_pos == 0) return null;
