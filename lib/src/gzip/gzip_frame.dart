@@ -1,37 +1,13 @@
 import 'dart:typed_data';
 import 'dart:convert';
+import 'dart:math' as math;
 import '../exceptions.dart';
 import '../util/crc32.dart';
-import '../util/output_limit.dart';
 import 'deflate_encoder.dart';
 import 'deflate_decoder.dart';
 
 // Re-export exception from centralized location
 export '../exceptions.dart' show GzipFormatException;
-
-/// Runs [body] under the GZIP error contract: any DEFLATE (or other)
-/// [CompressionFormatException], or a `StateError`/`RangeError` from malformed
-/// input, surfaces as a [GzipFormatException] (message preserved), so callers
-/// catching the codec-specific exception don't miss DEFLATE-level failures.
-T gzipBoundary<T>(T Function() body) {
-  try {
-    return body();
-  } on GzipFormatException {
-    rethrow;
-  } on CompressionFormatException catch (e) {
-    // DEFLATE-level (or other) format errors surface under the GZIP contract.
-    throw GzipFormatException(e.message);
-  } on FormatException catch (e) {
-    throw GzipFormatException(e.message.toString());
-  } on ArgumentError catch (e) {
-    throw GzipFormatException(e.message?.toString() ?? e.toString());
-  } on StateError catch (e) {
-    throw GzipFormatException(e.message);
-  } on OutputLimitException catch (e) {
-    throw GzipFormatException(e.message);
-  }
-  // Other errors (library bugs) propagate unchanged — see [guardFormat].
-}
 
 /// GZIP file format implementation (RFC 1952)
 ///
@@ -45,9 +21,6 @@ class GzipFrame {
 
   /// Compression method (8 = DEFLATE)
   static const int cmDeflate = 8;
-
-  /// Flag: file is probably ASCII text
-  static const int ftext = 0x01;
 
   /// Flag: CRC16 present for header
   static const int fhcrc = 0x02;
@@ -64,93 +37,149 @@ class GzipFrame {
   /// Operating system: Unix
   static const int osUnix = 3;
 
-  /// Operating system: unknown
-  static const int osUnknown = 255;
-
   /// Compresses data with GZIP framing
   ///
   /// Returns complete GZIP file including header, compressed data, and trailer.
   static Uint8List compress(
-    Uint8List data, {
-    int level = 6,
-    String? filename,
-    String? comment,
-    int? modificationTime,
+    final Uint8List data, {
+    required final int mtime,
+    final int level = 6,
+    final String? filename,
+    final String? comment,
   }) {
-    final output = BytesBuilder(copy: false);
+    return (BytesBuilder(copy: false)
+          ..add(
+            headerBytes(
+              level: level,
+              mtime: mtime,
+              filename: filename,
+              comment: comment,
+            ),
+          )
+          ..add(DeflateEncoder(level: level).compress(data))
+          ..add(trailerBytes(Crc32.hash(data), data.length)))
+        .takeBytes();
+  }
 
-    // Build header
-    final flags = _buildFlags(filename: filename, comment: comment);
-    final mtime =
-        modificationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
-
-    // Write header
-    output.addByte(id1);
-    output.addByte(id2);
-    output.addByte(cmDeflate);
-    output.addByte(flags);
-
-    // Modification time (32-bit, little-endian)
-    output.addByte(mtime & 0xFF);
-    output.addByte((mtime >> 8) & 0xFF);
-    output.addByte((mtime >> 16) & 0xFF);
-    output.addByte((mtime >> 24) & 0xFF);
-
-    // Extra flags (compression level indicator)
+  /// A member header: magic, CM, FLG, MTIME, XFL (from [level]) and OS, then
+  /// the NUL-terminated [filename] and [comment] when given.
+  static Uint8List headerBytes({
+    required final int level,
+    required final int mtime,
+    final String? filename,
+    final String? comment,
+  }) {
+    final flags =
+        (filename != null ? fname : 0) | (comment != null ? fcomment : 0);
     final xfl = level >= 9 ? 2 : (level <= 1 ? 4 : 0);
-    output.addByte(xfl);
-
-    // Operating system
-    output.addByte(osUnix);
-
-    // Optional fields
-    if (filename != null) {
-      final bytes = utf8.encode(filename);
-      output.add(bytes);
-      output.addByte(0); // Null terminator
+    final output = BytesBuilder(copy: false)
+      ..add([
+        id1, id2, cmDeflate, flags, //
+        mtime & 0xFF, (mtime >> 8) & 0xFF, (mtime >> 16) & 0xFF,
+        (mtime >> 24) & 0xFF,
+        xfl, osUnix,
+      ]);
+    for (final field in [filename, comment]) {
+      if (field != null) {
+        output
+          ..add(utf8.encode(field))
+          ..addByte(0);
+      }
     }
-
-    if (comment != null) {
-      final bytes = utf8.encode(comment);
-      output.add(bytes);
-      output.addByte(0); // Null terminator
-    }
-
-    // Compress data
-    final encoder = DeflateEncoder(level: level);
-    final compressed = encoder.compress(data);
-    output.add(compressed);
-
-    // Write trailer
-    final crc = Crc32.hash(data);
-    final isize = data.length & 0xFFFFFFFF;
-
-    // CRC32 (32-bit, little-endian)
-    output.addByte(crc & 0xFF);
-    output.addByte((crc >> 8) & 0xFF);
-    output.addByte((crc >> 16) & 0xFF);
-    output.addByte((crc >> 24) & 0xFF);
-
-    // ISIZE (32-bit, little-endian)
-    output.addByte(isize & 0xFF);
-    output.addByte((isize >> 8) & 0xFF);
-    output.addByte((isize >> 16) & 0xFF);
-    output.addByte((isize >> 24) & 0xFF);
-
     return output.takeBytes();
   }
 
-  /// Decompresses GZIP-formatted data
-  ///
-  /// Handles both single-member and concatenated multi-member GZIP files
-  /// as allowed by RFC 1952. Returns the decompressed data from all members
-  /// concatenated together. Validates CRC and size for each member.
-  ///
-  /// [maxSize] limits total output to prevent OOM attacks (null = unlimited).
-  static Uint8List decompress(Uint8List data, {int? maxSize}) =>
-      gzipBoundary(() => _decompress(data, maxSize: maxSize));
+  /// A member trailer: the CRC-32 of the content and its size modulo 2^32,
+  /// both little-endian.
+  static Uint8List trailerBytes(final int crc, final int size) =>
+      Uint8List.fromList([
+        for (var shift = 0; shift < 32; shift += 8) (crc >> shift) & 0xFF,
+        for (var shift = 0; shift < 32; shift += 8) (size >> shift) & 0xFF,
+      ]);
 
-  static Uint8List _decompress(Uint8List data, {int? maxSize}) {
+  /// Parses the member header at `data[offset..end)` for the one-shot and
+  /// incremental decoders. Returns its length, or null when more bytes are
+  /// needed; [scan], when given, carries the FNAME/FCOMMENT search across
+  /// calls so a long field arriving in pieces is scanned once. Throws once the
+  /// bytes present are invalid.
+  static int? header(
+    final Uint8List data,
+    final int offset,
+    final int end, [
+    final GzipHeaderScan? scan,
+  ]) {
+    if (end - offset < 10) return null;
+    if (data[offset] != id1 || data[offset + 1] != id2) {
+      throw GzipFormatException(
+        'Invalid GZIP magic number at position $offset',
+      );
+    }
+    if (data[offset + 2] != cmDeflate) {
+      throw GzipFormatException(
+        'Unsupported compression method: ${data[offset + 2]}',
+      );
+    }
+    final flags = data[offset + 3];
+    if ((flags & 0xE0) != 0) {
+      throw GzipFormatException(
+        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
+      );
+    }
+    var position = offset + 10; // magic, CM, FLG, MTIME, XFL, OS
+
+    if ((flags & fextra) != 0) {
+      if (end < position + 2) return null;
+      final xlen = data[position] | (data[position + 1] << 8);
+      position += 2 + xlen;
+      if (end < position) return null;
+    }
+    // FNAME and FCOMMENT are each NUL-terminated.
+    for (final flag in [fname, fcomment]) {
+      if ((flags & flag) == 0) continue;
+      final name = scan?.name;
+      if (flag == fname && name != null) {
+        position = offset + name;
+        continue;
+      }
+      var index = math.max(position, offset + (scan?.searched ?? 0));
+      while (index < end && data[index] != 0) {
+        index++;
+      }
+      if (index == end) {
+        scan?.searched = end - offset;
+        return null;
+      }
+      position = index + 1;
+      if (flag == fname) scan?.name = position - offset;
+    }
+    if ((flags & fhcrc) != 0) {
+      if (end < position + 2) return null;
+      // CRC16 is the lower 16 bits of CRC32 of header bytes
+      final expected =
+          Crc32.hash(Uint8List.sublistView(data, offset, position)) & 0xFFFF;
+      final actual = data[position] | (data[position + 1] << 8);
+      if (actual != expected) {
+        throw GzipFormatException(
+          'Header CRC mismatch: expected 0x${expected.toRadixString(16)}, '
+          'got 0x${actual.toRadixString(16)}',
+        );
+      }
+      position += 2;
+    }
+    return position - offset;
+  }
+
+  /// Decompresses every member of [data] (RFC 1952 allows concatenated
+  /// members) into one output, checking each member's CRC-32 and ISIZE. The
+  /// output may not exceed [maxSize] in total.
+  static Uint8List decompress(final Uint8List data, {final int? maxSize}) =>
+      guardFormat(
+        () => _decompress(data, maxSize: maxSize),
+        GzipFormatException.new,
+        limit: maxSize,
+      );
+
+  static Uint8List _decompress(final Uint8List data, {final int? maxSize}) {
     if (data.length < 10) {
       throw GzipFormatException('Invalid GZIP header: too short');
     }
@@ -192,101 +221,29 @@ class GzipFrame {
   /// - The decompressed data
   /// - The total byte length of this member (header + compressed + trailer)
   static (Uint8List, int) _decompressMember(
-    Uint8List data,
+    final Uint8List data,
     int offset,
-    int? maxSize,
+    final int? maxSize,
   ) {
     final start = offset;
 
-    // Verify magic numbers
-    if (data[offset++] != id1 || data[offset++] != id2) {
-      throw GzipFormatException('Invalid GZIP magic number at position $start');
+    final length = header(data, offset, data.length);
+    if (length == null) {
+      throw GzipFormatException('Truncated GZIP header at position $start');
     }
-
-    // Check compression method
-    final cm = data[offset++];
-    if (cm != cmDeflate) {
-      throw GzipFormatException('Unsupported compression method: $cm');
-    }
-
-    // Read flags
-    final flags = data[offset++];
-    if ((flags & 0xE0) != 0) {
-      throw GzipFormatException(
-        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
-      );
-    }
-
-    // Skip modification time (4 bytes)
-    offset += 4;
-
-    // Skip extra flags and OS
-    offset += 2;
-
-    // Skip optional fields
-    if ((flags & fextra) != 0) {
-      if (offset + 2 > data.length) {
-        throw GzipFormatException('Invalid FEXTRA field');
-      }
-      final xlen = data[offset] | (data[offset + 1] << 8);
-      offset += 2;
-      if (offset + xlen > data.length) {
-        throw GzipFormatException('Truncated FEXTRA field');
-      }
-      offset += xlen;
-    }
-
-    if ((flags & fname) != 0) {
-      // Skip filename (null-terminated)
-      while (offset < data.length && data[offset] != 0) {
-        offset++;
-      }
-      if (offset >= data.length) {
-        throw GzipFormatException(
-          'Truncated FNAME field: missing NUL terminator',
-        );
-      }
-      offset++; // Skip null terminator
-    }
-
-    if ((flags & fcomment) != 0) {
-      // Skip comment (null-terminated)
-      while (offset < data.length && data[offset] != 0) {
-        offset++;
-      }
-      if (offset >= data.length) {
-        throw GzipFormatException(
-          'Truncated FCOMMENT field: missing NUL terminator',
-        );
-      }
-      offset++; // Skip null terminator
-    }
-
-    if ((flags & fhcrc) != 0) {
-      // Validate header CRC16
-      if (offset + 2 > data.length) {
-        throw GzipFormatException('Truncated FHCRC field');
-      }
-
-      // CRC16 is the lower 16 bits of CRC32 of header bytes
-      final headerCrc = Crc32.hash(Uint8List.sublistView(data, start, offset));
-      final expectedCrc16 = headerCrc & 0xFFFF;
-      final actualCrc16 = data[offset] | (data[offset + 1] << 8);
-
-      if (actualCrc16 != expectedCrc16) {
-        throw GzipFormatException(
-          'Header CRC mismatch: expected 0x${expectedCrc16.toRadixString(16)}, '
-          'got 0x${actualCrc16.toRadixString(16)}',
-        );
-      }
-
-      offset += 2;
-    }
+    offset += length;
 
     // Decompress the DEFLATE stream and get bytes consumed
     final compressedStart = offset;
     final compressedData = Uint8List.sublistView(data, compressedStart);
-    final decoder = DeflateDecoder(maxSize: maxSize);
+    // The last member's ISIZE ends the input: a size hint for the output.
+    final hint = data.length >= 4
+        ? data[data.length - 4] |
+              (data[data.length - 3] << 8) |
+              (data[data.length - 2] << 16) |
+              (data[data.length - 1] << 24)
+        : null;
+    final decoder = DeflateDecoder(maxSize: maxSize, hint: hint);
     final (decompressed, consumed) = decoder.decompressWithPosition(
       compressedData,
     );
@@ -332,12 +289,14 @@ class GzipFrame {
 
     return (decompressed, offset - start);
   }
+}
 
-  /// Builds flags byte from options
-  static int _buildFlags({String? filename, String? comment}) {
-    var flags = 0;
-    if (filename != null) flags |= fname;
-    if (comment != null) flags |= fcomment;
-    return flags;
-  }
+/// How far [GzipFrame.header] got through a member's FNAME and FCOMMENT on
+/// earlier calls, as offsets from the member start.
+class GzipHeaderScan {
+  /// Where FNAME ends (after its NUL), once found.
+  int? name;
+
+  /// Bytes searched for the terminator of the field still open.
+  int searched = 0;
 }

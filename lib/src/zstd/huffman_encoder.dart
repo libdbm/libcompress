@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../util/huffman.dart';
+import '../util/bit_stream.dart';
 
 /// Huffman encoder for Zstd literal compression
 ///
@@ -16,7 +17,6 @@ class HuffmanEncoder {
 
   /// Longest permitted literal code (RFC 8878 Section 4.2.1).
   static const int maxCodeLength = 11;
-  static const int minTableLog = 5;
   static const int maxSymbol = 255;
 
   late List<int> _codes;
@@ -137,7 +137,7 @@ class HuffmanEncoder {
   Uint8List? encodeSingle(final Uint8List literals) {
     if (literals.isEmpty) return Uint8List(0);
 
-    final writer = _BitWriter(literals.length * 2 + 8);
+    final writer = BitStreamWriter();
 
     // Encode in reverse order (last symbol first) per Zstd spec
     // This allows the decoder to read symbols in forward order
@@ -146,16 +146,15 @@ class HuffmanEncoder {
     // Handle remainder first (like Java: switch on inputSize & 3)
     switch (literals.length & 3) {
       case 3:
-        writer.addBits(_codes[literals[n + 2]], _bits[literals[n + 2]]);
+        writer.writeBits(_codes[literals[n + 2]], _bits[literals[n + 2]]);
         continue case2;
       case2:
       case 2:
-        writer.addBits(_codes[literals[n + 1]], _bits[literals[n + 1]]);
+        writer.writeBits(_codes[literals[n + 1]], _bits[literals[n + 1]]);
         continue case1;
       case1:
       case 1:
-        writer.addBits(_codes[literals[n]], _bits[literals[n]]);
-        writer.flush();
+        writer.writeBits(_codes[literals[n]], _bits[literals[n]]);
     }
 
     // Process 4 symbols at a time, in reverse
@@ -172,14 +171,15 @@ class HuffmanEncoder {
         return null;
       }
 
-      writer.addBits(_codes[s3], _bits[s3]);
-      writer.addBits(_codes[s2], _bits[s2]);
-      writer.addBits(_codes[s1], _bits[s1]);
-      writer.addBits(_codes[s0], _bits[s0]);
-      writer.flush();
+      writer.writeBits(_codes[s3], _bits[s3]);
+      writer.writeBits(_codes[s2], _bits[s2]);
+      writer.writeBits(_codes[s1], _bits[s1]);
+      writer.writeBits(_codes[s0], _bits[s0]);
     }
 
-    return writer.close();
+    // Sentinel bit marking the end of the stream, then pad to a byte.
+    writer.writeBits(1, 1);
+    return writer.toBytes();
   }
 
   /// Encode literals using 4 interleaved streams
@@ -263,51 +263,5 @@ class HuffmanEncoder {
     }
 
     return output;
-  }
-}
-
-/// Forward bitstream writer (LSB-first accumulation, like Java BitOutputStream)
-///
-/// Writes bits LSB-first into a container, flushing complete bytes forward.
-/// The final stream includes a sentinel bit for the decoder.
-///
-/// Complete bytes are written on every [addBits], so the container never holds
-/// more than 7 + 11 bits (codes are at most 11 bits) and stays a non-negative
-/// 32-bit value on both the VM and dart2js.
-class _BitWriter {
-  final Uint8List _buffer;
-  int _container = 0;
-  int _bitCount = 0;
-  int _pos = 0;
-
-  _BitWriter(final int size) : _buffer = Uint8List(size);
-
-  void addBits(final int value, final int bits) {
-    if (bits <= 0) return;
-    _container |= (value & ((1 << bits) - 1)) << _bitCount;
-    _bitCount += bits;
-    flush();
-  }
-
-  void flush() {
-    while (_bitCount >= 8) {
-      if (_pos < _buffer.length) _buffer[_pos++] = _container & 0xFF;
-      _container >>= 8;
-      _bitCount -= 8;
-    }
-  }
-
-  Uint8List? close() {
-    // Add sentinel bit (marks end of stream)
-    addBits(1, 1);
-    flush();
-
-    // Write any remaining bits
-    if (_bitCount > 0 && _pos < _buffer.length) {
-      _buffer[_pos++] = _container & 0xFF;
-    }
-
-    if (_pos == 0) return null;
-    return Uint8List.sublistView(_buffer, 0, _pos);
   }
 }

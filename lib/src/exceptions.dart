@@ -25,32 +25,61 @@ abstract class CompressionFormatException extends FormatException {
   const CompressionFormatException(super.message);
 }
 
+/// Thrown when decoding would exceed a configured size limit: the codec's
+/// `maxSize` (cumulative across concatenated frames or members), an expected
+/// `size` passed to `decompress`, or a stream's `maxBufferSize`.
+///
+/// It is a [CompressionFormatException], so existing handlers still catch it;
+/// catch it first to tell a limit breach from corrupt data.
+class LimitException extends CompressionFormatException {
+  /// Creates a limit exception for the configured [limit] in bytes.
+  LimitException(this.limit, [final String? message])
+    : super(message ?? 'Decompressed size exceeds the limit of $limit bytes');
+
+  /// The configured limit, in bytes, that decoding would have exceeded.
+  final int limit;
+
+  @override
+  String toString() => 'LimitException: $message';
+}
+
 /// Runs [body], converting the *input-validation* errors a decoder throws on
 /// malformed data into a codec-specific [CompressionFormatException] via [wrap]:
-/// `StateError` (e.g. exhausted bit reader), `ArgumentError` (incl. its
-/// subtypes `RangeError`/`IndexError`, e.g. an out-of-window back-reference),
-/// plain `FormatException`, and [OutputLimitException] (a size limit was hit).
+/// `StateError` (e.g. exhausted bit reader), `ArgumentError` other than
+/// `RangeError`/`IndexError` (e.g. an out-of-window back-reference), and plain
+/// `FormatException`.
 ///
-/// Other errors — `TypeError`, `NoSuchMethodError`, `AssertionError`, generic
-/// `Error`, etc. — are NOT caught: they indicate a library bug (corrupted
-/// internal state), and masking them as "bad compressed data" would destroy
-/// the signal. They propagate unchanged so callers/observability can see them.
+/// A size-limit breach ([OutputLimitException], or a [LimitException] naming
+/// the budget left) becomes a [LimitException] naming the configured [limit],
+/// when one is given.
+///
+/// Other errors are NOT caught: `RangeError`/`IndexError` (an out-of-bounds
+/// access is a decoder bug, since decoders check input bounds explicitly),
+/// `TypeError`, `NoSuchMethodError`, `AssertionError`, generic `Error`, etc.
+/// Masking them as "bad compressed data" would destroy the signal, so they
+/// propagate unchanged for callers and observability to see.
 T guardFormat<T>(
   final T Function() body,
-  final CompressionFormatException Function(String message) wrap,
-) {
+  final CompressionFormatException Function(String message) wrap, {
+  final int? limit,
+}) {
   try {
     return body();
+  } on LimitException {
+    if (limit == null) rethrow;
+    throw LimitException(limit);
   } on CompressionFormatException {
     rethrow;
   } on FormatException catch (e) {
     throw wrap(e.message.toString());
+  } on RangeError {
+    rethrow;
   } on ArgumentError catch (e) {
     throw wrap(e.message?.toString() ?? e.toString());
   } on StateError catch (e) {
     throw wrap(e.message);
   } on OutputLimitException catch (e) {
-    throw wrap(e.message);
+    throw limit == null ? wrap(e.message) : LimitException(limit);
   }
 }
 
@@ -72,8 +101,9 @@ class GzipFormatException extends CompressionFormatException {
   String toString() => 'GzipFormatException: $message';
 }
 
-/// Exception thrown during DEFLATE compression/decompression
-class DeflateFormatException extends CompressionFormatException {
+/// Exception thrown during DEFLATE compression/decompression. DEFLATE is the
+/// body of a GZIP member, so a DEFLATE error is also a [GzipFormatException].
+class DeflateFormatException extends GzipFormatException {
   /// Creates a DEFLATE format exception with the given [message].
   const DeflateFormatException(super.message);
 
@@ -97,4 +127,14 @@ class SnappyFormatException extends CompressionFormatException {
 
   @override
   String toString() => 'SnappyFormatException: $message';
+}
+
+/// Exception thrown when no-op "compressed" data does not have the expected
+/// length.
+class NoopFormatException extends CompressionFormatException {
+  /// Creates a no-op format exception with the given [message].
+  const NoopFormatException(super.message);
+
+  @override
+  String toString() => 'NoopFormatException: $message';
 }

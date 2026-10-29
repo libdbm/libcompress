@@ -10,15 +10,8 @@ class HuffmanNode implements Comparable<HuffmanNode> {
   bool get isLeaf => left == null && right == null;
 
   @override
-  int compareTo(HuffmanNode other) => frequency.compareTo(other.frequency);
-}
-
-/// Huffman code table entry
-class HuffmanCode {
-  final int code;
-  final int length;
-
-  const HuffmanCode(this.code, this.length);
+  int compareTo(final HuffmanNode other) =>
+      frequency.compareTo(other.frequency);
 }
 
 /// Builds a Huffman tree from symbol frequencies
@@ -26,7 +19,7 @@ class HuffmanTreeBuilder {
   /// Builds a Huffman tree from frequency counts
   ///
   /// Returns the root node of the tree, or null if no symbols exist.
-  static HuffmanNode? build(List<int> frequencies) {
+  static HuffmanNode? build(final List<int> frequencies) {
     final queue = PriorityQueue<HuffmanNode>();
 
     // Create leaf nodes for all symbols with non-zero frequency
@@ -57,94 +50,19 @@ class HuffmanTreeBuilder {
     return queue.first;
   }
 
-  /// Generates Huffman code table from a tree
-  ///
-  /// Returns a map from symbol to (code, length) pairs.
-  static Map<int, HuffmanCode> generateCodes(
-    HuffmanNode? root,
-    int maxSymbols,
+  /// Records each leaf's depth below [node] in [lengths].
+  static void _depths(
+    final HuffmanNode node,
+    final int depth,
+    final List<int> lengths,
   ) {
-    final codes = <int, HuffmanCode>{};
-
-    if (root == null) {
-      return codes;
-    }
-
-    // Handle single-symbol tree (degenerate case)
-    if (root.isLeaf) {
-      codes[root.symbol!] = const HuffmanCode(0, 1);
-      return codes;
-    }
-
-    _generateCodesRecursive(root, 0, 0, codes);
-    return codes;
-  }
-
-  static void _generateCodesRecursive(
-    HuffmanNode node,
-    int code,
-    int length,
-    Map<int, HuffmanCode> codes,
-  ) {
-    if (node.isLeaf) {
-      codes[node.symbol!] = HuffmanCode(code, length);
+    final symbol = node.symbol;
+    if (symbol != null) {
+      lengths[symbol] = depth;
       return;
     }
-
-    if (node.left != null) {
-      _generateCodesRecursive(node.left!, code << 1, length + 1, codes);
-    }
-
-    if (node.right != null) {
-      _generateCodesRecursive(node.right!, (code << 1) | 1, length + 1, codes);
-    }
-  }
-
-  /// Generates canonical Huffman codes from code lengths
-  ///
-  /// Canonical codes have the property that codes of the same length
-  /// are sequential, which makes them easier to transmit and decode.
-  static Map<int, HuffmanCode> generateCanonicalCodes(List<int> codeLengths) {
-    final codes = <int, HuffmanCode>{};
-
-    // Find max code length
-    var maxLength = 0;
-    for (final len in codeLengths) {
-      if (len > maxLength) {
-        maxLength = len;
-      }
-    }
-
-    if (maxLength == 0) {
-      return codes;
-    }
-
-    // Count symbols at each code length
-    final lengthCounts = List<int>.filled(maxLength + 1, 0);
-    for (final len in codeLengths) {
-      if (len > 0) {
-        lengthCounts[len]++;
-      }
-    }
-
-    // Compute starting code for each length
-    final nextCode = List<int>.filled(maxLength + 1, 0);
-    var code = 0;
-    for (var i = 1; i <= maxLength; i++) {
-      code = (code + lengthCounts[i - 1]) << 1;
-      nextCode[i] = code;
-    }
-
-    // Assign codes to symbols
-    for (var symbol = 0; symbol < codeLengths.length; symbol++) {
-      final len = codeLengths[symbol];
-      if (len > 0) {
-        codes[symbol] = HuffmanCode(nextCode[len], len);
-        nextCode[len]++;
-      }
-    }
-
-    return codes;
+    _depths(node.left!, depth + 1, lengths);
+    _depths(node.right!, depth + 1, lengths);
   }
 
   /// Computes Huffman code lengths limited to [maxBits].
@@ -161,13 +79,13 @@ class HuffmanTreeBuilder {
   /// single used symbol gets length 1. Throws [ArgumentError] if [maxBits] is
   /// not positive or the used symbols cannot fit in [maxBits] bits.
   static List<int> computeLimitedCodeLengths(
-    List<int> frequencies,
-    int maxBits,
+    final List<int> frequencies,
+    final int maxBits,
   ) {
     if (maxBits <= 0) {
       throw ArgumentError('maxBits must be positive');
     }
-    final used = frequencies.where((frequency) => frequency > 0).length;
+    final used = frequencies.where((final frequency) => frequency > 0).length;
     if (maxBits < 31 && used > (1 << maxBits)) {
       throw ArgumentError('$used symbols cannot fit in $maxBits-bit codes');
     }
@@ -175,7 +93,7 @@ class HuffmanTreeBuilder {
     var scaled = frequencies;
     while (true) {
       final lengths = _codeLengths(scaled);
-      if (lengths.every((length) => length <= maxBits)) return lengths;
+      if (lengths.every((final length) => length <= maxBits)) return lengths;
       scaled = [
         for (final frequency in scaled)
           frequency > 0 ? (frequency + 1) >> 1 : 0,
@@ -184,12 +102,16 @@ class HuffmanTreeBuilder {
   }
 
   /// Unconstrained Huffman code lengths for [frequencies].
-  static List<int> _codeLengths(List<int> frequencies) {
+  static List<int> _codeLengths(final List<int> frequencies) {
     final lengths = List<int>.filled(frequencies.length, 0);
-    final codes = generateCodes(build(frequencies), frequencies.length);
-    for (final entry in codes.entries) {
-      lengths[entry.key] = entry.value.length;
+    final root = build(frequencies);
+    if (root == null) return lengths;
+    // A single used symbol still needs a 1-bit code.
+    if (root.isLeaf) {
+      lengths[root.symbol!] = 1;
+      return lengths;
     }
+    _depths(root, 0, lengths);
     return lengths;
   }
 }
@@ -198,7 +120,7 @@ class HuffmanTreeBuilder {
 class PriorityQueue<T extends Comparable> {
   final List<T> _heap = [];
 
-  void add(T item) {
+  void add(final T item) {
     _heap.add(item);
     _bubbleUp(_heap.length - 1);
   }
@@ -259,7 +181,7 @@ class PriorityQueue<T extends Comparable> {
     }
   }
 
-  void _swap(int i, int j) {
+  void _swap(final int i, final int j) {
     final temp = _heap[i];
     _heap[i] = _heap[j];
     _heap[j] = temp;

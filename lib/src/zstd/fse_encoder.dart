@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'dart:math' as math;
+import '../util/bit_stream.dart';
 
 /// FSE encoder state for a symbol
 class FseState {
@@ -65,39 +66,6 @@ class SymbolStats {
     final size = 1 << log;
     return _entropy(norm, size);
   }
-}
-
-/// Forward bit writer for FSE table header encoding
-///
-/// Writes bits LSB-first to match the decoder's forward bit reader.
-class ForwardBitWriter {
-  int _buffer = 0;
-  int _bits = 0;
-  final _bytes = <int>[];
-
-  void write(final int value, final int count) {
-    if (count <= 0) return;
-    _buffer |= (value & ((1 << count) - 1)) << _bits;
-    _bits += count;
-    _flush();
-  }
-
-  void _flush() {
-    while (_bits >= 8) {
-      _bytes.add(_buffer & 0xFF);
-      _buffer >>= 8;
-      _bits -= 8;
-    }
-  }
-
-  Uint8List finish() {
-    if (_bits > 0) {
-      _bytes.add(_buffer & ((1 << _bits) - 1));
-    }
-    return Uint8List.fromList(_bytes);
-  }
-
-  int get size => _bytes.length + ((_bits + 7) >> 3);
 }
 
 /// Finite State Entropy (FSE) encoder for Zstandard
@@ -180,34 +148,20 @@ class FseEncoder {
     final norm = List<int>.filled(maxSym + 1, 0);
     var assigned = 0;
 
-    // Assign proportional counts, minimum 1 for non-zero frequencies
-    // Use -1 for symbols with very low frequency (probability < 1)
+    // Proportional counts, rounded up, so every used symbol gets at least 1
+    // and together they cover at least the table.
     for (var i = 0; i <= maxSym; i++) {
       final f = i < freq.length ? freq[i] : 0;
       if (f > 0) {
-        var count = (f * size + total - 1) ~/ total; // Round up
-        if (count == 0) {
-          count = -1; // Mark as "less than 1" per RFC
-          assigned += 1;
-        } else {
-          count = math.max(1, count);
-          assigned += count;
-        }
+        final count = (f * size + total - 1) ~/ total;
+        assigned += count;
         norm[i] = count;
       }
     }
 
-    // Adjust to match exact table size
+    // Take back the excess from rounding up.
     var diff = size - assigned;
-    if (diff > 0) {
-      // Add to most frequent symbols
-      for (var i = 0; i <= maxSym && diff > 0; i++) {
-        if (norm[i] > 0) {
-          norm[i]++;
-          diff--;
-        }
-      }
-    } else if (diff < 0) {
+    if (diff < 0) {
       // Remove from least important (but keep at least 1)
       for (var i = maxSym; i >= 0 && diff < 0; i--) {
         if (norm[i] > 1) {
@@ -230,21 +184,21 @@ class FseEncoder {
     final cached = _header;
     if (cached != null) return cached;
 
-    final writer = ForwardBitWriter();
+    final writer = BitStreamWriter();
 
     // Write accuracy log (tableLog - 5)
-    writer.write(tableLog - 5, 4);
+    writer.writeBits(tableLog - 5, 4);
 
     final size = 1 << tableLog;
     var remaining = size + 1;
     var threshold = size;
-    var nbBits = tableLog + 1;
+    var width = tableLog + 1;
     var symbol = 0;
-    var prevZero = false;
+    var previousZero = false;
 
     while (symbol <= maxSymbol && remaining > 1) {
       // Zero run encoding: only after a symbol with count=0
-      if (prevZero) {
+      if (previousZero) {
         // Count consecutive zeros starting at current symbol
         var zeros = 0;
         while (symbol + zeros <= maxSymbol && normalized[symbol + zeros] == 0) {
@@ -254,13 +208,13 @@ class FseEncoder {
         // Encode zero run: 2-bit codes, 3=continue, 0/1/2=terminal
         var z = zeros;
         while (z >= 3) {
-          writer.write(3, 2);
+          writer.writeBits(3, 2);
           z -= 3;
         }
-        writer.write(z, 2);
+        writer.writeBits(z, 2);
 
         symbol += zeros;
-        prevZero = false;
+        previousZero = false;
         continue;
       }
 
@@ -274,16 +228,16 @@ class FseEncoder {
 
       // Encode value using variable-length code
       if (value < max) {
-        // Short form: value fits in nbBits-1 bits
-        writer.write(value, nbBits - 1);
+        // Short form: value fits in width-1 bits
+        writer.writeBits(value, width - 1);
       } else if (value < threshold) {
-        // Medium form: need full nbBits, but value < threshold
-        // Decoder peeks nbBits-1, sees >= max, reads full nbBits
-        writer.write(value, nbBits);
+        // Medium form: need full width, but value < threshold
+        // Decoder peeks width-1, sees >= max, reads full width
+        writer.writeBits(value, width);
       } else {
         // Long form: value >= threshold, add max before writing
-        // Decoder reads nbBits, sees >= threshold, subtracts max
-        writer.write(value + max, nbBits);
+        // Decoder reads width, sees >= threshold, subtracts max
+        writer.writeBits(value + max, width);
       }
 
       // Update remaining
@@ -294,25 +248,18 @@ class FseEncoder {
       }
 
       // Track if this was a zero for next iteration
-      prevZero = count == 0;
+      previousZero = count == 0;
 
       // Update threshold AFTER remaining update (matches decoder)
       while (remaining < threshold && remaining > 1) {
-        nbBits--;
+        width--;
         threshold >>= 1;
       }
 
       symbol++;
     }
 
-    return _header = writer.finish();
-  }
-
-  /// Check if encoding will be smaller than predefined
-  bool isBeneficial(final int predefinedHeaderSize) {
-    // Estimate encoded size
-    final header = encodeHeader();
-    return header.length < predefinedHeaderSize;
+    return _header = writer.toBytes();
   }
 }
 

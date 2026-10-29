@@ -25,9 +25,12 @@ Map<String, Uint8List> standardEdgeCases() => {
   'single byte': bytes([0x42]),
   'all zeros': Uint8List(4096),
   'incompressible': pseudoRandom(4096),
-  'all byte values': bytes(List.generate(256, (i) => i)),
+  'all byte values': bytes(List.generate(256, (final i) => i)),
   'large repetitive': bytes(
-    List.generate(200000, (i) => 'the quick brown fox '.codeUnitAt(i % 20)),
+    List.generate(
+      200000,
+      (final i) => 'the quick brown fox '.codeUnitAt(i % 20),
+    ),
   ),
 };
 
@@ -55,7 +58,7 @@ Future<void> expectStreamRoundTrip(
   final CompressionStreamCodec codec,
   final List<Uint8List> chunks,
 ) async {
-  final original = bytes(chunks.expand((c) => c));
+  final original = bytes(chunks.expand((final c) => c));
   final compressed = await collect(codec.compress(Stream.fromIterable(chunks)));
   final restored = await collect(codec.decompress(Stream.value(compressed)));
   expect(restored, orderedEquals(original), reason: 'streaming round-trip');
@@ -145,4 +148,21 @@ Future<void> cleanup(final List<String> paths) async {
       // Ignore errors on cleanup
     }
   }
+}
+
+/// Empty compressed input is an error for every codec except noop, in block
+/// and stream mode alike, whether the stream has no chunks or one empty chunk.
+Future<void> expectEmptyRejected<T extends CompressionFormatException>(
+  final CompressionCodec block,
+  final CompressionStreamCodec stream,
+) async {
+  expect(() => block.decompress(Uint8List(0)), throwsA(isA<T>()));
+  await expectLater(
+    collect(stream.decompress(const Stream.empty())),
+    throwsA(isA<T>()),
+  );
+  await expectLater(
+    collect(stream.decompress(Stream.value(Uint8List(0)))),
+    throwsA(isA<T>()),
+  );
 }

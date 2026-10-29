@@ -30,7 +30,9 @@ void main() {
 
     test('should hash long data correctly', () {
       // Create data longer than 16 bytes to test the main processing loop
-      final data = Uint8List.fromList(List.generate(100, (i) => i & 0xFF));
+      final data = Uint8List.fromList(
+        List.generate(100, (final i) => i & 0xFF),
+      );
       final result = XXH32.hash(data, 0);
       expect(result, isA<int>());
       expect(result, greaterThan(0));
@@ -82,7 +84,9 @@ void main() {
     test('should handle edge-case lengths', () {
       // Lengths around the 16-byte main-loop threshold and the 4-byte word.
       for (final length in [0, 1, 4, 15, 16, 17, 32, 64, 100]) {
-        final data = Uint8List.fromList(List.generate(length, (i) => i & 0xFF));
+        final data = Uint8List.fromList(
+          List.generate(length, (final i) => i & 0xFF),
+        );
         expect(
           XXH32.hash(data, 0),
           isA<int>(),
@@ -107,7 +111,7 @@ void main() {
 
     test('should handle very large inputs', () {
       final largeData = Uint8List.fromList(
-        List.generate(10000, (i) => i & 0xFF),
+        List.generate(10000, (final i) => i & 0xFF),
       );
       expect(XXH32.hash(largeData, 0), isA<int>());
     });

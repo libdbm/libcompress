@@ -1,24 +1,22 @@
 import 'dart:typed_data';
 
 import '../compression_options.dart';
+import '../exceptions.dart';
 import '../compression_stream_codec.dart';
 import '../util/byte_pending.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/output_limit.dart';
 import '../util/stream_compressor.dart';
-import 'snappy_decoder.dart';
 import 'snappy_stream_decoder.dart';
 import 'snappy_stream_encoder.dart';
-
-/// Default maximum buffer size for stream decoders (64MB)
-const int snappyDefaultMaxBufferSize = 64 * 1024 * 1024;
+import 'snappy_codec.dart';
 
 /// Snappy streaming codec
 ///
 /// Provides stream-based compression and decompression using the
 /// Snappy framing format. The framing format allows for streaming
 /// decompression and chunk-based processing.
-class SnappyStreamCodec extends CompressionStreamCodec {
+final class SnappyStreamCodec extends CompressionStreamCodec {
   /// Maximum cumulative decompressed size across all chunks
   /// (`null` = unlimited; trusted input only).
   final int? maxSize;
@@ -31,13 +29,22 @@ class SnappyStreamCodec extends CompressionStreamCodec {
 
   /// Creates a Snappy streaming codec
   SnappyStreamCodec({
-    this.maxSize = snappyDefaultMaxDecompressedSize,
-    this.maxBufferSize = snappyDefaultMaxBufferSize,
+    this.maxSize = defaultMaxSize,
+    this.maxBufferSize = defaultMaxBufferSize,
     this.chunkSize = SnappyStreamEncoder.maxChunkSize,
   }) {
     validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
     validateRange(chunkSize, 1, SnappyStreamEncoder.maxChunkSize, 'chunkSize');
+  }
+
+  /// Creates a Snappy stream codec from [options]. Streams always use the
+  /// framing format, so [SnappyOptions.format] is ignored.
+  factory SnappyStreamCodec.fromOptions(final SnappyOptions options) {
+    return SnappyStreamCodec(
+      maxSize: options.maxSize,
+      chunkSize: options.chunkSize,
+    );
   }
 
   @override
@@ -76,51 +83,38 @@ class SnappyIncrementalDecoder implements IncrementalDecoder {
   late final OutputLimit _limit = OutputLimit(maxSize);
 
   final BytePending _pending = BytePending();
-  int _cursor = 0;
   late final SnappyStreamDecoder _decoder = SnappyStreamDecoder(
     maxUncompressedSize: maxSize,
   );
 
-  int get _avail => _pending.length - _cursor;
-
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    // Reject before appending so an oversized chunk can't force the
-    // allocation/copy in _pending.add ahead of the limit check.
-    if (_avail + input.length > maxBufferSize) {
-      throw SnappyFormatException(
-        'Stream buffer would exceed $maxBufferSize bytes - '
-        'frame too large or malformed',
-      );
-    }
-    _pending.add(input);
-    while (_avail >= 4) {
+    _pending.append(input, maxBufferSize);
+    while (_pending.available >= 4) {
       final length =
-          _pending[_cursor + 1] |
-          (_pending[_cursor + 2] << 8) |
-          (_pending[_cursor + 3] << 16);
+          _pending[_pending.cursor + 1] |
+          (_pending[_pending.cursor + 2] << 8) |
+          (_pending[_pending.cursor + 3] << 16);
       final chunkSize = 4 + length;
-      if (_avail < chunkSize) break;
-      final chunk = _pending.slice(_cursor, _cursor + chunkSize);
+      if (_pending.available < chunkSize) break;
+      final chunk = _pending.slice(
+        _pending.cursor,
+        _pending.cursor + chunkSize,
+      );
       final decoded = _decoder.decompressChunk(chunk);
       _limit.record(decoded.length);
       if (maxSize != null && _limit.produced > maxSize!) {
-        throw SnappyFormatException(
-          'Decompressed size ${_limit.produced} exceeds maximum allowed size $maxSize',
-        );
+        throw LimitException(maxSize!);
       }
       emit(decoded);
-      _cursor += chunkSize;
+      _pending.cursor += chunkSize;
     }
-    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.discard(_cursor);
-      _cursor = 0;
-    }
+    _pending.compact();
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    if (_avail != 0) {
+    if (_pending.available != 0) {
       throw SnappyFormatException('Incomplete Snappy chunk at end of stream');
     }
     if (!_decoder.seenIdentifier) {

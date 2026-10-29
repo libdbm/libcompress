@@ -15,5 +15,9 @@ lib/src/**/*.txt
 # Ignore tool files
 tool/
 
+# Benchmarks read the test fixtures, which are not published
+benchmark/
+
 # Ignore planning artifacts
 tasks/
+SPEC.md

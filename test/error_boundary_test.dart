@@ -1,6 +1,6 @@
 import 'package:test/test.dart';
-import 'package:libcompress/libcompress.dart';
 import 'package:libcompress/src/exceptions.dart';
+import 'package:libcompress/src/util/output_limit.dart';
 
 void main() {
   group('guardFormat error allowlist', () {
@@ -8,13 +8,6 @@ void main() {
       expect(
         () => guardFormat<void>(
           () => throw StateError('eof'),
-          GzipFormatException.new,
-        ),
-        throwsA(isA<GzipFormatException>()),
-      );
-      expect(
-        () => guardFormat<void>(
-          () => throw RangeError('oob'),
           GzipFormatException.new,
         ),
         throwsA(isA<GzipFormatException>()),
@@ -59,6 +52,49 @@ void main() {
         () => guardFormat<void>(() => throw _Bug(), GzipFormatException.new),
         throwsA(isA<_Bug>()),
       );
+      // An out-of-bounds access is a bug in the decoder, not bad input.
+      expect(
+        () => guardFormat<void>(
+          () => throw RangeError('oob'),
+          GzipFormatException.new,
+        ),
+        throwsA(isA<RangeError>()),
+      );
+      expect(
+        () => guardFormat<void>(
+          () => throw IndexError.withLength(5, 3),
+          GzipFormatException.new,
+        ),
+        throwsA(isA<IndexError>()),
+      );
+    });
+
+    test('a limit breach becomes a LimitException naming the cap', () {
+      final named = isA<LimitException>()
+          .having((final e) => e.limit, 'limit', 1000)
+          .having((final e) => e.message, 'message', contains('1000'));
+      // A buffer that ran out of remaining budget (here 400 of 1000).
+      expect(
+        () => guardFormat<void>(
+          () => throw const OutputLimitException('exceeds maximum 400'),
+          GzipFormatException.new,
+          limit: 1000,
+        ),
+        throwsA(named),
+      );
+      // An inner check that named the remaining budget.
+      expect(
+        () => guardFormat<void>(
+          () => throw LimitException(400),
+          GzipFormatException.new,
+          limit: 1000,
+        ),
+        throwsA(named),
+      );
+    });
+
+    test('DEFLATE errors are GZIP errors', () {
+      expect(const DeflateFormatException('x'), isA<GzipFormatException>());
     });
   });
 }

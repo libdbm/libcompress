@@ -7,113 +7,6 @@ import 'zstd_common.dart';
 /// FSE is a form of Asymmetric Numeral Systems (ANS) used by Zstd
 /// for compressing symbol distributions efficiently.
 class FseDecoder {
-  /// Decode FSE normalized counters from bitstream per RFC 8878 Section 4.1.1
-  /// When [skipInitialBits] is true (for Huffman weights), skip the first 4 bits
-  /// which contain the accuracy log
-  static (List<int>, int) decodeNormalizedCounters(
-    Uint8List data,
-    int offset,
-    int maxSymbolValue,
-    int tableLog, {
-    int skipBits = 0,
-  }) {
-    final counters = List<int>.filled(maxSymbolValue + 1, 0);
-    final reader = FseBitReader(data, offset);
-
-    // Skip initial bits if requested (e.g., skip accuracy log)
-    if (skipBits > 0) {
-      reader.readBits(skipBits);
-    }
-
-    // Per RFC 8878: remaining starts at tableSize + 1
-    var remaining = (1 << tableLog) + 1;
-    var threshold = 1 << tableLog;
-    var nbBits = tableLog + 1;
-    var symbol = 0;
-    var prevZero = false;
-
-    while (symbol <= maxSymbolValue && remaining > 1) {
-      // Handle zero-run encoding for consecutive zeros
-      if (prevZero) {
-        var zeros = 0;
-        while (true) {
-          final code = reader.readBits(2);
-          if (code == 3) {
-            zeros += 3;
-          } else {
-            zeros += code;
-            break;
-          }
-        }
-        symbol += zeros;
-        if (symbol > maxSymbolValue + 1) {
-          throw ZstdFormatException('FSE: Zero run exceeds symbol capacity');
-        }
-        prevZero = false;
-        continue;
-      }
-
-      if (symbol > maxSymbolValue) {
-        break;
-      }
-
-      // RFC 8878: max = (2 * threshold - 1) - remaining
-      final max = (2 * threshold - 1) - remaining;
-      int count;
-      final bitsMinusOne = nbBits - 1;
-      final value = bitsMinusOne > 0 ? reader.peekBits(bitsMinusOne) : 0;
-
-      if (value < max) {
-        if (bitsMinusOne > 0) {
-          reader.skipBits(bitsMinusOne);
-        }
-        count = value;
-      } else {
-        final fullValue = reader.readBits(nbBits);
-        count = fullValue;
-        if (fullValue >= threshold) {
-          count -= max;
-        }
-      }
-
-      // Apply bias: count - 1
-      count -= 1;
-
-      // Update remaining (use absolute value per Java implementation)
-      remaining -= count.abs();
-
-      if (symbol <= maxSymbolValue) {
-        counters[symbol] = count;
-      }
-      symbol++;
-      prevZero = count == 0;
-
-      // Update threshold when remaining shrinks
-      if (remaining < threshold) {
-        if (remaining <= 1) {
-          break;
-        }
-        nbBits = _highBit32(remaining) + 1;
-        threshold = 1 << (nbBits - 1);
-      }
-    }
-
-    // Verify remaining is exactly 1
-    if (remaining != 1) {
-      throw ZstdFormatException(
-        'FSE: Invalid normalized counters - remaining=$remaining (should be 1)',
-      );
-    }
-
-    // bytesConsumed already returns absolute offset, so don't add offset again
-    return (counters, reader.bytesConsumed);
-  }
-
-  static int _highBit32(int value) {
-    if (value <= 0) return 0;
-    return value.bitLength - 1;
-  }
-
   /// FSE state entry containing symbol and number of bits to read
   late List<FseStateEntry> _table;
   late int _accuracyLog;
@@ -192,71 +85,17 @@ class FseDecoder {
       }
       symbolNext[symbol] = nextState + 1;
 
-      final int nbBits = _accuracyLog - _highBit32(nextState);
-      final int baseline = (nextState << nbBits) - _tableSize;
-      _table[state] = FseStateEntry(symbol, nbBits, baseline);
+      final int bits = _accuracyLog - (nextState.bitLength - 1);
+      final int baseline = (nextState << bits) - _tableSize;
+      _table[state] = FseStateEntry(symbol, bits, baseline);
     }
   }
 
-  int _tableStep(int size) => (size >> 1) + (size >> 3) + 3;
+  int _tableStep(final int size) => (size >> 1) + (size >> 3) + 3;
 
   List<FseStateEntry> get tableEntries => _table;
 
   int get tableLog => _accuracyLog;
-
-  /// Decode next symbol and update state
-  int decodeSymbol(FseState state, FseBitReader reader) {
-    final entry = _table[state.value];
-    final symbol = entry.symbol;
-
-    // Read bits and update state
-    final bits = reader.readBits(entry.numberOfBits);
-    state.value = entry.baseline + bits;
-
-    return symbol;
-  }
-
-  /// Get symbol for current state without reading bits or updating state
-  int peekSymbol(FseState state) {
-    return _table[state.value].symbol;
-  }
-
-  /// Check how many bits would be needed to update from current state
-  int bitsNeeded(FseState state) {
-    return _table[state.value].numberOfBits;
-  }
-
-  /// Decode symbol with soft EOF handling - treats missing bits as zeros
-  /// Returns (symbol, bool) where bool is false if stream exhausted
-  (int, bool) decodeSymbolSafe(FseState state, FseBitReader reader) {
-    final entry = _table[state.value];
-    final symbol = entry.symbol;
-    final needed = entry.numberOfBits;
-
-    // Check if we have enough bits
-    if (!reader.hasBits(needed)) {
-      // Read what we can, pad with zeros
-      final available = reader.availableBits;
-      final bits = available > 0 ? reader.readBitsUnchecked(available) : 0;
-      state.value = entry.baseline + bits;
-      return (symbol, false);
-    }
-
-    final bits = reader.readBits(needed);
-    state.value = entry.baseline + bits;
-    return (symbol, true);
-  }
-
-  /// Initialize state from bit stream
-  FseState initializeState(FseBitReader reader) {
-    return FseState(reader.readBits(_accuracyLog));
-  }
-}
-
-/// FSE state for decoding
-class FseState {
-  int value;
-  FseState(this.value);
 }
 
 /// FSE state table entry
@@ -268,88 +107,164 @@ class FseStateEntry {
   FseStateEntry(this.symbol, this.numberOfBits, this.baseline);
 }
 
-/// Bit reader for FSE decoding (reads bits forward/LSB first)
-class FseBitReader {
-  final Uint8List _data;
-  final int _endOffset;
-  int _offset;
-  int _bitBuffer;
-  int _bitsInBuffer;
+/// Reads an FSE table description (RFC 8878 §4.1.1) from `data[offset..end)`:
+/// the accuracy log, at most [maxTableLog], then normalized counts for symbols
+/// up to [maxSymbolValue]. Returns the counts, the accuracy log and the offset
+/// after the description. Used for sequence tables and Huffman weights.
+(List<int>, int, int) readNormalizedCounts(
+  final Uint8List data,
+  final int offset,
+  final int blockEnd,
+  final int maxSymbolValue,
+  final int maxTableLog,
+) {
+  final reader = _ForwardBitReader(data, offset, blockEnd);
 
-  /// Get current byte offset
-  int get offset => _offset;
+  final tableLog = reader.readBits(4) + 5; // FSE_MIN_TABLELOG
+  if (tableLog > maxTableLog) {
+    throw ZstdFormatException(
+      'FSE accuracy log $tableLog exceeds maximum $maxTableLog',
+    );
+  }
+  var remaining = (1 << tableLog) + 1;
+  var threshold = 1 << tableLog;
+  var width = tableLog + 1;
+  var symbol = 0;
+  var previousZero = false;
 
-  FseBitReader(this._data, int offset, [int? endOffset])
-    : _offset = offset,
-      _endOffset = endOffset ?? _data.length,
-      _bitBuffer = 0,
-      _bitsInBuffer = 0;
+  final counts = List<int>.filled(maxSymbolValue + 1, 0);
 
-  /// Read specified number of bits
-  int readBits(final int count) {
-    while (_bitsInBuffer < count) {
-      if (_offset >= _endOffset) {
-        throw ZstdFormatException('FSE bit reader: unexpected end of data');
+  while (symbol <= maxSymbolValue && remaining > 1) {
+    if (previousZero) {
+      var zeros = 0;
+      while (true) {
+        final code = reader.readBits(2);
+        if (code == 3) {
+          zeros += 3;
+        } else {
+          zeros += code;
+          break;
+        }
       }
-      _bitBuffer |= _data[_offset++] << _bitsInBuffer;
-      _bitsInBuffer += 8;
+      symbol += zeros;
+      if (symbol > maxSymbolValue + 1) {
+        throw ZstdFormatException('Zero run exceeds symbol capacity');
+      }
+      previousZero = false;
+      continue;
     }
 
-    final result = _bitBuffer & ((1 << count) - 1);
-    _bitBuffer >>= count;
-    _bitsInBuffer -= count;
-    return result;
+    if (symbol > maxSymbolValue) {
+      break;
+    }
+
+    final max = (2 * threshold - 1) - remaining;
+    int count;
+    final bitsMinusOne = width - 1;
+    final value = bitsMinusOne > 0 ? reader.peekBits(bitsMinusOne) : 0;
+    if (value < max) {
+      if (bitsMinusOne > 0) {
+        reader.skipBits(bitsMinusOne);
+      }
+      count = value;
+    } else {
+      final fullValue = reader.readBits(width);
+      count = fullValue;
+      if (fullValue >= threshold) {
+        count -= max;
+      }
+    }
+
+    count -= 1;
+
+    if (count >= 0) {
+      remaining -= count;
+    } else {
+      remaining += count;
+    }
+
+    if (symbol <= maxSymbolValue) {
+      counts[symbol] = count;
+    }
+    symbol++;
+    previousZero = count == 0;
+
+    if (remaining < threshold) {
+      if (remaining <= 1) {
+        break;
+      }
+      width = remaining.bitLength;
+      threshold = 1 << (width - 1);
+    }
   }
 
-  /// Peek bits without consuming
-  int peekBits(final int count) {
-    while (_bitsInBuffer < count) {
-      if (_offset >= _endOffset) {
-        return _bitBuffer & ((1 << count) - 1);
+  if (remaining != 1) {
+    throw ZstdFormatException(
+      'Invalid normalized counts (remaining=$remaining)',
+    );
+  }
+  final highestSymbol = symbol - 1;
+  if (highestSymbol > maxSymbolValue) {
+    throw ZstdFormatException('Normalized counts reference invalid symbol');
+  }
+
+  final nextOffset = offset + reader.bytesConsumed;
+  if (nextOffset > blockEnd) {
+    throw ZstdFormatException('Normalized counts exceed block boundary');
+  }
+
+  return (counts, tableLog, nextOffset);
+}
+
+class _ForwardBitReader {
+  final Uint8List _data;
+  final int _end;
+  final int _start;
+  int _bytePos;
+  int _bitBuffer = 0;
+  int _bitsAvailable = 0;
+
+  _ForwardBitReader(this._data, final int offset, final int end)
+    : _end = end,
+      _start = offset,
+      _bytePos = offset;
+
+  int _ensureBits(final int count) {
+    while (_bitsAvailable < count) {
+      if (_bytePos >= _end) {
+        throw ZstdFormatException(
+          'Unexpected end of data in an FSE table description',
+        );
       }
-      _bitBuffer |= _data[_offset++] << _bitsInBuffer;
-      _bitsInBuffer += 8;
+      _bitBuffer |= _data[_bytePos++] << _bitsAvailable;
+      _bitsAvailable += 8;
     }
+    return _bitsAvailable;
+  }
+
+  int readBits(final int count) {
+    if (count == 0) return 0;
+    _ensureBits(count);
+    final value = _bitBuffer & ((1 << count) - 1);
+    _bitBuffer >>= count;
+    _bitsAvailable -= count;
+    return value;
+  }
+
+  int peekBits(final int count) {
+    if (count == 0) return 0;
+    _ensureBits(count);
     return _bitBuffer & ((1 << count) - 1);
   }
 
-  /// Skip bits after peeking
   void skipBits(final int count) {
+    if (count == 0) return;
+    _ensureBits(count);
     _bitBuffer >>= count;
-    _bitsInBuffer -= count;
+    _bitsAvailable -= count;
   }
 
-  /// Number of bytes consumed from the input
-  int get bytesConsumed => _offset - (_bitsInBuffer ~/ 8);
+  int get bitsConsumed => (_bytePos - _start) * 8 - _bitsAvailable;
 
-  /// Check if more data available
-  bool get hasMoreData => _offset < _endOffset || _bitsInBuffer > 0;
-
-  /// Check if we have at least N bits available
-  bool hasBits(final int count) {
-    if (_bitsInBuffer >= count) return true;
-    // Check if we can load more
-    final bitsNeeded = count - _bitsInBuffer;
-    final bytesNeeded = (bitsNeeded + 7) ~/ 8;
-    return _offset + bytesNeeded <= _endOffset;
-  }
-
-  /// Get number of bits currently available without loading more
-  int get availableBits {
-    final bitsFromBuffer = _bitsInBuffer;
-    final bytesRemaining = _endOffset - _offset;
-    return bitsFromBuffer + (bytesRemaining * 8);
-  }
-
-  /// Read bits without checking bounds (caller must verify with hasBits first)
-  int readBitsUnchecked(final int count) {
-    while (_bitsInBuffer < count && _offset < _endOffset) {
-      _bitBuffer |= _data[_offset++] << _bitsInBuffer;
-      _bitsInBuffer += 8;
-    }
-    final result = _bitBuffer & ((1 << count) - 1);
-    _bitBuffer >>= count;
-    _bitsInBuffer -= count;
-    return result;
-  }
+  int get bytesConsumed => (bitsConsumed + 7) >> 3;
 }

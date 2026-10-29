@@ -33,13 +33,18 @@ void main() async {
   // Direct codec instantiation with options
   print('\n=== Codec with Options ===');
 
-  final zstd = ZstdCodec(level: 9, enableChecksum: true);
+  final zstd = ZstdCodec(level: 9, checksum: true);
   final zstdCompressed = zstd.compress(data);
   print('Zstd level 9: ${zstdCompressed.length} bytes');
 
-  final lz4 = Lz4Codec(level: 6, blockSize: lz4BlockSize64K);
+  final lz4 = Lz4Codec(level: 9, blockSize: lz4BlockSize64K);
   final lz4Compressed = lz4.compress(data);
-  print('LZ4 HC level 6: ${lz4Compressed.length} bytes');
+  print('LZ4 HC level 9: ${lz4Compressed.length} bytes');
+
+  // Parquet LZ4_RAW page with a known uncompressed size
+  final page = Lz4Codec(format: Lz4Format.raw);
+  final restored = page.decompress(page.compress(data), size: data.length);
+  print('LZ4 raw page: ${restored.length} bytes restored');
 
   // Stream-based compression
   print('\n=== Stream-based Compression ===');
@@ -52,12 +57,9 @@ void main() async {
     chunks.add(chunk);
   }
 
-  final total = chunks.fold<int>(0, (sum, chunk) => sum + chunk.length);
+  final total = chunks.fold<int>(
+    0,
+    (final sum, final chunk) => sum + chunk.length,
+  );
   print('LZ4 stream: $total bytes in ${chunks.length} chunk(s)');
-
-  // Check codec capabilities
-  print('\n=== Codec Capabilities ===');
-  final codec = CodecFactory.codec(CodecType.lz4);
-  print('LZ4 supports block: ${codec.supports(CodecMode.block)}');
-  print('LZ4 supports stream: ${codec.supports(CodecMode.stream)}');
 }

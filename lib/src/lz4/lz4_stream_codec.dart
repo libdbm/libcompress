@@ -2,22 +2,20 @@ import 'dart:typed_data';
 
 import '../compression_options.dart';
 import '../compression_stream_codec.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/stream_compressor.dart';
 import 'lz4_common.dart';
 import 'lz4_decoder.dart';
 import 'lz4_encoder.dart';
-
-/// Default maximum buffer size for stream decoders (64MB)
-const int lz4DefaultMaxBufferSize = 64 * 1024 * 1024;
+import 'lz4_codec.dart';
 
 /// LZ4 streaming codec
 ///
-/// Provides stream-based compression and decompression for LZ4.
-/// Each chunk emitted during compression is a complete, independent
-/// LZ4 frame that can be concatenated with others.
-class Lz4StreamCodec extends CompressionStreamCodec {
-  /// Compression level (1-9, where 9 enables high-compression mode)
+/// Provides stream-based compression and decompression for LZ4 frames.
+/// Compression emits one frame whose linked blocks carry a 64 KB history
+/// across input chunks; decompression accepts concatenated frames.
+final class Lz4StreamCodec extends CompressionStreamCodec {
+  /// Compression level (1 fast, 2-9 high-compression mode)
   final int level;
 
   /// Block size for frame compression
@@ -44,14 +42,32 @@ class Lz4StreamCodec extends CompressionStreamCodec {
     this.level = 1,
     this.blockSize = lz4DefaultBlockSize,
     this.checksum = true,
-    this.maxSize = lz4DefaultMaxDecompressedSize,
-    this.maxBufferSize = lz4DefaultMaxBufferSize,
+    this.maxSize = defaultMaxSize,
+    this.maxBufferSize = defaultMaxBufferSize,
     this.verified = false,
   }) {
     validateLevel(level, 1, 9);
     validateRange(blockSize, 1, lz4BlockSize4M, 'blockSize');
     validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
+  }
+
+  /// Creates an LZ4 stream codec from [options]. Streams use the frame
+  /// format, so options with another [Lz4Options.format] are rejected.
+  factory Lz4StreamCodec.fromOptions(final Lz4Options options) {
+    if (options.format != Lz4Format.frame) {
+      throw ArgumentError.value(
+        options.format,
+        'format',
+        'Stream codecs use the frame format',
+      );
+    }
+    return Lz4StreamCodec(
+      level: options.level,
+      blockSize: options.blockSize,
+      checksum: options.checksum,
+      maxSize: options.maxSize,
+    );
   }
 
   @override

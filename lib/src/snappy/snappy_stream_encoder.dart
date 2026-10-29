@@ -22,9 +22,6 @@ class SnappyStreamEncoder {
   /// Uncompressed data chunk type
   static const int chunkTypeUncompressed = 0x01;
 
-  /// Padding chunk type
-  static const int chunkTypePadding = 0xfe;
-
   /// Chunk size for splitting input data
   final int chunkSize;
 
@@ -44,14 +41,14 @@ class SnappyStreamEncoder {
   /// Splits input into chunks and compresses each independently.
   /// Always writes stream identifier as first chunk.
   Uint8List compress(final Uint8List data) {
-    final output = <int>[];
+    final output = BytesBuilder(copy: false);
 
     // Write stream identifier (always first)
     _writeStreamIdentifier(output);
 
     // Handle empty input
     if (data.isEmpty) {
-      return Uint8List.fromList(output);
+      return output.takeBytes();
     }
 
     // Split data into chunks and compress each
@@ -65,7 +62,7 @@ class SnappyStreamEncoder {
       offset += length;
     }
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Compress a single chunk without stream identifier
@@ -75,7 +72,7 @@ class SnappyStreamEncoder {
   Uint8List compressChunkOnly(final Uint8List data) {
     if (data.isEmpty) return Uint8List(0);
 
-    final output = <int>[];
+    final output = BytesBuilder(copy: false);
 
     // Split into chunks if needed
     var offset = 0;
@@ -88,20 +85,20 @@ class SnappyStreamEncoder {
       offset += length;
     }
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Get the stream identifier bytes
   Uint8List get streamIdentifier {
-    final output = <int>[];
+    final output = BytesBuilder(copy: false);
     _writeStreamIdentifier(output);
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Write stream identifier chunk
-  void _writeStreamIdentifier(final List<int> output) {
+  void _writeStreamIdentifier(final BytesBuilder output) {
     // Stream identifier: 0xff 0x06 0x00 0x00 "sNaPpY"
-    output.addAll([
+    output.add([
       chunkTypeStreamIdentifier,
       0x06, 0x00, 0x00, // length = 6
       0x73, 0x4e, 0x61, 0x50, 0x70, 0x59, // "sNaPpY"
@@ -109,7 +106,7 @@ class SnappyStreamEncoder {
   }
 
   /// Compress a single chunk
-  void _compressChunk(final List<int> output, final Uint8List chunk) {
+  void _compressChunk(final BytesBuilder output, final Uint8List chunk) {
     final compressed = SnappyEncoder.compress(chunk);
     final checksum = Crc32c.hash(chunk);
 
@@ -123,7 +120,7 @@ class SnappyStreamEncoder {
 
   /// Write a data chunk (compressed or uncompressed)
   void _writeChunk(
-    final List<int> output,
+    final BytesBuilder output,
     final int chunkType,
     final Uint8List data,
     final int checksum,
@@ -141,36 +138,19 @@ class SnappyStreamEncoder {
     }
 
     // Write chunk header: type (1 byte) + length (3 bytes, little-endian)
-    output.add(chunkType);
-    output.add(length & 0xff);
-    output.add((length >> 8) & 0xff);
-    output.add((length >> 16) & 0xff);
-
-    // Write checksum (4 bytes, little-endian)
-    output.add(maskedChecksum & 0xff);
-    output.add((maskedChecksum >> 8) & 0xff);
-    output.add((maskedChecksum >> 16) & 0xff);
-    output.add((maskedChecksum >> 24) & 0xff);
+    final header = Uint8List(8);
+    header[0] = chunkType;
+    header[1] = length & 0xff;
+    header[2] = (length >> 8) & 0xff;
+    header[3] = (length >> 16) & 0xff;
+    // Masked CRC32C, little-endian.
+    header[4] = maskedChecksum & 0xff;
+    header[5] = (maskedChecksum >> 8) & 0xff;
+    header[6] = (maskedChecksum >> 16) & 0xff;
+    header[7] = (maskedChecksum >> 24) & 0xff;
+    output.add(header);
 
     // Write data
-    output.addAll(data);
-  }
-
-  /// Write a padding chunk
-  ///
-  /// Useful for aligning output to specific boundaries.
-  /// [paddingBytes] specifies how many zero bytes to add.
-  void writePadding(final List<int> output, final int paddingBytes) {
-    if (paddingBytes <= 0) return;
-
-    output.add(chunkTypePadding);
-    output.add(paddingBytes & 0xff);
-    output.add((paddingBytes >> 8) & 0xff);
-    output.add((paddingBytes >> 16) & 0xff);
-
-    // Write padding bytes (all zeros)
-    for (var i = 0; i < paddingBytes; i++) {
-      output.add(0);
-    }
+    output.add(data);
   }
 }

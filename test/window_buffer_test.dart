@@ -94,5 +94,17 @@ void main() {
       buffer.drain(); // retains only last 4
       expect(() => buffer.copyFromHistory(5, 1), throwsArgumentError);
     });
+
+    test('rejects a back-reference into drained bytes not yet compacted', () {
+      // Draining 2 of 6 bytes leaves them in place (compaction waits for a
+      // window's worth of drained space), but they are no longer referenceable.
+      final buffer = WindowBuffer(4);
+      buffer.addBytes(Uint8List.fromList([1, 2, 3, 4, 5, 6]));
+      expect(buffer.drain(), orderedEquals([1, 2]));
+      expect(() => buffer.copyFromHistory(5, 1), throwsArgumentError);
+      buffer.copyFromHistory(4, 2);
+      expect(buffer.finish(), orderedEquals([3, 4, 5, 6, 3, 4]));
+      expect(buffer.length, 8);
+    });
   });
 }

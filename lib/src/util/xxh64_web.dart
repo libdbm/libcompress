@@ -5,174 +5,202 @@ import 'dart:typed_data';
 /// This is a fast, non-cryptographic hash function that produces a 64-bit hash.
 /// Based on the XXHash specification: https://github.com/Cyan4973/xxHash
 ///
-/// JavaScript numbers cannot hold 64-bit integers, so this version uses
-/// [BigInt]; native platforms use the `int`-based `xxh64_native.dart`.
+/// JavaScript numbers hold integers exactly only up to 2^53 and bitwise
+/// operations are 32-bit, so every 64-bit value is kept as two unsigned 32-bit
+/// halves, and products are formed from 16-bit pieces so that no intermediate
+/// exceeds 2^53. The arithmetic is masked, so it is exact on the VM too
+/// (native platforms use the `int`-based `xxh64_native.dart`). [BigInt] is
+/// used only to convert the seed and the signed 64-bit result of [hash].
 class XXH64 {
-  // XXH64 constants
-  static final BigInt _prime1 = BigInt.parse('9E3779B185EBCA87', radix: 16);
-  static final BigInt _prime2 = BigInt.parse('C2B2AE3D27D4EB4F', radix: 16);
-  static final BigInt _prime3 = BigInt.parse('165667B19E3779F9', radix: 16);
-  static final BigInt _prime4 = BigInt.parse('85EBCA77C2B2AE63', radix: 16);
-  static final BigInt _prime5 = BigInt.parse('27D4EB2F165667C5', radix: 16);
-  static final BigInt _mask64 = (BigInt.one << 64) - BigInt.one;
-  static final BigInt _mask32 = (BigInt.one << 32) - BigInt.one;
-  static final BigInt _signBit64 = BigInt.one << 63;
-
   /// Computes the XXH64 hash of the given data with an optional seed.
   ///
   /// [data] - The input data to hash
   /// [seed] - Optional seed value (default: 0)
-  /// Returns the 64-bit hash as an unsigned integer
-  static int hash(Uint8List data, [int seed = 0]) {
-    return _toSignedInt64(_hashBigInt(data, BigInt.from(seed)));
+  /// Returns the 64-bit hash as a signed integer, as the native version does
+  /// (on JavaScript, values beyond 2^53 lose precision).
+  static int hash(final Uint8List data, [final int seed = 0]) {
+    _hash(data, seed);
+    return _signed(_hi, _lo);
   }
 
   /// Computes the low 32 bits of XXH64.
-  static int hashLow32(Uint8List data, [int seed = 0]) {
-    return (_hashBigInt(data, BigInt.from(seed)) & _mask32).toInt();
-  }
-
-  static BigInt _hashBigInt(Uint8List data, BigInt seed) {
-    final length = data.length;
-    BigInt h64;
-    int index = 0;
-
-    if (length >= 32) {
-      final limit = length - 32;
-      BigInt v1 = _add64(seed, _add64(_prime1, _prime2));
-      BigInt v2 = _add64(seed, _prime2);
-      BigInt v3 = seed;
-      BigInt v4 = _sub64(seed, _prime1);
-
-      while (index <= limit) {
-        v1 = _round64(v1, _readLittleEndian64(data, index));
-        index += 8;
-        v2 = _round64(v2, _readLittleEndian64(data, index));
-        index += 8;
-        v3 = _round64(v3, _readLittleEndian64(data, index));
-        index += 8;
-        v4 = _round64(v4, _readLittleEndian64(data, index));
-        index += 8;
-      }
-
-      h64 = _add64(
-        _add64(
-          _add64(_rotateLeft64(v1, 1), _rotateLeft64(v2, 7)),
-          _add64(_rotateLeft64(v3, 12), _rotateLeft64(v4, 18)),
-        ),
-        BigInt.zero,
-      );
-
-      h64 = _mergeRound64(h64, v1);
-      h64 = _mergeRound64(h64, v2);
-      h64 = _mergeRound64(h64, v3);
-      h64 = _mergeRound64(h64, v4);
-    } else {
-      h64 = _add64(seed, _prime5);
-    }
-
-    h64 = _add64(h64, BigInt.from(length));
-
-    // Process remaining bytes in 8-byte chunks
-    while (index <= length - 8) {
-      BigInt k1 = _readLittleEndian64(data, index);
-      k1 = _mult64(k1, _prime2);
-      k1 = _rotateLeft64(k1, 31);
-      k1 = _mult64(k1, _prime1);
-
-      h64 ^= k1;
-      h64 = _add64(_mult64(_rotateLeft64(h64, 27), _prime1), _prime4);
-      index += 8;
-    }
-
-    // Process remaining bytes in 4-byte chunks
-    while (index <= length - 4) {
-      BigInt k1 = BigInt.from(_readLittleEndian32(data, index));
-      k1 = _mult64(k1, _prime1);
-      h64 ^= k1;
-      h64 = _add64(_mult64(_rotateLeft64(h64, 23), _prime2), _prime3);
-      index += 4;
-    }
-
-    // Process remaining bytes individually
-    while (index < length) {
-      final k1 = _mult64(BigInt.from(data[index]), _prime5);
-      h64 ^= k1;
-      h64 = _mult64(_rotateLeft64(h64, 11), _prime1);
-      index++;
-    }
-
-    // Final avalanche
-    h64 ^= h64 >> 33;
-    h64 = _mult64(h64, _prime2);
-    h64 ^= h64 >> 29;
-    h64 = _mult64(h64, _prime3);
-    h64 ^= h64 >> 32;
-
-    return h64;
+  static int hashLow32(final Uint8List data, [final int seed = 0]) {
+    _hash(data, seed);
+    return _lo;
   }
 
   /// Computes XXH64 hash of a list of integers (treating each as a byte).
-  static int hashFromList(List<int> data, [int seed = 0]) {
+  static int hashFromList(final List<int> data, [final int seed = 0]) {
     return hash(Uint8List.fromList(data), seed);
   }
 
-  static int _toSignedInt64(BigInt value) {
-    final unsigned = value & _mask64;
-    if (unsigned >= _signBit64) {
-      return (unsigned - (_mask64 + BigInt.one)).toInt();
+  /// Hashes [data] into [_hi]/[_lo].
+  static void _hash(final Uint8List data, final int seed) {
+    _split(seed);
+    final seedHi = _hi;
+    final seedLo = _lo;
+    final length = data.length;
+    var index = 0;
+
+    if (length >= 32) {
+      final limit = length - 32;
+      _add(seedHi, seedLo, _p1h, _p1l);
+      _add(_hi, _lo, _p2h, _p2l);
+      var v1h = _hi, v1l = _lo;
+      _add(seedHi, seedLo, _p2h, _p2l);
+      var v2h = _hi, v2l = _lo;
+      var v3h = seedHi, v3l = seedLo;
+      _sub(seedHi, seedLo, _p1h, _p1l);
+      var v4h = _hi, v4l = _lo;
+
+      while (index <= limit) {
+        _round(v1h, v1l, _high(data, index), _low(data, index));
+        v1h = _hi;
+        v1l = _lo;
+        _round(v2h, v2l, _high(data, index + 8), _low(data, index + 8));
+        v2h = _hi;
+        v2l = _lo;
+        _round(v3h, v3l, _high(data, index + 16), _low(data, index + 16));
+        v3h = _hi;
+        v3l = _lo;
+        _round(v4h, v4l, _high(data, index + 24), _low(data, index + 24));
+        v4h = _hi;
+        v4l = _lo;
+        index += 32;
+      }
+      _converge(v1h, v1l, v2h, v2l, v3h, v3l, v4h, v4l);
+    } else {
+      _add(seedHi, seedLo, _p5h, _p5l);
     }
-    return unsigned.toInt();
+
+    _add(_hi, _lo, 0, length & _mask);
+    _finish(data, index, length);
   }
 
-  static BigInt _add64(BigInt a, BigInt b) {
-    return (a + b) & _mask64;
+  /// Combines the four lanes into [_hi]/[_lo].
+  static void _converge(
+    final int v1h,
+    final int v1l,
+    final int v2h,
+    final int v2l,
+    final int v3h,
+    final int v3l,
+    final int v4h,
+    final int v4l,
+  ) {
+    _rotate(v1h, v1l, 1);
+    var hh = _hi, hl = _lo;
+    _rotate(v2h, v2l, 7);
+    _add(hh, hl, _hi, _lo);
+    hh = _hi;
+    hl = _lo;
+    _rotate(v3h, v3l, 12);
+    _add(hh, hl, _hi, _lo);
+    hh = _hi;
+    hl = _lo;
+    _rotate(v4h, v4l, 18);
+    _add(hh, hl, _hi, _lo);
+    _merge(_hi, _lo, v1h, v1l);
+    _merge(_hi, _lo, v2h, v2l);
+    _merge(_hi, _lo, v3h, v3l);
+    _merge(_hi, _lo, v4h, v4l);
   }
 
-  static BigInt _sub64(BigInt a, BigInt b) {
-    return (a - b) & _mask64;
-  }
-
-  static BigInt _mult64(BigInt a, BigInt b) {
-    return (a * b) & _mask64;
-  }
-
-  static BigInt _round64(BigInt acc, BigInt input) {
-    acc = _add64(acc, _mult64(input, _prime2));
-    acc = _rotateLeft64(acc, 31);
-    acc = _mult64(acc, _prime1);
-    return acc;
-  }
-
-  static BigInt _mergeRound64(BigInt acc, BigInt val) {
-    val = _mult64(val, _prime2);
-    val = _rotateLeft64(val, 31);
-    val = _mult64(val, _prime1);
-
-    acc ^= val;
-    acc = _add64(_mult64(acc, _prime1), _prime4);
-    return acc;
-  }
-
-  static BigInt _rotateLeft64(BigInt value, int amount) {
-    value &= _mask64;
-    return ((value << amount) | (value >> (64 - amount))) & _mask64;
-  }
-
-  static int _readLittleEndian32(Uint8List data, int offset) {
-    return data[offset] |
-        (data[offset + 1] << 8) |
-        (data[offset + 2] << 16) |
-        (data[offset + 3] << 24);
-  }
-
-  static BigInt _readLittleEndian64(Uint8List data, int offset) {
-    var result = BigInt.zero;
-    for (var i = 0; i < 8; i++) {
-      result |= BigInt.from(data[offset + i]) << (8 * i);
+  /// Folds the tail `data[index..end)` into the hash in [_hi]/[_lo], then
+  /// applies the final avalanche.
+  static void _finish(final Uint8List data, int index, final int end) {
+    var hh = _hi, hl = _lo;
+    while (index <= end - 8) {
+      _round(0, 0, _high(data, index), _low(data, index));
+      hh ^= _hi;
+      hl ^= _lo;
+      _rotate(hh, hl, 27);
+      _mul(_hi, _lo, _p1h, _p1l);
+      _add(_hi, _lo, _p4h, _p4l);
+      hh = _hi;
+      hl = _lo;
+      index += 8;
     }
-    return result;
+    if (index <= end - 4) {
+      _mul(0, _low(data, index), _p1h, _p1l);
+      hh ^= _hi;
+      hl ^= _lo;
+      _rotate(hh, hl, 23);
+      _mul(_hi, _lo, _p2h, _p2l);
+      _add(_hi, _lo, _p3h, _p3l);
+      hh = _hi;
+      hl = _lo;
+      index += 4;
+    }
+    while (index < end) {
+      _mul(0, data[index], _p5h, _p5l);
+      hh ^= _hi;
+      hl ^= _lo;
+      _rotate(hh, hl, 11);
+      _mul(_hi, _lo, _p1h, _p1l);
+      hh = _hi;
+      hl = _lo;
+      index++;
+    }
+
+    // Final avalanche: h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P3;
+    // h ^= h >> 32.
+    hl ^= hh >> 1;
+    _mul(hh, hl, _p2h, _p2l);
+    hh = _hi;
+    hl = _lo;
+    hl ^= ((hl >> 29) | (hh << 3)) & _mask;
+    hh ^= hh >> 29;
+    _mul(hh, hl, _p3h, _p3l);
+    _lo ^= _hi;
   }
+
+  /// [_hi]/[_lo] = round(acc, input): (acc + input * P2) rotated 31, * P1.
+  static void _round(
+    final int accHi,
+    final int accLo,
+    final int inHi,
+    final int inLo,
+  ) {
+    _mul(inHi, inLo, _p2h, _p2l);
+    _add(accHi, accLo, _hi, _lo);
+    _rotate(_hi, _lo, 31);
+    _mul(_hi, _lo, _p1h, _p1l);
+  }
+
+  /// [_hi]/[_lo] = (acc ^ round(0, value)) * P1 + P4.
+  static void _merge(
+    final int accHi,
+    final int accLo,
+    final int valueHi,
+    final int valueLo,
+  ) {
+    _round(0, 0, valueHi, valueLo);
+    _mul(accHi ^ _hi, accLo ^ _lo, _p1h, _p1l);
+    _add(_hi, _lo, _p4h, _p4l);
+  }
+
+  /// Splits [seed] into unsigned 64-bit halves in [_hi]/[_lo].
+  static void _split(final int seed) {
+    final value = BigInt.from(seed).toUnsigned(64);
+    _hi = (value >> 32).toInt();
+    _lo = (value & BigInt.from(_mask)).toInt();
+  }
+
+  /// The signed 64-bit value with halves [hi] and [lo], as the native hash
+  /// returns it.
+  static int _signed(final int hi, final int lo) =>
+      ((BigInt.from(hi) << 32) | BigInt.from(lo)).toSigned(64).toInt();
+
+  static int _low(final Uint8List data, final int offset) =>
+      (data[offset] |
+          (data[offset + 1] << 8) |
+          (data[offset + 2] << 16) |
+          (data[offset + 3] << 24)) &
+      _mask;
+
+  static int _high(final Uint8List data, final int offset) =>
+      _low(data, offset + 4);
 }
 
 /// Incremental XXH64 — fed in pieces via [add], finalized with [digest] /
@@ -180,20 +208,29 @@ class XXH64 {
 /// input regardless of chunking. Used to verify a whole-frame content checksum
 /// without retaining the whole frame.
 class Xxh64Sink {
-  final BigInt _seed;
-  late BigInt _v1;
-  late BigInt _v2;
-  late BigInt _v3;
-  late BigInt _v4;
+  late final int _seedHi;
+  late final int _seedLo;
+  late int _v1h, _v1l, _v2h, _v2l, _v3h, _v3l, _v4h, _v4l;
   final Uint8List _stripe = Uint8List(32); // buffers a partial 32-byte stripe
   int _buffered = 0;
   int _total = 0;
 
-  Xxh64Sink([final int seed = 0]) : _seed = BigInt.from(seed) {
-    _v1 = XXH64._add64(_seed, XXH64._add64(XXH64._prime1, XXH64._prime2));
-    _v2 = XXH64._add64(_seed, XXH64._prime2);
-    _v3 = _seed;
-    _v4 = XXH64._sub64(_seed, XXH64._prime1);
+  Xxh64Sink([final int seed = 0]) {
+    _split(seed);
+    _seedHi = _hi;
+    _seedLo = _lo;
+    _add(_seedHi, _seedLo, _p1h, _p1l);
+    _add(_hi, _lo, _p2h, _p2l);
+    _v1h = _hi;
+    _v1l = _lo;
+    _add(_seedHi, _seedLo, _p2h, _p2l);
+    _v2h = _hi;
+    _v2l = _lo;
+    _v3h = _seedHi;
+    _v3l = _seedLo;
+    _sub(_seedHi, _seedLo, _p1h, _p1l);
+    _v4h = _hi;
+    _v4l = _lo;
   }
 
   /// Feeds [count] bytes of [data] starting at [offset] (defaults to all).
@@ -221,79 +258,112 @@ class Xxh64Sink {
   }
 
   void _round32(final Uint8List d, final int o) {
-    _v1 = XXH64._round64(_v1, XXH64._readLittleEndian64(d, o));
-    _v2 = XXH64._round64(_v2, XXH64._readLittleEndian64(d, o + 8));
-    _v3 = XXH64._round64(_v3, XXH64._readLittleEndian64(d, o + 16));
-    _v4 = XXH64._round64(_v4, XXH64._readLittleEndian64(d, o + 24));
+    XXH64._round(_v1h, _v1l, XXH64._high(d, o), XXH64._low(d, o));
+    _v1h = _hi;
+    _v1l = _lo;
+    XXH64._round(_v2h, _v2l, XXH64._high(d, o + 8), XXH64._low(d, o + 8));
+    _v2h = _hi;
+    _v2l = _lo;
+    XXH64._round(_v3h, _v3l, XXH64._high(d, o + 16), XXH64._low(d, o + 16));
+    _v3h = _hi;
+    _v3l = _lo;
+    XXH64._round(_v4h, _v4l, XXH64._high(d, o + 24), XXH64._low(d, o + 24));
+    _v4h = _hi;
+    _v4l = _lo;
   }
 
-  BigInt _digestBig() {
-    BigInt h64;
+  /// Computes the digest into [_hi]/[_lo].
+  void _digest() {
     if (_total >= 32) {
-      h64 = XXH64._add64(
-        XXH64._add64(
-          XXH64._add64(
-            XXH64._rotateLeft64(_v1, 1),
-            XXH64._rotateLeft64(_v2, 7),
-          ),
-          XXH64._add64(
-            XXH64._rotateLeft64(_v3, 12),
-            XXH64._rotateLeft64(_v4, 18),
-          ),
-        ),
-        BigInt.zero,
-      );
-      h64 = XXH64._mergeRound64(h64, _v1);
-      h64 = XXH64._mergeRound64(h64, _v2);
-      h64 = XXH64._mergeRound64(h64, _v3);
-      h64 = XXH64._mergeRound64(h64, _v4);
+      XXH64._converge(_v1h, _v1l, _v2h, _v2l, _v3h, _v3l, _v4h, _v4l);
     } else {
-      h64 = XXH64._add64(_seed, XXH64._prime5);
+      _add(_seedHi, _seedLo, _p5h, _p5l);
     }
-
-    h64 = XXH64._add64(h64, BigInt.from(_total));
-
-    var index = 0;
-    while (index <= _buffered - 8) {
-      var k1 = XXH64._readLittleEndian64(_stripe, index);
-      k1 = XXH64._mult64(k1, XXH64._prime2);
-      k1 = XXH64._rotateLeft64(k1, 31);
-      k1 = XXH64._mult64(k1, XXH64._prime1);
-      h64 ^= k1;
-      h64 = XXH64._add64(
-        XXH64._mult64(XXH64._rotateLeft64(h64, 27), XXH64._prime1),
-        XXH64._prime4,
-      );
-      index += 8;
-    }
-    while (index <= _buffered - 4) {
-      var k1 = BigInt.from(XXH64._readLittleEndian32(_stripe, index));
-      k1 = XXH64._mult64(k1, XXH64._prime1);
-      h64 ^= k1;
-      h64 = XXH64._add64(
-        XXH64._mult64(XXH64._rotateLeft64(h64, 23), XXH64._prime2),
-        XXH64._prime3,
-      );
-      index += 4;
-    }
-    while (index < _buffered) {
-      final k1 = XXH64._mult64(BigInt.from(_stripe[index]), XXH64._prime5);
-      h64 ^= k1;
-      h64 = XXH64._mult64(XXH64._rotateLeft64(h64, 11), XXH64._prime1);
-      index++;
-    }
-
-    h64 ^= h64 >> 33;
-    h64 = XXH64._mult64(h64, XXH64._prime2);
-    h64 ^= h64 >> 29;
-    h64 = XXH64._mult64(h64, XXH64._prime3);
-    h64 ^= h64 >> 32;
-    return h64;
+    // The total length is added modulo 2^64; it never exceeds 2^53.
+    _add(_hi, _lo, _total ~/ 0x100000000, _total & _mask);
+    XXH64._finish(_stripe, 0, _buffered);
   }
 
   /// The full 64-bit XXH64 (signed, matching [XXH64.hash]).
-  int digest() => XXH64._toSignedInt64(_digestBig());
+  int digest() {
+    _digest();
+    return XXH64._signed(_hi, _lo);
+  }
 
   /// The low 32 bits (matching [XXH64.hashLow32]) — Zstd's content checksum.
-  int digestLow32() => (_digestBig() & XXH64._mask32).toInt();
+  int digestLow32() {
+    _digest();
+    return _lo;
+  }
 }
+
+const int _mask = 0xFFFFFFFF;
+
+// XXH64 primes as 32-bit halves.
+const int _p1h = 0x9E3779B1, _p1l = 0x85EBCA87;
+const int _p2h = 0xC2B2AE3D, _p2l = 0x27D4EB4F;
+const int _p3h = 0x165667B1, _p3l = 0x9E3779F9;
+const int _p4h = 0x85EBCA77, _p4l = 0xC2B2AE63;
+const int _p5h = 0x27D4EB2F, _p5l = 0x165667C5;
+
+// Result registers for the helpers below, so no operation allocates.
+int _hi = 0;
+int _lo = 0;
+
+/// [_hi]/[_lo] = a + b (mod 2^64).
+void _add(final int ah, final int al, final int bh, final int bl) {
+  final low = al + bl;
+  _lo = low & _mask;
+  _hi = (ah + bh + (low > _mask ? 1 : 0)) & _mask;
+}
+
+/// [_hi]/[_lo] = a - b (mod 2^64).
+void _sub(final int ah, final int al, final int bh, final int bl) {
+  final low = al - bl;
+  _lo = low & _mask;
+  _hi = (ah - bh - (low < 0 ? 1 : 0)) & _mask;
+}
+
+/// [_hi]/[_lo] = a * b (mod 2^64), from 16-bit pieces so that every
+/// intermediate stays below 2^53.
+void _mul(final int ah, final int al, final int bh, final int bl) {
+  final a0 = al & 0xFFFF, a1 = al >> 16;
+  final b0 = bl & 0xFFFF, b1 = bl >> 16;
+  final middle = a0 * b1 + a1 * b0; // < 2^33
+  final low = a0 * b0 + (middle & 0xFFFF) * 0x10000; // < 2^33
+  _lo = low & _mask;
+  _hi =
+      (a1 * b1 +
+          middle ~/ 0x10000 +
+          low ~/ 0x100000000 +
+          _mulLow(ah, bl) +
+          _mulLow(al, bh)) &
+      _mask;
+}
+
+/// (x * y) mod 2^32 for unsigned 32-bit [x] and [y].
+int _mulLow(final int x, final int y) {
+  final x0 = x & 0xFFFF, x1 = x >> 16;
+  final y0 = y & 0xFFFF, y1 = y >> 16;
+  return (x0 * y0 + ((x1 * y0 + x0 * y1) & 0xFFFF) * 0x10000) & _mask;
+}
+
+/// [_hi]/[_lo] = the 64-bit value rotated left by [amount] (1-63).
+void _rotate(final int hi, final int lo, final int amount) {
+  var h = hi, l = lo, r = amount;
+  if (r >= 32) {
+    h = lo;
+    l = hi;
+    r -= 32;
+  }
+  if (r == 0) {
+    _hi = h;
+    _lo = l;
+    return;
+  }
+  _hi = ((h << r) | (l >> (32 - r))) & _mask;
+  _lo = ((l << r) | (h >> (32 - r))) & _mask;
+}
+
+/// Unsigned 64-bit halves of [seed], into [_hi]/[_lo].
+void _split(final int seed) => XXH64._split(seed);

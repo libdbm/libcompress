@@ -19,10 +19,6 @@ const int zstdSkippableFrameMagicMask = 0xFFFFFFF0;
 /// Maximum block size (128 KB)
 const int zstdMaxBlockSize = 128 * 1024;
 
-/// Default maximum decompressed size (256 MB)
-/// Prevents memory exhaustion from malicious contentSize headers
-const int zstdDefaultMaxDecompressedSize = 256 * 1024 * 1024;
-
 /// Block types in Zstandard format
 enum ZstdBlockType {
   /// Uncompressed data block
@@ -62,6 +58,9 @@ class ZstdFrameHeaderDescriptor {
 
   /// Parses a frame header descriptor from a single byte
   factory ZstdFrameHeaderDescriptor.parse(final int byte) {
+    if (byte & 0x08 != 0) {
+      throw ZstdFormatException('Frame header descriptor reserved bit is set');
+    }
     return ZstdFrameHeaderDescriptor(
       singleSegment: (byte & 0x20) != 0,
       checksumFlag: (byte & 0x04) != 0,

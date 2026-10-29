@@ -1,7 +1,7 @@
 import 'dart:typed_data';
-import '../util/growable_buffer.dart';
 import 'sequence_constants.dart' as seq;
 import 'match_finder.dart';
+import '../util/bit_stream.dart';
 
 // Predefined (mode 0) FSE tables are built from compile-time constants and are
 // immutable during encoding, so they are built once and shared across blocks.
@@ -20,6 +20,32 @@ final FseCompressionTable _predefinedMlTable = FseCompressionTable.create(
   seq.mlDefaultNormLog,
   52,
 );
+
+/// The offset code of absolute [offset] (RFC 8878 §3.1.1.3.2.1.1): Offset_Value
+/// is offset + 3, and code `n` covers values `2^n .. 2^(n+1) - 1`, so the code
+/// is the highest set bit of offset + 3 (`offsetBase[n]` is `2^n - 3`).
+int _offsetSymbol(final int offset) {
+  final symbol = (offset + 3).bitLength - 1;
+  if (offset < 1 || symbol >= seq.offsetBase.length) {
+    throw StateError('Unable to encode offset $offset');
+  }
+  return symbol;
+}
+
+/// Codes of literal and match lengths below 1024, from [_baseSymbol].
+final Uint8List _literalCodes = _codes(seq.literalLengthBase);
+final Uint8List _matchCodes = _codes(seq.matchLengthBase);
+
+Uint8List _codes(final List<int> bases) =>
+    Uint8List.fromList([for (var i = 0; i < 1024; i++) _baseSymbol(bases, i)]);
+
+int _literalSymbol(final int length) => length < 1024
+    ? _literalCodes[length]
+    : _baseSymbol(seq.literalLengthBase, length);
+
+int _matchSymbol(final int length) => length < 1024
+    ? _matchCodes[length]
+    : _baseSymbol(seq.matchLengthBase, length);
 
 /// Largest index `i` with `bases[i] <= value`, for the strictly-increasing
 /// literal-length and match-length base tables. Binary search replacing the
@@ -49,25 +75,6 @@ class SequenceEncoder {
   late final FseCompressionTable? _llTable;
   late final FseCompressionTable? _ofTable;
   late final FseCompressionTable? _mlTable;
-
-  /// Create encoder with predefined tables (mode 0 for all)
-  SequenceEncoder() {
-    _llTable = FseCompressionTable.create(
-      seq.llDefaultNorm,
-      seq.llDefaultNormLog,
-      35,
-    );
-    _ofTable = FseCompressionTable.create(
-      seq.ofDefaultNorm,
-      seq.ofDefaultNormLog,
-      28,
-    );
-    _mlTable = FseCompressionTable.create(
-      seq.mlDefaultNorm,
-      seq.mlDefaultNormLog,
-      52,
-    );
-  }
 
   /// Create encoder with custom modes and optional custom tables
   ///
@@ -122,7 +129,7 @@ class SequenceEncoder {
     }
 
     final tokens = _buildTokens(matches);
-    final stream = BitOutputStream();
+    final stream = BitStreamWriter();
     final count = tokens.length;
 
     // Initialize states from last sequence's symbols (no bits written yet)
@@ -133,10 +140,9 @@ class SequenceEncoder {
 
     // Write first sequence's extra bits (literal length, match length, offset)
     final first = tokens[count - 1];
-    stream.addBits(first.literalExtraValue, first.literalExtraBits);
-    stream.addBits(first.matchExtraValue, first.matchExtraBits);
-    stream.addBits(first.offsetAdditional, first.offsetExtraBits);
-    stream.flush();
+    stream.writeBits(first.literalExtraValue, first.literalExtraBits);
+    stream.writeBits(first.matchExtraValue, first.matchExtraBits);
+    stream.writeBits(first.offsetAdditional, first.offsetExtraBits);
 
     // Encode remaining sequences in reverse order
     if (count >= 2) {
@@ -155,29 +161,10 @@ class SequenceEncoder {
           llState = _llTable.encode(stream, llState, token.literalSymbol);
         }
 
-        // Flush if needed (when bits accumulate)
-        final totalBits =
-            token.offsetExtraBits +
-            token.matchExtraBits +
-            token.literalExtraBits;
-        if (totalBits >= 64 - 7 - 17) {
-          // 17 = 6+5+6 table logs
-          stream.flush();
-        }
-
-        // Write extra bits
-        stream.addBits(token.literalExtraValue, token.literalExtraBits);
-        if (token.literalExtraBits + token.matchExtraBits > 24) {
-          stream.flush();
-        }
-
-        stream.addBits(token.matchExtraValue, token.matchExtraBits);
-        if (totalBits > 56) {
-          stream.flush();
-        }
-
-        stream.addBits(token.offsetAdditional, token.offsetExtraBits);
-        stream.flush();
+        // Write extra bits (the writer emits whole bytes as it goes)
+        stream.writeBits(token.literalExtraValue, token.literalExtraBits);
+        stream.writeBits(token.matchExtraValue, token.matchExtraBits);
+        stream.writeBits(token.offsetAdditional, token.offsetExtraBits);
       }
     }
 
@@ -192,21 +179,18 @@ class SequenceEncoder {
       _llTable.finish(stream, llState);
     }
 
-    return stream.close();
+    // End-of-stream marker bit, then pad to a byte.
+    stream.writeBits(1, 1);
+    return stream.toBytes();
   }
 
   List<_SequenceToken> _buildTokens(final List<ZstdMatch> matches) {
     final tokens = <_SequenceToken>[];
-    final previousOffsets = [1, 4, 8];
 
     for (final match in matches) {
-      final llSymbol = _getLiteralLengthSymbol(match.literalLength);
-      final mlSymbol = _getMatchLengthSymbol(match.length);
-      final offsetEncoding = _encodeOffsetSymbol(
-        match.literalLength,
-        match.offset,
-        previousOffsets,
-      );
+      final llSymbol = _literalSymbol(match.literalLength);
+      final mlSymbol = _matchSymbol(match.length);
+      final offsetEncoding = _encodeOffsetSymbol(match.offset);
 
       final llBase = seq.literalLengthBase[llSymbol];
       final mlBase = seq.matchLengthBase[mlSymbol];
@@ -229,51 +213,21 @@ class SequenceEncoder {
     return tokens;
   }
 
-  int _getLiteralLengthSymbol(final int length) =>
-      _baseSymbol(seq.literalLengthBase, length);
-
-  int _getMatchLengthSymbol(final int length) =>
-      _baseSymbol(seq.matchLengthBase, length);
-
   int _literalExtraBits(final int symbol) =>
       symbol < seq.literalLengthBits.length ? seq.literalLengthBits[symbol] : 0;
 
   int _matchExtraBits(final int symbol) =>
       symbol < seq.matchLengthBits.length ? seq.matchLengthBits[symbol] : 0;
 
-  _OffsetEncoding _encodeOffsetSymbol(
-    final int literalLength,
-    final int offset,
-    final List<int> previousOffsets,
-  ) {
+  _OffsetEncoding _encodeOffsetSymbol(final int offset) {
     // Encode absolute offsets only. Repeat-offset symbols are frame stateful
     // across blocks; this encoder builds each block independently.
-    final symbol = _getAbsoluteOffsetSymbol(offset);
+    final symbol = _offsetSymbol(offset);
     final base = seq.offsetBase[symbol];
     final bits = seq.offsetBits[symbol];
     final value = offset - base;
 
-    previousOffsets[2] = previousOffsets[1];
-    previousOffsets[1] = previousOffsets[0];
-    previousOffsets[0] = offset;
-
     return _OffsetEncoding(symbol: symbol, bits: bits, value: value);
-  }
-
-  int _getAbsoluteOffsetSymbol(final int offset) {
-    // Symbols 0-1 are repeat offset codes, symbols 2+ are absolute offsets
-    // Symbol 2: base=1, bits=2 → range 1-4
-    // Symbol 3: base=5, bits=3 → range 5-12
-    // etc.
-    for (var i = seq.offsetBase.length - 1; i >= 2; i--) {
-      final base = seq.offsetBase[i];
-      final bits = seq.offsetBits[i];
-      final max = base + ((1 << bits) - 1);
-      if (offset >= base && offset <= max) {
-        return i;
-      }
-    }
-    throw StateError('Unable to encode offset $offset');
   }
 }
 
@@ -309,14 +263,11 @@ class SequenceSymbols {
     final llSymbols = <int>[];
     final ofSymbols = <int>[];
     final mlSymbols = <int>[];
-    final prevOffsets = [1, 4, 8];
-
+    // Absolute offsets only, as SequenceEncoder writes them.
     for (final match in matches) {
-      llSymbols.add(_getLiteralLengthSymbol(match.literalLength));
-      mlSymbols.add(_getMatchLengthSymbol(match.length));
-      ofSymbols.add(
-        _encodeOffsetSymbol(match.literalLength, match.offset, prevOffsets),
-      );
+      llSymbols.add(_literalSymbol(match.literalLength));
+      mlSymbols.add(_matchSymbol(match.length));
+      ofSymbols.add(_offsetSymbol(match.offset));
     }
 
     return SequenceSymbols(
@@ -324,35 +275,6 @@ class SequenceSymbols {
       offsets: ofSymbols,
       matchLengths: mlSymbols,
     );
-  }
-
-  static int _getLiteralLengthSymbol(final int length) =>
-      _baseSymbol(seq.literalLengthBase, length);
-
-  static int _getMatchLengthSymbol(final int length) =>
-      _baseSymbol(seq.matchLengthBase, length);
-
-  static int _encodeOffsetSymbol(
-    final int literalLength,
-    final int offset,
-    final List<int> prevOffsets,
-  ) {
-    // Keep FSE statistics aligned with SequenceEncoder: absolute offsets only.
-    final symbol = _getAbsoluteOffsetSymbol(offset);
-    prevOffsets[2] = prevOffsets[1];
-    prevOffsets[1] = prevOffsets[0];
-    prevOffsets[0] = offset;
-    return symbol;
-  }
-
-  static int _getAbsoluteOffsetSymbol(final int offset) {
-    for (var i = seq.offsetBase.length - 1; i >= 2; i--) {
-      final base = seq.offsetBase[i];
-      final bits = seq.offsetBits[i];
-      final max = base + ((1 << bits) - 1);
-      if (offset >= base && offset <= max) return i;
-    }
-    throw StateError('Unable to encode offset $offset');
   }
 }
 
@@ -454,7 +376,7 @@ class FseCompressionTable {
         deltaFindState[symbol] = total - 1;
         total++;
       } else if (count > 1) {
-        final maxBitsOut = log - _highestBit(count - 1);
+        final maxBitsOut = log - ((count - 1).bitLength - 1);
         final minStatePlus = count << maxBitsOut;
         deltaNumberOfBits[symbol] = (maxBitsOut << 16) - minStatePlus;
         deltaFindState[symbol] = total - count;
@@ -470,11 +392,6 @@ class FseCompressionTable {
     );
   }
 
-  static int _highestBit(final int value) {
-    if (value == 0) return 0;
-    return value.bitLength - 1;
-  }
-
   /// Get initial state for a symbol (no bits written)
   int begin(final int symbol) {
     final outputBits = (_deltaNumberOfBits[symbol] + (1 << 15)) >> 16;
@@ -484,60 +401,14 @@ class FseCompressionTable {
   }
 
   /// Encode symbol: write low bits of state, return next state
-  int encode(final BitOutputStream stream, final int state, final int symbol) {
+  int encode(final BitStreamWriter stream, final int state, final int symbol) {
     final outputBits = (state + _deltaNumberOfBits[symbol]) >> 16;
-    stream.addBits(state, outputBits);
+    stream.writeBits(state, outputBits);
     return _nextState[(state >> outputBits) + _deltaFindState[symbol]];
   }
 
   /// Write final state bits
-  void finish(final BitOutputStream stream, final int state) {
-    stream.addBits(state, tableLog);
-    stream.flush();
-  }
-}
-
-/// Bit output stream matching Java BitOutputStream behavior
-class BitOutputStream {
-  int _container = 0;
-  int _bitCount = 0;
-  // Uint8List-backed (via GrowableBuffer) rather than a boxed growable
-  // <int> list with a final fromList copy.
-  final _bytes = GrowableBuffer();
-
-  /// Add bits to the stream (LSB accumulation)
-  ///
-  /// Complete bytes are flushed on every add, so the container holds at most
-  /// 7 + 22 bits (the widest field is an offset's extra bits) and stays a
-  /// non-negative 32-bit value; dart2js truncates `<<` results to 32 bits.
-  void addBits(final int value, final int bits) {
-    if (bits <= 0) return;
-    _container |= (value & ((1 << bits) - 1)) << _bitCount;
-    _bitCount += bits;
-    flush();
-  }
-
-  /// Flush complete bytes to output
-  void flush() {
-    final bytes = _bitCount >> 3;
-    for (var i = 0; i < bytes; i++) {
-      _bytes.addByte(_container & 0xFF);
-      _container >>= 8;
-    }
-    _bitCount &= 7;
-  }
-
-  /// Close stream: add end marker, flush, return bytes
-  Uint8List close() {
-    // Add end marker bit
-    addBits(1, 1);
-    flush();
-
-    // Flush remaining bits
-    if (_bitCount > 0) {
-      _bytes.addByte(_container & ((1 << _bitCount) - 1));
-    }
-
-    return _bytes.toBytes();
+  void finish(final BitStreamWriter stream, final int state) {
+    stream.writeBits(state, tableLog);
   }
 }

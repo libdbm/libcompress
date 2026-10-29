@@ -3,23 +3,19 @@ import 'dart:typed_data';
 import '../compression_options.dart';
 import '../compression_stream_codec.dart';
 import '../util/crc32.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/stream_compressor.dart';
-import 'gzip_codec.dart';
 import 'gzip_frame.dart';
 import 'gzip_incremental_decoder.dart';
 import 'streaming_deflate_encoder.dart';
-
-/// Default maximum buffer size for stream decoders (64MB)
-const int defaultMaxBufferSize = 64 * 1024 * 1024;
+import 'gzip_codec.dart' show GzipOptions, validateHeader;
 
 /// Gzip streaming codec
 ///
 /// Provides stream-based compression and decompression for GZIP.
-/// Each chunk emitted during compression is a complete, independent
-/// GZIP member that can be concatenated (per RFC 1952, multiple members
-/// are allowed).
-class GzipStreamCodec extends CompressionStreamCodec {
+/// Compression emits one member whose DEFLATE matches span input chunks
+/// (32 KB window); decompression accepts concatenated members (RFC 1952).
+final class GzipStreamCodec extends CompressionStreamCodec {
   /// Compression level (1-9)
   final int level;
 
@@ -40,16 +36,42 @@ class GzipStreamCodec extends CompressionStreamCodec {
   /// have already been emitted (inherent to streaming, like zlib).
   final bool verified;
 
-  /// Creates a GZIP streaming codec
+  /// MTIME written into the header, in seconds since the epoch (0 = not
+  /// set). The default 0 makes output depend only on the input.
+  final int mtime;
+
+  /// Optional filename to embed in the GZIP header
+  final String? filename;
+
+  /// Optional comment to embed in the GZIP header
+  final String? comment;
+
+  /// Creates a GZIP streaming codec. [filename] and [comment] may not contain
+  /// a NUL, which GZIP uses to end them.
   GzipStreamCodec({
     this.level = 6,
-    this.maxSize = gzipDefaultMaxDecompressedSize,
+    this.mtime = 0,
+    this.filename,
+    this.comment,
+    this.maxSize = defaultMaxSize,
     this.maxBufferSize = defaultMaxBufferSize,
     this.verified = false,
   }) {
     validateLevel(level, 1, 9);
     validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
+    validateHeader(mtime, filename, comment);
+  }
+
+  /// Creates a GZIP stream codec from [options].
+  factory GzipStreamCodec.fromOptions(final GzipOptions options) {
+    return GzipStreamCodec(
+      level: options.level,
+      mtime: options.mtime,
+      filename: options.filename,
+      comment: options.comment,
+      maxSize: options.maxSize,
+    );
   }
 
   @override
@@ -61,7 +83,18 @@ class GzipStreamCodec extends CompressionStreamCodec {
     // whose matches span chunk boundaries (history is preserved), one trailer
     // with the streamed CRC32 + ISIZE. Backpressure + error boundary come from
     // the shared base.
-    return compressStream(input, _GzipStreamCompressor(level));
+    return compressStream(
+      input,
+      _GzipStreamCompressor(
+        level,
+        GzipFrame.headerBytes(
+          level: level,
+          mtime: mtime,
+          filename: filename,
+          comment: comment,
+        ),
+      ),
+    );
   }
 
   @override
@@ -82,23 +115,16 @@ class GzipStreamCodec extends CompressionStreamCodec {
 /// Wraps [StreamingDeflateEncoder] with the GZIP member framing (single header,
 /// streamed CRC32 + ISIZE trailer).
 class _GzipStreamCompressor implements StreamCompressor {
-  _GzipStreamCompressor(this._level)
-    : _deflate = StreamingDeflateEncoder(level: _level);
+  _GzipStreamCompressor(final int level, this._header)
+    : _deflate = StreamingDeflateEncoder(level: level);
 
-  final int _level;
+  final Uint8List _header;
   final StreamingDeflateEncoder _deflate;
   int _crc = 0xFFFFFFFF;
   int _isize = 0;
 
   @override
-  Uint8List header() {
-    final xfl = _level >= 9 ? 2 : (_level <= 1 ? 4 : 0);
-    return Uint8List.fromList([
-      GzipFrame.id1, GzipFrame.id2, GzipFrame.cmDeflate, 0, // magic, CM, FLG
-      0, 0, 0, 0, // MTIME = 0
-      xfl, GzipFrame.osUnix,
-    ]);
-  }
+  Uint8List header() => _header;
 
   @override
   Uint8List addChunk(final Uint8List data) {
@@ -110,18 +136,9 @@ class _GzipStreamCompressor implements StreamCompressor {
   @override
   Uint8List finish() {
     final tail = _deflate.finish();
-    final crc = _crc ^ 0xFFFFFFFF;
-    final out = Uint8List(tail.length + 8);
-    out.setRange(0, tail.length, tail);
-    var p = tail.length;
-    out[p++] = crc & 0xFF;
-    out[p++] = (crc >> 8) & 0xFF;
-    out[p++] = (crc >> 16) & 0xFF;
-    out[p++] = (crc >> 24) & 0xFF;
-    out[p++] = _isize & 0xFF;
-    out[p++] = (_isize >> 8) & 0xFF;
-    out[p++] = (_isize >> 16) & 0xFF;
-    out[p++] = (_isize >> 24) & 0xFF;
-    return out;
+    final trailer = GzipFrame.trailerBytes(_crc ^ 0xFFFFFFFF, _isize);
+    return Uint8List(tail.length + 8)
+      ..setRange(0, tail.length, tail)
+      ..setRange(tail.length, tail.length + 8, trailer);
   }
 }

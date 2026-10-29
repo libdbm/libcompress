@@ -31,8 +31,8 @@ void main() {
     test('a throw from onData surfaces via the output stream', () {
       final out = pumpBytes(
         Stream.value(_b([1, 2, 3])),
-        onData: (chunk, emit) => throw StateError('boom'),
-        onDone: (emit) {},
+        onData: (final chunk, final emit) => throw StateError('boom'),
+        onDone: (final emit) {},
       );
       expect(out.toList(), throwsA(isA<StateError>()));
     });
@@ -40,8 +40,8 @@ void main() {
     test('a throw from onDone surfaces via the output stream', () {
       final out = pumpBytes(
         const Stream.empty(),
-        onData: (chunk, emit) {},
-        onDone: (emit) => throw StateError('done boom'),
+        onData: (final chunk, final emit) {},
+        onDone: (final emit) => throw StateError('done boom'),
       );
       expect(out.toList(), throwsA(isA<StateError>()));
     });
@@ -49,10 +49,52 @@ void main() {
     test('a source error surfaces via the output stream', () {
       final out = pumpBytes(
         Stream<Uint8List>.error(StateError('src')),
-        onData: (chunk, emit) {},
-        onDone: (emit) {},
+        onData: (final chunk, final emit) {},
+        onDone: (final emit) {},
       );
       expect(out.toList(), throwsA(isA<StateError>()));
+    });
+
+    // A single-subscription source that is already being listened to.
+    Stream<Uint8List> taken() {
+      final source = StreamController<Uint8List>();
+      source.stream.listen(null);
+      addTearDown(source.close);
+      return source.stream;
+    }
+
+    test('a source that cannot be listened to fails the output stream, '
+        'with no uncaught error', () async {
+      final uncaught = <Object>[];
+      final errors = <Object>[];
+      final done = Completer<void>();
+      runZonedGuarded(() {
+        pumpBytes(
+          taken(),
+          onData: (final chunk, final emit) {},
+          onDone: (final emit) {},
+        ).listen(null, onError: errors.add, onDone: done.complete);
+      }, (final error, final stack) => uncaught.add(error));
+      await done.future.timeout(const Duration(seconds: 1));
+      expect(uncaught, isEmpty);
+      expect(errors, [isA<StateError>()]);
+    });
+
+    test('cancelling after a failed listen completes cleanly', () async {
+      final uncaught = <Object>[];
+      await runZonedGuarded(
+        () async {
+          final subscription = pumpBytes(
+            taken(),
+            onData: (final chunk, final emit) {},
+            onDone: (final emit) {},
+          ).listen(null, onError: (_) {});
+          await subscription.cancel();
+        },
+        (final error, final stack) => uncaught.add(error),
+      )?.timeout(const Duration(seconds: 1));
+      await Future<void>.delayed(Duration.zero);
+      expect(uncaught, isEmpty);
     });
   });
 
@@ -83,8 +125,8 @@ void main() {
       );
       final out = pumpBytes(
         source.stream,
-        onData: (chunk, emit) => emit(chunk),
-        onDone: (emit) {},
+        onData: (final chunk, final emit) => emit(chunk),
+        onDone: (final emit) {},
       );
 
       final sub = out.listen((_) {});

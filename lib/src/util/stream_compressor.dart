@@ -10,7 +10,7 @@ abstract interface class StreamCompressor {
 
   /// Compresses [data] and returns the bytes produced (may be empty if the
   /// chunk is too small to emit yet).
-  Uint8List addChunk(Uint8List data);
+  Uint8List addChunk(final Uint8List data);
 
   /// Flushes the final block and trailer.
   Uint8List finish();
@@ -31,11 +31,11 @@ Stream<Uint8List> compressStream(
 
   return pumpBytes(
     input,
-    onData: (chunk, emit) {
+    onData: (final chunk, final emit) {
       writeHeader(emit);
       emit(compressor.addChunk(chunk));
     },
-    onDone: (emit) {
+    onDone: (final emit) {
       writeHeader(emit);
       emit(compressor.finish());
     },

@@ -1,28 +1,9 @@
 import 'dart:typed_data';
 
-/// Codec capability modes
-///
-/// Used to query what features a codec supports via [CompressionCodec.supports].
-enum CodecMode {
-  /// Block-based (synchronous) compression/decompression
-  ///
-  /// All codecs support this mode - compress/decompress operate on
-  /// complete byte arrays in memory.
-  block,
-
-  /// Stream-based compression/decompression
-  ///
-  /// Codec has a corresponding [CompressionStreamCodec] implementation
-  /// that can process data incrementally via Dart streams.
-  stream,
-}
-
 /// Base class for compression codecs
 ///
-/// Provides both synchronous and asynchronous APIs for compressing
-/// and decompressing data. Synchronous methods are suitable for small
-/// data that fits in memory, while async methods allow better responsiveness
-/// for large data or UI contexts.
+/// Compresses and decompresses whole byte arrays synchronously. For large
+/// or untrusted input, see [CompressionStreamCodec].
 ///
 /// ## Thread Safety
 ///
@@ -34,16 +15,18 @@ enum CodecMode {
 ///
 /// ## Exception Behavior
 ///
-/// All codecs throw specific exceptions on errors:
+/// Malformed input raises a codec-specific exception:
 /// - **[Lz4FormatException]**: Invalid LZ4 frame/block structure
 /// - **[GzipFormatException]**: Invalid GZIP header/trailer or CRC mismatch
-/// - **[DeflateFormatException]**: Invalid DEFLATE block structure
+/// - **[DeflateFormatException]**: Invalid DEFLATE block structure (a
+///   [GzipFormatException])
 /// - **[ZstdFormatException]**: Invalid Zstandard frame/block structure
 /// - **[SnappyFormatException]**: Invalid Snappy block or framing format
-/// - **[StateError]**: Internal decoder state issues (e.g., exhausted input)
-/// - **[RangeError]**: Bounds violations (should be rare with valid input)
 ///
-/// All format exceptions extend [CompressionFormatException] which extends
+/// Exceeding a limit (`maxSize`, an expected `size`, or a stream's
+/// `maxBufferSize`) raises [LimitException], naming the limit.
+///
+/// All of these extend [CompressionFormatException] which extends
 /// [FormatException], allowing catch-all error handling:
 /// ```dart
 /// try {
@@ -57,7 +40,7 @@ enum CodecMode {
 ///
 /// Each codec supports a maximum decompressed size limit to prevent
 /// decompression bomb attacks. Configure via codec-specific constructors
-/// (e.g., `Lz4Codec(maxDecompressedSize: 10 * 1024 * 1024)`).
+/// (e.g., `Lz4Codec(maxSize: 10 * 1024 * 1024)`).
 ///
 /// The constructors default to a sane cap. Passing `null` (or
 /// `maxSize: null`) means **unlimited output** and removes that protection —
@@ -72,12 +55,12 @@ enum CodecMode {
 /// the chunked streaming APIs ([CompressionStreamCodec]). (There are no
 /// `*Async` convenience methods — a microtask wrapper would not actually offload
 /// the work.)
-abstract class CompressionCodec {
+abstract base class CompressionCodec {
   /// Compress data synchronously
   ///
   /// Takes a byte array and returns compressed data. The entire input
   /// must fit in memory. For large data, consider using streaming APIs.
-  Uint8List compress(Uint8List data);
+  Uint8List compress(final Uint8List data);
 
   /// Decompress data synchronously
   ///
@@ -86,25 +69,16 @@ abstract class CompressionCodec {
   /// invalid format.
   ///
   /// This materializes the entire output (up to the codec's
-  /// `maxDecompressedSize`) before validating the trailer/checksum, so for
+  /// `maxSize`) before validating the trailer/checksum, so for
   /// untrusted or large input prefer the streaming codec, which is incremental
   /// and bounded (`CompressionStreamCodec`, e.g. via `CodecFactory.streaming`).
-  Uint8List decompress(Uint8List data);
+  ///
+  /// When the uncompressed length is known, as for a Parquet page, pass it as
+  /// [size]: decoding stops once output would exceed it, and output of any
+  /// other length is rejected as a [CompressionFormatException]. A negative
+  /// [size] is an [ArgumentError].
+  Uint8List decompress(final Uint8List data, {final int? size});
 
-  /// Get codec name (e.g., 'LZ4', 'GZIP', 'Snappy')
+  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4' or 'ZSTD'.
   String get name;
-
-  /// Check if this codec supports a given mode
-  ///
-  /// Use this to query codec capabilities before attempting operations:
-  /// ```dart
-  /// if (codec.supports(CodecMode.stream)) {
-  ///   final streamCodec = CodecFactory.streaming(CodecType.lz4);
-  ///   // Use streaming API
-  /// }
-  /// ```
-  ///
-  /// All codecs support [CodecMode.block]. Override this method to
-  /// indicate additional capabilities like [CodecMode.stream].
-  bool supports(final CodecMode mode) => mode == CodecMode.block;
 }

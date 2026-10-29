@@ -22,9 +22,15 @@ import 'compressed_block_encoder.dart';
 /// - Raw/RLE blocks for incompressible/repetitive data
 /// - XXH64 content checksum (optional)
 class ZstdEncoder {
+  /// Largest content written as a single segment: 8 MB.
+  static const int _windowLimit = 8 << 20;
+
+  /// Window_Descriptor for an 8 MB window: exponent 13 (2^(10+13)), mantissa 0.
+  static const int _windowDescriptor = 13 << 3;
+
   final int level;
   final int blockSize;
-  final bool enableChecksum;
+  final bool checksum;
   final bool validate;
 
   /// Fail loud on an unexpected compressed-block encode error instead of
@@ -57,7 +63,7 @@ class ZstdEncoder {
   ZstdEncoder({
     this.level = 3,
     this.blockSize = 128 * 1024,
-    this.enableChecksum = false,
+    this.checksum = false,
     this.validate = false,
     this.strict = false,
     this.onFallback,
@@ -140,14 +146,16 @@ class ZstdEncoder {
     }
 
     // Write checksum if enabled
-    if (enableChecksum) {
+    if (checksum) {
       // Per RFC 8878: content checksum is low 32 bits of XXH64
-      final checksum = XXH64.hashLow32(input);
-      ByteUtils.writeUint32LEAt(output, pos, checksum);
+      final digest = XXH64.hashLow32(input);
+      ByteUtils.writeUint32LEAt(output, pos, digest);
       pos += 4;
     }
 
-    return Uint8List.sublistView(output, 0, pos);
+    // Own only the encoded bytes: a view would retain the input-sized
+    // worst-case allocation even for a tiny RLE frame.
+    return Uint8List.fromList(Uint8List.sublistView(output, 0, pos));
   }
 
   /// Write frame header per RFC 8878. Returns new position.
@@ -174,11 +182,17 @@ class ZstdEncoder {
       descriptor |= 0x03 << 6; // FCS flag 3: 8 bytes
     }
 
-    // Single segment flag (no window descriptor needed)
-    descriptor |= 0x20;
+    // Single segment (window = content size) up to the 8 MB window RFC 8878
+    // recommends every decoder support; larger content declares an 8 MB
+    // window instead. Matches never cross a block, so offsets stay well
+    // inside it.
+    final single = contentSize <= _windowLimit;
+    if (single) {
+      descriptor |= 0x20;
+    }
 
     // Checksum flag
-    if (enableChecksum) {
+    if (checksum) {
       descriptor |= 0x04;
     }
 
@@ -186,6 +200,9 @@ class ZstdEncoder {
     descriptor |= 0x00;
 
     output[pos++] = descriptor;
+    if (!single) {
+      output[pos++] = _windowDescriptor;
+    }
 
     // Write content size
     if (contentSize < 256) {

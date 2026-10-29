@@ -27,7 +27,7 @@ class Match {
   String toString() => 'Match(length: $length, distance: $distance)';
 
   @override
-  bool operator ==(Object other) =>
+  bool operator ==(final Object other) =>
       other is Match && length == other.length && distance == other.distance;
 
   @override
@@ -45,7 +45,7 @@ class LZ77Hash {
   /// Computes LZ4-style hash of 4 bytes
   ///
   /// Uses Knuth's multiplicative hashing for fast, good distribution.
-  static int lz4Hash(Uint8List data, int pos, int shift) {
+  static int lz4Hash(final Uint8List data, final int pos, final int shift) {
     if (pos + 3 >= data.length) {
       return 0;
     }
@@ -54,11 +54,11 @@ class LZ77Hash {
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return (_mul32(value, lz4Multiplier) >> shift) & 0xFFFF;
+    return (ByteUtils.mul32(value, lz4Multiplier) >> shift) & 0xFFFF;
   }
 
   /// Computes Snappy-style hash of 4 bytes
-  static int snappyHash(Uint8List data, int pos) {
+  static int snappyHash(final Uint8List data, final int pos) {
     if (pos + 3 >= data.length) {
       return 0;
     }
@@ -67,35 +67,6 @@ class LZ77Hash {
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return (_mul32(value, snappyMultiplier) >> 16) & 0x3FFF;
+    return (ByteUtils.mul32(value, snappyMultiplier) >> 16) & 0x3FFF;
   }
-
-  /// Computes GZIP/DEFLATE-style hash of 3 bytes
-  ///
-  /// Uses simple XOR combination with bit shifts.
-  static int deflateHash(Uint8List data, int pos, int tableSizeBits) {
-    if (pos + 2 >= data.length) {
-      return 0;
-    }
-    final hash = ((data[pos] << 10) ^ (data[pos + 1] << 5) ^ data[pos + 2]);
-    return hash & ((1 << tableSizeBits) - 1);
-  }
-}
-
-int _mul32(int left, int right) => ByteUtils.mul32(left, right);
-
-/// Constants for LZ77-based algorithms
-class LZ77Constants {
-  /// LZ4 constants
-  static const int lz4MinMatch = 4;
-  static const int lz4MaxDistance = 65535;
-
-  /// Snappy constants
-  static const int snappyMinMatch = 4;
-  static const int snappyMaxDistance = 65536;
-
-  /// DEFLATE constants
-  static const int deflateMinMatch = 3;
-  static const int deflateMaxMatch = 258;
-  static const int deflateMaxDistance = 32768;
 }

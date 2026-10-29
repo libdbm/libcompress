@@ -44,7 +44,7 @@ import 'dart:typed_data';
 /// - Zstd: the frame window (bounded for window-descriptor frames; equal to the
 ///   content size for single-segment frames, which declare they fit)
 ///
-/// `maxDecompressedSize` caps cumulative output (across all concatenated
+/// `maxSize` caps cumulative output (across all concatenated
 /// members/frames); `maxBufferSize` caps buffered compressed input. Malformed
 /// or oversized input is rejected as a [CompressionFormatException].
 ///
@@ -56,7 +56,7 @@ import 'dart:typed_data';
 /// file or downstream parser that need all-or-nothing integrity can set the
 /// codec's `verified: true`, which withholds each member/frame's output until
 /// its trailer validates, then releases it (raising peak memory to one
-/// member/frame's output, still bounded by `maxDecompressedSize`).
+/// member/frame's output, still bounded by `maxSize`).
 ///
 /// **Compression** preserves history across chunks where supported, producing
 /// a single standard frame/member rather than one per chunk:
@@ -77,8 +77,8 @@ import 'dart:typed_data';
 ///   onError: (e) => print('Decompression failed: $e'),
 /// );
 /// ```
-abstract class CompressionStreamCodec {
-  /// The name of this codec (e.g., 'LZ4', 'GZIP', 'Snappy')
+abstract base class CompressionStreamCodec {
+  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4' or 'ZSTD'.
   String get name;
 
   /// Compresses a stream of data chunks
@@ -93,7 +93,7 @@ abstract class CompressionStreamCodec {
   /// final compressed = codec.compress(input);
   /// await compressed.pipe(File('large.txt.lz4').openWrite());
   /// ```
-  Stream<Uint8List> compress(Stream<Uint8List> input);
+  Stream<Uint8List> compress(final Stream<Uint8List> input);
 
   /// Decompresses a stream of compressed data chunks
   ///
@@ -106,7 +106,7 @@ abstract class CompressionStreamCodec {
   /// final decompressed = codec.decompress(input);
   /// await decompressed.pipe(File('large.txt').openWrite());
   /// ```
-  Stream<Uint8List> decompress(Stream<Uint8List> input);
+  Stream<Uint8List> decompress(final Stream<Uint8List> input);
 
   /// Creates a stream transformer for compression
   ///

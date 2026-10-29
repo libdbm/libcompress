@@ -3,20 +3,16 @@ import 'dart:typed_data';
 import '../exceptions.dart';
 import '../util/byte_utils.dart';
 import '../util/varint.dart';
+import '../util/platform.dart';
+import '../compression_options.dart' as options;
 
 // Re-export exception from centralized location
 export '../exceptions.dart' show SnappyFormatException;
 
-/// Default decompression cap for the Snappy codecs, matching the other codecs'
-/// 256 MB default. `null` may be passed for unlimited (trusted input only).
-const int snappyDefaultMaxDecompressedSize = 256 * 1024 * 1024;
-
-/// Native Dart implementation of Snappy decompression
-/// Based on the Snappy format specification and jsnappy Java implementation
 class SnappyDecoder {
   /// Maximum allowed uncompressed size, shared with the codecs (256 MB).
   /// Can be overridden by passing a different value to decompress()
-  static const int defaultMaxSize = snappyDefaultMaxDecompressedSize;
+  static const int defaultMaxSize = options.defaultMaxSize;
 
   /// Largest output a single body byte can contribute: a 3-byte copy element
   /// emits at most 64 bytes, and no element does better.
@@ -32,7 +28,6 @@ class SnappyDecoder {
   static Uint8List decompress(
     final Uint8List compressed, {
     final int? maxUncompressedSize = defaultMaxSize,
-    int? uncompressedLength,
   }) {
     if (compressed.isEmpty) {
       throw SnappyFormatException('Cannot decompress empty input');
@@ -42,30 +37,21 @@ class SnappyDecoder {
     int targetIndex = 0;
 
     // Read uncompressed length (varint format) from the beginning of the stream
-    final int actualUncompressedLength;
-    if (uncompressedLength != null) {
-      actualUncompressedLength = uncompressedLength;
-    } else {
-      final VarintResult result;
-      try {
-        // Snappy's uncompressed-length preamble is at most 32 bits (5 bytes).
-        result = Varint.decode(compressed, sourceIndex, maxBytes: 5);
-      } on FormatException catch (e) {
-        throw SnappyFormatException(
-          'Invalid Snappy length prefix: ${e.message}',
-        );
-      }
-      actualUncompressedLength = result.value;
-      sourceIndex += result.bytesRead;
+    final VarintResult result;
+    try {
+      // Snappy's uncompressed-length preamble is at most 32 bits (5 bytes).
+      result = Varint.decode(compressed, sourceIndex, maxBytes: 5);
+    } on FormatException catch (e) {
+      throw SnappyFormatException('Invalid Snappy length prefix: ${e.message}');
     }
+    final actualUncompressedLength = result.value;
+    sourceIndex += result.bytesRead;
 
     // Enforce maximum uncompressed size to prevent memory exhaustion
     // (null = unlimited).
     if (maxUncompressedSize != null &&
         actualUncompressedLength > maxUncompressedSize) {
-      throw SnappyFormatException(
-        'Uncompressed size $actualUncompressedLength exceeds maximum $maxUncompressedSize',
-      );
+      throw LimitException(maxUncompressedSize);
     }
 
     // Reject a declared length the body cannot produce before allocating it,
@@ -83,13 +69,16 @@ class SnappyDecoder {
 
     // Preallocate output buffer with exact size
     final uncompressed = Uint8List(actualUncompressedLength);
+    final words = ByteData.sublistView(uncompressed);
+    final input = ByteData.sublistView(compressed);
 
     // Decompress data
     while (sourceIndex < compressed.length) {
       final tag = compressed[sourceIndex];
-      final tagType = tag & 3;
+      final int length;
+      final int offset;
 
-      switch (tagType) {
+      switch (tag & 3) {
         case 0: // Literal
           int literalLength = (tag >> 2) & 0x3f;
           sourceIndex++;
@@ -144,15 +133,34 @@ class SnappyDecoder {
           if (targetIndex + literalLength > actualUncompressedLength) {
             throw SnappyFormatException('Literal write exceeds output buffer');
           }
-          uncompressed.setRange(
-            targetIndex,
-            targetIndex + literalLength,
-            compressed,
-            sourceIndex,
-          );
+          if (wide &&
+              literalLength <= 64 &&
+              targetIndex + literalLength + 8 <= actualUncompressedLength &&
+              sourceIndex + literalLength + 8 <= compressed.length) {
+            // 8 bytes at a time; bytes written past the literal are
+            // overwritten later.
+            for (var i = 0; i < literalLength; i += 8) {
+              words.setUint64(
+                targetIndex + i,
+                input.getUint64(sourceIndex + i, Endian.little),
+                Endian.little,
+              );
+            }
+          } else if (literalLength <= 16) {
+            for (var i = 0; i < literalLength; i++) {
+              uncompressed[targetIndex + i] = compressed[sourceIndex + i];
+            }
+          } else {
+            uncompressed.setRange(
+              targetIndex,
+              targetIndex + literalLength,
+              compressed,
+              sourceIndex,
+            );
+          }
           sourceIndex += literalLength;
           targetIndex += literalLength;
-          break;
+          continue;
 
         case 1: // Copy with 1-byte offset
           if (sourceIndex + 2 > compressed.length) {
@@ -160,23 +168,9 @@ class SnappyDecoder {
               'Truncated copy tag at offset $sourceIndex',
             );
           }
-          final length = 4 + ((tag >> 2) & 7);
-          final offset = ((tag & 0xe0) << 3) | compressed[sourceIndex + 1];
+          length = 4 + ((tag >> 2) & 7);
+          offset = ((tag & 0xe0) << 3) | compressed[sourceIndex + 1];
           sourceIndex += 2;
-
-          // Validate offset for 1-byte encoding (11-bit max = 2047)
-          if (offset > 2047) {
-            throw SnappyFormatException(
-              'Offset $offset exceeds 1-byte encoding max (2047)',
-            );
-          }
-
-          if (targetIndex + length > actualUncompressedLength) {
-            throw SnappyFormatException('Copy write exceeds output buffer');
-          }
-          _copyBytes(uncompressed, targetIndex, offset, length);
-          targetIndex += length;
-          break;
 
         case 2: // Copy with 2-byte offset
           if (sourceIndex + 3 > compressed.length) {
@@ -184,43 +178,74 @@ class SnappyDecoder {
               'Truncated copy tag at offset $sourceIndex',
             );
           }
-          final length = ((tag >> 2) & 0x3f) + 1;
-          final offset =
+          length = ((tag >> 2) & 0x3f) + 1;
+          offset =
               compressed[sourceIndex + 1] | (compressed[sourceIndex + 2] << 8);
           sourceIndex += 3;
 
-          // Validate offset for 2-byte encoding (16-bit max = 65535)
-          if (offset > 65535) {
-            throw SnappyFormatException(
-              'Offset $offset exceeds 2-byte encoding max (65535)',
-            );
-          }
-
-          if (targetIndex + length > actualUncompressedLength) {
-            throw SnappyFormatException('Copy write exceeds output buffer');
-          }
-          _copyBytes(uncompressed, targetIndex, offset, length);
-          targetIndex += length;
-          break;
-
-        case 3: // Copy with 4-byte offset
+        default: // 3: Copy with 4-byte offset
           if (sourceIndex + 5 > compressed.length) {
             throw SnappyFormatException(
               'Truncated copy tag at offset $sourceIndex',
             );
           }
-          final length = ((tag >> 2) & 0x3f) + 1;
+          length = ((tag >> 2) & 0x3f) + 1;
           // Use ByteUtils for JS-safe 32-bit read (avoids signed overflow)
-          final offset = ByteUtils.readUint32LE(compressed, sourceIndex + 1);
+          offset = ByteUtils.readUint32LE(compressed, sourceIndex + 1);
           sourceIndex += 5;
-
-          if (targetIndex + length > actualUncompressedLength) {
-            throw SnappyFormatException('Copy write exceeds output buffer');
-          }
-          _copyBytes(uncompressed, targetIndex, offset, length);
-          targetIndex += length;
-          break;
       }
+
+      // Copy [length] bytes from [offset] back, checked once per copy.
+      if (offset == 0 || offset > targetIndex) {
+        throw SnappyFormatException(
+          'Invalid offset: $offset at position $targetIndex',
+        );
+      }
+      if (targetIndex + length > actualUncompressedLength) {
+        throw SnappyFormatException('Copy write exceeds output buffer');
+      }
+      final from = targetIndex - offset;
+      if (wide &&
+          offset >= 8 &&
+          targetIndex + length + 8 <= actualUncompressedLength) {
+        // 8 bytes at a time: each word read was written before, and bytes
+        // written past the copy are overwritten later.
+        for (var i = 0; i < length; i += 8) {
+          words.setUint64(
+            targetIndex + i,
+            words.getUint64(from + i, Endian.little),
+            Endian.little,
+          );
+        }
+      } else if (offset >= length) {
+        // Short copies, which are most of them, are cheaper as a loop than a
+        // setRange call.
+        if (length <= 16) {
+          for (var i = 0; i < length; i++) {
+            uncompressed[targetIndex + i] = uncompressed[from + i];
+          }
+        } else {
+          uncompressed.setRange(
+            targetIndex,
+            targetIndex + length,
+            uncompressed,
+            from,
+          );
+        }
+      } else if (offset == 1) {
+        uncompressed.fillRange(
+          targetIndex,
+          targetIndex + length,
+          uncompressed[from],
+        );
+      } else {
+        // Forward copying reads bytes written earlier in this same match,
+        // naturally repeating the pattern without a modulo per byte.
+        for (var i = 0; i < length; i++) {
+          uncompressed[targetIndex + i] = uncompressed[from + i];
+        }
+      }
+      targetIndex += length;
     }
 
     if (targetIndex != actualUncompressedLength) {
@@ -230,44 +255,5 @@ class SnappyDecoder {
     }
 
     return uncompressed;
-  }
-
-  /// Copy bytes from earlier in the output
-  static void _copyBytes(
-    Uint8List output,
-    int targetIndex,
-    int offset,
-    int length,
-  ) {
-    if (offset <= 0) {
-      throw SnappyFormatException(
-        'Invalid offset: $offset at position $targetIndex',
-      );
-    }
-    if (offset > targetIndex) {
-      throw SnappyFormatException(
-        'Invalid offset: $offset at position $targetIndex',
-      );
-    }
-    if (targetIndex + length > output.length) {
-      throw SnappyFormatException('Copy write exceeds output buffer');
-    }
-
-    final sourceIndex = targetIndex - offset;
-
-    // Handle overlapping copies (when offset < length)
-    if (offset >= length) {
-      // Non-overlapping copy - can use setRange for efficiency
-      output.setRange(targetIndex, targetIndex + length, output, sourceIndex);
-    } else if (offset == 1) {
-      // Special case: repeat single byte
-      final byte = output[sourceIndex];
-      output.fillRange(targetIndex, targetIndex + length, byte);
-    } else {
-      // Overlapping copy - must copy byte by byte
-      for (int i = 0; i < length; i++) {
-        output[targetIndex + i] = output[sourceIndex + (i % offset)];
-      }
-    }
   }
 }

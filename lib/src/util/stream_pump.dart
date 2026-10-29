@@ -22,7 +22,7 @@ Stream<Uint8List> pumpBytes(
   required final void Function(void Function(Uint8List) emit) onDone,
 }) {
   late final StreamController<Uint8List> controller;
-  late StreamSubscription<Uint8List> subscription;
+  StreamSubscription<Uint8List>? subscription;
 
   void emit(final Uint8List output) {
     if (output.isNotEmpty) controller.add(output);
@@ -36,31 +36,36 @@ Stream<Uint8List> pumpBytes(
 
   controller = StreamController<Uint8List>(
     onListen: () {
-      subscription = source.listen(
-        (chunk) {
-          try {
-            onData(chunk, emit);
-          } catch (e, st) {
-            subscription.cancel();
-            fail(e, st);
-          }
-        },
-        onError: (Object e, StackTrace st) => fail(e, st),
-        onDone: () {
-          try {
-            onDone(emit);
-          } catch (e, st) {
-            fail(e, st);
-            return;
-          }
-          controller.close();
-        },
-        cancelOnError: true,
-      );
+      try {
+        subscription = source.listen(
+          (final chunk) {
+            try {
+              onData(chunk, emit);
+            } catch (e, st) {
+              subscription?.cancel();
+              fail(e, st);
+            }
+          },
+          onError: (final Object e, final StackTrace st) => fail(e, st),
+          onDone: () {
+            try {
+              onDone(emit);
+            } catch (e, st) {
+              fail(e, st);
+              return;
+            }
+            controller.close();
+          },
+          cancelOnError: true,
+        );
+      } catch (e, st) {
+        // e.g. a single-subscription source that is already being listened to.
+        fail(e, st);
+      }
     },
-    onPause: () => subscription.pause(),
-    onResume: () => subscription.resume(),
-    onCancel: () => subscription.cancel(),
+    onPause: () => subscription?.pause(),
+    onResume: () => subscription?.resume(),
+    onCancel: () => subscription?.cancel(),
   );
 
   return controller.stream;

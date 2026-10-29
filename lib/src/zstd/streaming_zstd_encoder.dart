@@ -5,6 +5,7 @@ import '../util/stream_compressor.dart';
 import '../util/xxh64.dart';
 import 'compressed_block_encoder.dart';
 import 'zstd_common.dart';
+import '../util/byte_utils.dart';
 
 /// Stateful, single-frame Zstd encoder for streaming compression.
 ///
@@ -73,7 +74,7 @@ class StreamingZstdEncoder implements StreamCompressor {
   Uint8List header() {
     final descriptor = checksum ? 0x04 : 0x00; // FCS=0, not single-segment
     return Uint8List.fromList([
-      ..._u32le(zstdMagicNumber),
+      ...ByteUtils.uint32LE(zstdMagicNumber),
       descriptor,
       _windowByte,
     ]);
@@ -98,7 +99,7 @@ class StreamingZstdEncoder implements StreamCompressor {
   Uint8List finish() {
     final out = BytesBuilder(copy: false);
     out.add(_blockHeader(last: true, type: 0, size: 0)); // empty raw, last
-    if (checksum) out.add(_u32le(_sink.digestLow32()));
+    if (checksum) out.add(ByteUtils.uint32LE(_sink.digestLow32()));
     return out.takeBytes();
   }
 
@@ -170,11 +171,4 @@ class StreamingZstdEncoder implements StreamCompressor {
     if (level <= 16) return 512;
     return 1024;
   }
-
-  static Uint8List _u32le(final int v) => Uint8List.fromList([
-    v & 0xFF,
-    (v >> 8) & 0xFF,
-    (v >> 16) & 0xFF,
-    (v >> 24) & 0xFF,
-  ]);
 }

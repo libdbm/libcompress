@@ -1,3 +1,10 @@
+/// Default cap on decompressed output: 256 MB.
+const int defaultMaxSize = 256 * 1024 * 1024;
+
+/// Default cap on input a streaming decoder buffers while waiting for a whole
+/// block or frame (64 MB).
+const int defaultMaxBufferSize = 64 * 1024 * 1024;
+
 /// Base class for compression codec configuration options
 ///
 /// Provides common configuration parameters that apply to most compression
@@ -26,50 +33,55 @@ abstract class CompressionOptions {
   /// Maximum decompressed size enforced on decode, carried so `fromOptions`
   /// factories preserve a tenant-configured safety limit instead of resetting
   /// to the codec default. `null` means unlimited (trusted input only).
-  final int? maxDecompressedSize;
+  final int? maxSize;
 
   /// Creates compression options with specified parameters
   ///
   /// Level validation is codec-specific - see subclass constructors.
-  /// Throws [ArgumentError] if level is less than 1 or [maxDecompressedSize]
+  /// Throws [ArgumentError] if level is less than 1 or [maxSize]
   /// is non-positive.
   CompressionOptions({
     this.level = 5,
     this.checksum = true,
-    this.maxDecompressedSize = 256 * 1024 * 1024,
+    this.maxSize = defaultMaxSize,
   }) {
     if (level < 1) {
       throw ArgumentError.value(level, 'level', 'Must be at least 1');
     }
-    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
+    validateOptionalPositive(maxSize, 'maxSize');
   }
 }
 
 /// Validates [level] is in `[min, max]`, throwing [ArgumentError] otherwise.
 /// Shared by codec constructors so they fail fast at the API boundary rather
 /// than later during the first compression.
-void validateLevel(int level, int min, int max) {
+void validateLevel(final int level, final int min, final int max) {
   if (level < min || level > max) {
     throw ArgumentError.value(level, 'level', 'Must be between $min and $max');
   }
 }
 
 /// Validates [value] is in `[min, max]` (e.g. a block/chunk size).
-void validateRange(int value, int min, int max, String name) {
+void validateRange(
+  final int value,
+  final int min,
+  final int max,
+  final String name,
+) {
   if (value < min || value > max) {
     throw ArgumentError.value(value, name, 'Must be between $min and $max');
   }
 }
 
 /// Validates [value] is `> 0`.
-void validatePositive(int value, String name) {
+void validatePositive(final int value, final String name) {
   if (value <= 0) {
     throw ArgumentError.value(value, name, 'Must be positive');
   }
 }
 
 /// Validates a nullable limit is either null (unlimited) or `> 0`.
-void validateOptionalPositive(int? value, String name) {
+void validateOptionalPositive(final int? value, final String name) {
   if (value != null && value <= 0) {
     throw ArgumentError.value(
       value,
@@ -77,21 +89,4 @@ void validateOptionalPositive(int? value, String name) {
       'Must be positive, or null for unlimited',
     );
   }
-}
-
-/// Compression level presets for common use cases
-enum CompressionLevel {
-  /// Fastest compression, prioritizes speed over ratio
-  fast(1),
-
-  /// Balanced compression suitable for most cases
-  normal(5),
-
-  /// Best compression, prioritizes ratio over speed
-  best(9);
-
-  /// The numeric compression level
-  final int value;
-
-  const CompressionLevel(this.value);
 }

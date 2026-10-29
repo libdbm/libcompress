@@ -2,21 +2,19 @@ import 'dart:typed_data';
 
 import '../compression_options.dart';
 import '../compression_stream_codec.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/stream_compressor.dart';
 import 'zstd_common.dart';
 import 'zstd_decoder.dart';
 import 'streaming_zstd_encoder.dart';
-
-/// Default maximum buffer size for stream decoders (64MB)
-const int zstdDefaultMaxBufferSize = 64 * 1024 * 1024;
+import 'zstd_codec.dart';
 
 /// Zstd streaming codec
 ///
 /// Provides stream-based compression and decompression for Zstd.
-/// Each chunk emitted during compression is a complete, independent
-/// Zstd frame that can be concatenated with others.
-class ZstdStreamCodec extends CompressionStreamCodec {
+/// Compression emits one window-descriptor frame whose blocks share history
+/// across input chunks; decompression accepts concatenated frames.
+final class ZstdStreamCodec extends CompressionStreamCodec {
   /// Compression level (1-22)
   final int level;
 
@@ -55,8 +53,8 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     this.level = 3,
     this.blockSize = 128 * 1024,
     this.checksum = false,
-    this.maxSize = zstdDefaultMaxDecompressedSize,
-    this.maxBufferSize = zstdDefaultMaxBufferSize,
+    this.maxSize = defaultMaxSize,
+    this.maxBufferSize = defaultMaxBufferSize,
     this.validate = false,
     this.verified = false,
     this.strict = false,
@@ -66,6 +64,19 @@ class ZstdStreamCodec extends CompressionStreamCodec {
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
     validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
+  }
+
+  /// Creates a Zstd stream codec from [options].
+  factory ZstdStreamCodec.fromOptions(final ZstdOptions options) {
+    return ZstdStreamCodec(
+      level: options.level,
+      blockSize: options.blockSize,
+      checksum: options.checksum,
+      maxSize: options.maxSize,
+      validate: options.validate,
+      strict: options.strict,
+      onFallback: options.onFallback,
+    );
   }
 
   @override

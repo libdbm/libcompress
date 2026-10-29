@@ -1,5 +1,7 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import '../util/byte_utils.dart';
+import '../util/platform.dart';
 
 /// Represents a match with literal context for Zstd
 class ZstdMatch {
@@ -16,15 +18,12 @@ class ZstdMatch {
 
 /// LZ77-style match finder for Zstd compression with hash chains
 ///
-/// This finds repeated sequences in the input data using a hash table
-/// with chaining for better match quality. Also searches repeat offsets
-/// for improved compression.
+/// This finds repeated sequences in the input data using a hash table with
+/// chaining for better match quality. Matches are absolute offsets; the
+/// encoder does not emit repeat-offset codes.
 class MatchFinder {
-  static const int _hashLog = 17; // 128K hash table
-  static const int _hashTableSize = 1 << _hashLog;
-  static const int _hashMask = _hashTableSize - 1;
-  static const int _chainMask = 0xFFFF; // 64K chain table
-  static const int _chainSize = 1 << 16;
+  static const int _hashLimit = 17; // at most a 128K-entry hash table
+  static const int _chainLimit = 1 << 16; // at most a 64K-entry chain table
   static const int _maxOffset = 1 << 22; // ~4MB max offset for Zstd
 
   final int searchDepth;
@@ -39,47 +38,60 @@ class MatchFinder {
     this.minMatch = 3,
   });
 
-  // Reused across blocks: a fresh MatchFinder per block would reallocate
-  // these ~192K entries every time. Reset (not reallocated) per findMatches.
-  late final List<int> _hashTable = List<int>.filled(_hashTableSize, -1);
-  late final List<int> _chainTable = List<int>.filled(_chainSize, -1);
+  // Reused across blocks, grown on demand, and reset per findMatches. Both are
+  // sized to the data matched, so a small page does not allocate and clear
+  // 192K entries.
+  Int32List _hashTable = Int32List(0);
+  Int32List _chainTable = Int32List(0);
+  int _hashLog = _hashLimit;
+  int _hashMask = (1 << _hashLimit) - 1;
+  int _chainSize = _chainLimit;
+  int _chainMask = _chainLimit - 1;
 
   // Logical end of the data being matched, set per findMatches run. Lets the
   // streaming encoder pass a larger reused buffer (native, fast element access)
   // while bounding matching to the live `history + piece` region.
   int _end = 0;
 
+  /// [ByteData] over the data being matched, for word loads.
+  ByteData _view = ByteData(0);
+
   /// Hash function for match finding
   int _hash(final Uint8List data, final int pos) {
     if (pos + 3 >= _end) return 0;
-    final v = ByteUtils.readUint32LE(data, pos);
-    final product = ByteUtils.mul32(v, 2654435761);
+    final v = _view.getUint32(pos, Endian.little);
+    final product = wide
+        ? (v * 2654435761) & 0xFFFFFFFF
+        : ByteUtils.mul32(v, 2654435761);
     return (product >> (32 - _hashLog)) & _hashMask;
   }
 
-  /// Find all matches in the input data using hash chains
-  ///
-  /// Returns a list of matches and the trailing literals.
-  /// Note: Repeat offset optimization is handled by SequenceEncoder.
-  /// Finds matches in `input[from..]`. Positions in `[0, from)` are a history
-  /// prefix: they seed the hash so matches in the new region can reference them
-  /// (cross-chunk back-references), but no tokens are emitted for them. With
-  /// the default `from == 0` this is plain whole-buffer matching.
-  /// Matches `input[from..end)`; `[0, from)` is a history prefix (seeds the
-  /// hash, emits no tokens). [end] defaults to `input.length`; pass a smaller
-  /// bound to match only a prefix of a larger (reused) buffer.
+  /// Finds matches in `input[from..end)` using hash chains, and returns them
+  /// with the trailing literals. Positions in `[0, from)` are a history
+  /// prefix: they seed the hash so matches can reach back into them, but no
+  /// tokens are emitted for them. [end] defaults to `input.length`; pass a
+  /// smaller bound to match only a prefix of a larger (reused) buffer.
   (List<ZstdMatch>, Uint8List) findMatches(
     final Uint8List input, {
     final int from = 0,
     final int? end,
   }) {
     _end = end ?? input.length;
+    _view = ByteData.sublistView(input);
     if (_end - from < minMatch) {
       return (<ZstdMatch>[], Uint8List.sublistView(input, from, _end));
     }
 
     final matches = <ZstdMatch>[];
-    final hashTable = _hashTable..fillRange(0, _hashTableSize, -1);
+    // Positions are below _end, so a chain of that many slots never aliases.
+    final bits = math.max(8, (_end - 1).bitLength);
+    _hashLog = math.min(_hashLimit, bits);
+    _hashMask = (1 << _hashLog) - 1;
+    _chainSize = math.min(_chainLimit, 1 << bits);
+    _chainMask = _chainSize - 1;
+    if (_hashTable.length <= _hashMask) _hashTable = Int32List(_hashMask + 1);
+    if (_chainTable.length < _chainSize) _chainTable = Int32List(_chainSize);
+    final hashTable = _hashTable..fillRange(0, _hashMask + 1, -1);
     final chainTable = _chainTable..fillRange(0, _chainSize, -1);
 
     // Seed the hash with the history prefix.
@@ -96,19 +108,36 @@ class MatchFinder {
       // table update (it was computed twice per position before).
       final hash = _hash(input, pos);
 
-      // Find best match using hash chain
-      final (bestLen, bestOffset) = _findBestMatch(
-        input,
-        pos,
-        hash,
-        hashTable,
-        chainTable,
-      );
+      // Find the best match along the hash chain (inline: a record returned
+      // per position costs more than the search at low levels).
+      var bestLen = 0;
+      var bestOffset = 0;
+      if (pos + 3 < _end) {
+        final word = _view.getUint32(pos, Endian.little);
+        var candidate = hashTable[hash];
+        var depth = 0;
+        while (candidate >= 0 &&
+            pos - candidate < _maxOffset &&
+            depth < searchDepth) {
+          // candidate < pos, so both 4-byte reads stay inside the live region.
+          if (_view.getUint32(candidate, Endian.little) == word) {
+            final size = _matchLength(input, candidate, pos, _end);
+            if (size > bestLen) {
+              bestLen = size;
+              bestOffset = pos - candidate;
+            }
+          }
+          final next = chainTable[candidate & _chainMask];
+          if (next >= candidate) break; // Chain must go backward
+          candidate = next;
+          depth++;
+        }
+      }
 
       // Update hash table and chain
-      final prev = hashTable[hash];
-      if (prev >= 0 && pos - prev < _chainSize) {
-        chainTable[pos & _chainMask] = prev;
+      final previous = hashTable[hash];
+      if (previous >= 0 && pos - previous < _chainSize) {
+        chainTable[pos & _chainMask] = previous;
       }
       hashTable[hash] = pos;
 
@@ -139,92 +168,48 @@ class MatchFinder {
   void _update(
     final Uint8List input,
     final int pos,
-    final List<int> hashTable,
-    final List<int> chainTable,
+    final Int32List hashTable,
+    final Int32List chainTable,
   ) {
     final h = _hash(input, pos);
-    final prev = hashTable[h];
-    if (prev >= 0 && pos - prev < _chainSize) {
-      chainTable[pos & _chainMask] = prev;
+    final previous = hashTable[h];
+    if (previous >= 0 && pos - previous < _chainSize) {
+      chainTable[pos & _chainMask] = previous;
     }
     hashTable[h] = pos;
-  }
-
-  /// Find the best match at current position using hash chain
-  ///
-  /// Returns (matchLength, offset)
-  (int, int) _findBestMatch(
-    final Uint8List input,
-    final int pos,
-    final int hash,
-    final List<int> hashTable,
-    final List<int> chainTable,
-  ) {
-    var bestLen = 0;
-    var bestOffset = 0;
-    final end = _end;
-
-    // Search hash chain for best match
-    var candidate = hashTable[hash];
-    var depth = 0;
-
-    while (candidate >= 0 &&
-        pos - candidate < _maxOffset &&
-        depth < searchDepth) {
-      // Quick 4-byte check before full match. candidate < pos, so bounding pos
-      // keeps both reads inside the live region (pos can be end - 3 when
-      // minMatch is 3).
-      if (pos + 3 < end &&
-          ByteUtils.readUint32LE(input, candidate) ==
-              ByteUtils.readUint32LE(input, pos)) {
-        final len = _matchLength(input, candidate, pos, end);
-        if (len > bestLen) {
-          bestLen = len;
-          bestOffset = pos - candidate;
-        }
-      }
-
-      // Follow chain
-      final nextCandidate = chainTable[candidate & _chainMask];
-      if (nextCandidate >= candidate) break; // Chain must go backward
-      candidate = nextCandidate;
-      depth++;
-    }
-
-    return (bestLen, bestOffset);
   }
 
   /// Calculate match length between two positions
   int _matchLength(
     final Uint8List data,
-    final int ref,
-    final int cur,
+    final int source,
+    final int current,
     final int end,
   ) {
-    var len = 0;
-    final maxLen = end - cur;
-    final limit = maxLen < maxMatch ? maxLen : maxMatch;
+    var count = 0;
+    final available = end - current;
+    final limit = available < maxMatch ? available : maxMatch;
 
-    // Fast 8-byte comparison when possible
-    while (len + 8 <= limit) {
-      if (ref + len + 7 >= _end) break;
-      var diff = false;
-      for (var i = 0; i < 8; i++) {
-        if (data[ref + len + i] != data[cur + len + i]) {
-          diff = true;
-          break;
+    // 8 bytes at a time on the VM: the lowest differing byte of two
+    // little-endian words is the first mismatch.
+    if (wide) {
+      while (count + 8 <= limit) {
+        final difference =
+            _view.getUint64(source + count, Endian.little) ^
+            _view.getUint64(current + count, Endian.little);
+        if (difference != 0) {
+          return count + (((difference & -difference).bitLength - 1) >> 3);
         }
+        count += 8;
       }
-      if (diff) break;
-      len += 8;
     }
 
     // Byte-by-byte for remainder
-    while (len < limit && data[ref + len] == data[cur + len]) {
-      len++;
+    while (count < limit && data[source + count] == data[current + count]) {
+      count++;
     }
 
-    return len;
+    return count;
   }
 
   /// Extract literals for all matches from the input
@@ -242,17 +227,17 @@ class MatchFinder {
     // Single typed allocation with bulk copies, rather than per-match
     // sublist + growable addAll + a final fromList (three copies of the data).
     final literals = Uint8List(total);
-    var src = from; // read cursor into input (history prefix is skipped)
-    var dst = 0; // write cursor into literals
+    var source = from; // read cursor into input (history prefix is skipped)
+    var target = 0; // write cursor into literals
     for (final match in matches) {
-      final len = match.literalLength;
-      if (len > 0) {
-        literals.setRange(dst, dst + len, input, src);
-        dst += len;
+      final count = match.literalLength;
+      if (count > 0) {
+        literals.setRange(target, target + count, input, source);
+        target += count;
       }
-      src += len + match.length;
+      source += count + match.length;
     }
-    literals.setRange(dst, dst + trailing.length, trailing);
+    literals.setRange(target, target + trailing.length, trailing);
     return literals;
   }
 }

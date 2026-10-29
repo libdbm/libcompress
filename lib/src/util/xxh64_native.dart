@@ -21,7 +21,7 @@ class XXH64 {
   /// [data] - The input data to hash
   /// [seed] - Optional seed value (default: 0)
   /// Returns the 64-bit hash as a (signed) 64-bit integer
-  static int hash(Uint8List data, [int seed = 0]) {
+  static int hash(final Uint8List data, [final int seed = 0]) {
     final lanes = ByteData.sublistView(data);
     final length = data.length;
     int h64;
@@ -50,12 +50,12 @@ class XXH64 {
   }
 
   /// Computes the low 32 bits of XXH64.
-  static int hashLow32(Uint8List data, [int seed = 0]) {
+  static int hashLow32(final Uint8List data, [final int seed = 0]) {
     return hash(data, seed) & 0xFFFFFFFF;
   }
 
   /// Computes XXH64 hash of a list of integers (treating each as a byte).
-  static int hashFromList(List<int> data, [int seed = 0]) {
+  static int hashFromList(final List<int> data, [final int seed = 0]) {
     return hash(Uint8List.fromList(data), seed);
   }
 

@@ -3,6 +3,16 @@ import 'dart:typed_data';
 import 'byte_sink.dart';
 import 'output_limit.dart';
 
+/// The first [length] bytes of [buffer]: an exact copy when the buffer is
+/// more than twice [length], so a small result does not keep a large
+/// allocation alive (4 KB of compressed output in a 1 MB worst-case buffer),
+/// otherwise a view. Doubling growth leaves at most 2x, so ordinary decoded
+/// output is not copied.
+Uint8List trim(final Uint8List buffer, final int length) {
+  final view = Uint8List.sublistView(buffer, 0, length);
+  return buffer.lengthInBytes > 2 * length ? Uint8List.fromList(view) : view;
+}
+
 /// A growable byte buffer optimized for decompression operations
 ///
 /// Provides efficient appending of bytes and copying from history (for LZ77
@@ -10,7 +20,7 @@ import 'output_limit.dart';
 /// strategy to amortize allocation costs.
 ///
 /// Used by LZ4, Snappy, and GZIP decoders.
-class GrowableBuffer implements ByteSink {
+class GrowableBuffer implements DirectSink {
   Uint8List _buffer;
   int _length = 0;
   final int? _maxCapacity;
@@ -19,10 +29,18 @@ class GrowableBuffer implements ByteSink {
   ///
   /// If [initialCapacity] is 0, a default capacity of 1024 bytes is used.
   /// If [maxCapacity] is provided, the buffer will throw [OutputLimitException] if
-  /// growth would exceed this limit (prevents OOM from malicious inputs).
-  GrowableBuffer([int initialCapacity = 1024, int? maxCapacity])
+  /// growth would exceed this limit (prevents OOM from malicious inputs). The
+  /// capacity never exceeds [maxCapacity], so writing within it needs no check.
+  GrowableBuffer([final int initialCapacity = 1024, final int? maxCapacity])
     : _maxCapacity = maxCapacity,
-      _buffer = Uint8List(initialCapacity > 0 ? initialCapacity : 1024);
+      _buffer = Uint8List(
+        _initial(initialCapacity > 0 ? initialCapacity : 1024, maxCapacity),
+      );
+
+  static int _initial(final int capacity, final int? maximum) =>
+      maximum != null && maximum < capacity
+      ? (maximum < 0 ? 0 : maximum)
+      : capacity;
 
   /// The current number of bytes in the buffer
   @override
@@ -30,15 +48,42 @@ class GrowableBuffer implements ByteSink {
 
   /// Returns the buffer contents as a Uint8List
   ///
-  /// The returned list is a view into the internal buffer up to [length].
-  /// The buffer should not be modified after calling this method.
-  Uint8List toBytes() {
-    return Uint8List.sublistView(_buffer, 0, _length);
+  /// The result is a view into the internal buffer up to [length], or an
+  /// exact copy when the buffer is more than twice [length] (see [trim]). The
+  /// buffer should not be modified after calling this method.
+  Uint8List toBytes() => trim(_buffer, _length);
+
+  /// The backing array, for a decoder that writes into it directly between
+  /// [reserve] and setting [length]. Replaced when the buffer grows.
+  @override
+  Uint8List get bytes => _buffer;
+
+  /// Sets the number of bytes in use after writing into [bytes] directly.
+  set length(final int value) {
+    RangeError.checkValueInInterval(value, 0, _buffer.length, 'length');
+    _length = value;
   }
+
+  /// Ensures room for [count] more bytes past [length].
+  @override
+  int get position => _length;
+
+  @override
+  set position(final int value) => length = value;
+
+  @override
+  int get floor => 0;
+
+  /// Capacity never exceeds the maximum, so the whole array may be written.
+  @override
+  int get room => _buffer.length;
+
+  @override
+  void reserve(final int count) => _ensureCapacity(_length + count);
 
   /// Adds a single byte to the buffer
   @override
-  void addByte(int byte) {
+  void addByte(final int byte) {
     _ensureCapacity(_length + 1);
     _buffer[_length++] = byte;
   }
@@ -50,7 +95,7 @@ class GrowableBuffer implements ByteSink {
   ///
   /// Throws [RangeError] if offset/length are invalid or out of bounds.
   @override
-  void addBytes(List<int> bytes, [int? offset, int? length]) {
+  void addBytes(final List<int> bytes, [final int? offset, final int? length]) {
     final start = offset ?? 0;
     final count = length ?? (bytes.length - start);
 
@@ -96,7 +141,7 @@ class GrowableBuffer implements ByteSink {
   /// buffer.copyFromHistory(1, 5);  // Copies 'A' 5 times: 'AAAAA'
   /// ```
   @override
-  void copyFromHistory(int distance, int length) {
+  void copyFromHistory(final int distance, final int length) {
     if (distance <= 0) {
       throw ArgumentError('Distance must be positive, got $distance');
     }
@@ -110,9 +155,27 @@ class GrowableBuffer implements ByteSink {
     // Handle overlapping copies (distance < length)
     // This creates a repeating pattern
     if (distance < length) {
-      // Copy byte-by-byte to handle overlap correctly
-      for (var i = 0; i < length; i++) {
-        _buffer[_length + i] = _buffer[srcPos + i];
+      if (length <= 32) {
+        // Copy byte-by-byte to handle overlap correctly
+        for (var i = 0; i < length; i++) {
+          _buffer[_length + i] = _buffer[srcPos + i];
+        }
+      } else {
+        // Doubling copies from the pattern start: each copy is a whole number
+        // of periods long, so it continues the pattern, and its source ends
+        // before its destination begins.
+        var copied = distance;
+        _buffer.setRange(_length, _length + distance, _buffer, srcPos);
+        while (copied < length) {
+          final count = copied < length - copied ? copied : length - copied;
+          _buffer.setRange(
+            _length + copied,
+            _length + copied + count,
+            _buffer,
+            srcPos,
+          );
+          copied += count;
+        }
       }
     } else {
       // Non-overlapping: can use bulk copy
@@ -122,13 +185,8 @@ class GrowableBuffer implements ByteSink {
     _length += length;
   }
 
-  /// Adds bytes from a Uint8List view
-  void addBytesView(Uint8List bytes) {
-    addBytes(bytes, 0, bytes.length);
-  }
-
   /// Ensures the buffer has at least the specified capacity
-  void _ensureCapacity(int requiredCapacity) {
+  void _ensureCapacity(final int requiredCapacity) {
     if (requiredCapacity <= _buffer.length) {
       return;
     }
@@ -172,7 +230,7 @@ class GrowableBuffer implements ByteSink {
   /// Returns the byte at the specified index
   ///
   /// Throws RangeError if index is out of bounds.
-  int operator [](int index) {
+  int operator [](final int index) {
     if (index < 0 || index >= _length) {
       throw RangeError.index(index, this, 'index', null, _length);
     }
@@ -182,7 +240,7 @@ class GrowableBuffer implements ByteSink {
   /// Sets the byte at the specified index
   ///
   /// Throws RangeError if index is out of bounds.
-  void operator []=(int index, int value) {
+  void operator []=(final int index, final int value) {
     if (index < 0 || index >= _length) {
       throw RangeError.index(index, this, 'index', null, _length);
     }

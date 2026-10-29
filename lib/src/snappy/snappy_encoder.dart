@@ -11,9 +11,10 @@ class SnappyEncoder {
   static const int _minNonLiteralBlockSize = 16;
   static const int _blockSize = 65536;
   static const int _maxHashTableSize = 16384;
+  static const int _margin = 15;
 
   /// Compress data using Snappy algorithm
-  static Uint8List compress(Uint8List uncompressed) {
+  static Uint8List compress(final Uint8List uncompressed) {
     if (uncompressed.isEmpty) {
       return Uint8List.fromList([0]); // Just the length varint (0)
     }
@@ -31,6 +32,18 @@ class SnappyEncoder {
 
     // Compress data in blocks
     int sourceIndex = 0;
+    // Allocate one unboxed table per operation, then reset it for each block.
+    // Tiny inputs are literals and need no match table at all.
+    // Sized to the largest block: small inputs clear a small table.
+    final largest = math.min(uncompressed.length, _blockSize);
+    final hashTable = uncompressed.length >= _minNonLiteralBlockSize
+        ? Int32List(
+            math.min(
+              _maxHashTableSize,
+              1 << math.max(8, (largest - 1).bitLength),
+            ),
+          )
+        : null;
     while (sourceIndex < uncompressed.length) {
       final blockEnd = math.min(sourceIndex + _blockSize, uncompressed.length);
       compressedIndex = _compressBlock(
@@ -39,28 +52,30 @@ class SnappyEncoder {
         blockEnd - sourceIndex,
         compressed,
         compressedIndex,
+        hashTable,
       );
       sourceIndex = blockEnd;
     }
 
     // Return trimmed result
-    return Uint8List.sublistView(compressed, 0, compressedIndex);
+    return Uint8List.fromList(
+      Uint8List.sublistView(compressed, 0, compressedIndex),
+    );
   }
 
   /// Compress a single block of data
   static int _compressBlock(
-    Uint8List input,
-    int inputOffset,
-    int inputLength,
-    Uint8List output,
-    int outputOffset,
+    final Uint8List input,
+    final int inputOffset,
+    final int inputLength,
+    final Uint8List output,
+    final int outputOffset,
+    final Int32List? hashTable,
   ) {
     final inputEnd = inputOffset + inputLength;
-    final hashTable = List<int>.filled(_maxHashTableSize, -1);
 
-    int ip = inputOffset;
     int op = outputOffset;
-    int literalStart = ip;
+    int literalStart = inputOffset;
 
     if (inputLength < _minNonLiteralBlockSize) {
       // Too small to compress, emit as literal
@@ -68,52 +83,52 @@ class SnappyEncoder {
       return op;
     }
 
-    // Main compression loop
-    while (ip < inputEnd - 3) {
-      // Calculate hash for current position
-      final hash = LZ77Hash.snappyHash(input, ip);
-      final candidate = hashTable[hash];
-      hashTable[hash] = ip;
+    // As the reference, every entry starts at the block start, so a
+    // candidate is always a position in the block.
+    final table = hashTable!..fillRange(0, hashTable.length, inputOffset);
+    // The hash spans the full table; smaller tables keep its low bits.
+    final mask = table.length - 1;
+    // No match starts in the last bytes (the reference kInputMarginBytes).
+    final limit = inputEnd - _margin;
 
-      // Check if we have a match
-      if (candidate >= 0 &&
-          candidate >= inputOffset &&
-          ip - candidate < 65536 && // Max offset for 2-byte encoding
-          ByteUtils.equals4Bytes(input, ip, candidate)) {
-        // Emit any pending literal
-        if (literalStart < ip) {
-          op = _emitLiteral(input, literalStart, ip - literalStart, output, op);
+    var ip = inputOffset + 1;
+    search:
+    while (true) {
+      // Look further apart the longer no match is found: one byte at a time
+      // for the first 32 misses, then two, and so on.
+      var skip = 32;
+      var next = ip;
+      var candidate = inputOffset;
+      do {
+        ip = next;
+        final step = skip >> 5;
+        skip += step;
+        next = ip + step;
+        if (next > limit) break search;
+        final hash = LZ77Hash.snappyHash(input, ip) & mask;
+        candidate = table[hash];
+        table[hash] = ip;
+      } while (!ByteUtils.equals4Bytes(input, ip, candidate));
+
+      op = _emitLiteral(input, literalStart, ip - literalStart, output, op);
+
+      // Emit copies for as long as another match starts where one ends.
+      do {
+        var length = 4;
+        while (ip + length < inputEnd &&
+            input[ip + length] == input[candidate + length]) {
+          length++;
         }
-
-        // Find match length
-        int matchLength = 4;
-        while (ip + matchLength < inputEnd &&
-            candidate + matchLength < inputEnd &&
-            input[ip + matchLength] == input[candidate + matchLength]) {
-          matchLength++;
-        }
-
-        // Emit copy
-        op = _emitCopy(output, op, ip - candidate, matchLength);
-
-        // Advance ip by match length
-        ip += matchLength;
+        op = _emitCopy(output, op, ip - candidate, length);
+        ip += length;
         literalStart = ip;
-
-        // Heuristic: if the match is long, we can skip ahead, as it's
-        // unlikely to find a better match starting just after the current one.
-        if (matchLength > 16) {
-          ip += (matchLength >> 4);
-        }
-
-        // Update hash table for the byte just before the new ip
-        if (ip < inputEnd - 3) {
-          hashTable[LZ77Hash.snappyHash(input, ip - 1)] = ip - 1;
-        }
-      } else {
-        // No match, continue
-        ip++;
-      }
+        if (ip >= limit) break search;
+        table[LZ77Hash.snappyHash(input, ip - 1) & mask] = ip - 1;
+        final hash = LZ77Hash.snappyHash(input, ip) & mask;
+        candidate = table[hash];
+        table[hash] = ip;
+      } while (ByteUtils.equals4Bytes(input, ip, candidate));
+      ip++;
     }
 
     // Emit remaining literal
@@ -132,10 +147,10 @@ class SnappyEncoder {
 
   /// Emit a literal sequence
   static int _emitLiteral(
-    Uint8List input,
-    int offset,
-    int length,
-    Uint8List output,
+    final Uint8List input,
+    final int offset,
+    final int length,
+    final Uint8List output,
     int op,
   ) {
     if (length <= 60) {
@@ -159,38 +174,47 @@ class SnappyEncoder {
     return op + length;
   }
 
-  /// Emit a copy operation
-  static int _emitCopy(Uint8List output, int op, int offset, int length) {
-    // Emit copies, splitting if necessary
-    while (length > 0) {
-      final copyLength = math.min(length, 64);
-
-      if (offset < 2048 && copyLength >= 4 && copyLength <= 11) {
-        // Use 1-byte offset encoding
-        output[op++] = 1 | ((copyLength - 4) << 2) | ((offset >> 8) << 5);
-        output[op++] = offset & 0xff;
-      } else if (offset < 65536) {
-        // Use 2-byte offset encoding
-        output[op++] = 2 | ((copyLength - 1) << 2);
-        output[op++] = offset & 0xff;
-        output[op++] = (offset >> 8) & 0xff;
-      } else {
-        // Use 4-byte offset encoding
-        output[op++] = 3 | ((copyLength - 1) << 2);
-        output[op++] = offset & 0xff;
-        output[op++] = (offset >> 8) & 0xff;
-        output[op++] = (offset >> 16) & 0xff;
-        output[op++] = (offset >> 24) & 0xff;
-      }
-
-      length -= copyLength;
+  /// Emit a copy operation, split as the reference does: pieces of 64 while
+  /// at least 68 bytes remain, then 60 if over 64 remain, so the last piece
+  /// holds at least 4 bytes. Offsets in a 64 KB block fit two bytes.
+  static int _emitCopy(
+    final Uint8List output,
+    int op,
+    final int offset,
+    int length,
+  ) {
+    while (length >= 68) {
+      op = _emitShortCopy(output, op, offset, 64);
+      length -= 64;
     }
+    if (length > 64) {
+      op = _emitShortCopy(output, op, offset, 60);
+      length -= 60;
+    }
+    return _emitShortCopy(output, op, offset, length);
+  }
 
+  /// Emits one copy of at most 64 bytes, in the 1-byte offset form when it
+  /// fits.
+  static int _emitShortCopy(
+    final Uint8List output,
+    int op,
+    final int offset,
+    final int length,
+  ) {
+    if (length < 12 && offset < 2048) {
+      output[op++] = 1 | ((length - 4) << 2) | ((offset >> 8) << 5);
+      output[op++] = offset & 0xff;
+    } else {
+      output[op++] = 2 | ((length - 1) << 2);
+      output[op++] = offset & 0xff;
+      output[op++] = (offset >> 8) & 0xff;
+    }
     return op;
   }
 
   /// Get maximum compressed length for given input size
-  static int _getMaxCompressedLength(int sourceLength) {
+  static int _getMaxCompressedLength(final int sourceLength) {
     // Worst case: varint length + uncompressed data + 1 tag per 60 bytes
     return 10 + sourceLength + (sourceLength ~/ 60) + 16;
   }

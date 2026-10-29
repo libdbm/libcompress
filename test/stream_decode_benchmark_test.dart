@@ -39,7 +39,7 @@ void main() {
       'GZIP': (GzipCodec(), GzipStreamCodec()),
       'LZ4': (Lz4Codec(), Lz4StreamCodec()),
       'Zstd': (ZstdCodec(), ZstdStreamCodec()),
-      'Snappy': (SnappyCodec(framing: true), SnappyStreamCodec()),
+      'Snappy': (SnappyCodec(format: SnappyFormat.framed), SnappyStreamCodec()),
     };
 
     for (final entry in cases.entries) {

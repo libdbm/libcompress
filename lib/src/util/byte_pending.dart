@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import '../exceptions.dart';
+
 /// A contiguous, `Uint8List`-backed pending-input buffer for incremental
 /// decoders: append at the end, read by absolute index, and discard a consumed
 /// prefix (compacting). Unboxed (unlike a `List<int>`) and contiguous, so a
@@ -19,6 +21,42 @@ class BytePending {
   Uint8List get bytes => _backing;
 
   int operator [](final int index) => _backing[index];
+
+  /// Index of the first byte not yet consumed by the decoder.
+  int cursor = 0;
+
+  /// Bytes from [cursor] to the end.
+  int get available => _length - cursor;
+
+  /// The little-endian 32-bit value at [offset] (exact on dart2js).
+  int u32(final int offset) =>
+      _backing[offset] +
+      _backing[offset + 1] * 0x100 +
+      _backing[offset + 2] * 0x10000 +
+      _backing[offset + 3] * 0x1000000;
+
+  /// Appends [data], first throwing [LimitException] if more than [limit]
+  /// unconsumed bytes would then be buffered: rejecting before appending stops
+  /// an oversized chunk forcing the copy ahead of the check.
+  void append(final Uint8List data, final int limit) {
+    if (available + data.length > limit) {
+      throw LimitException(
+        limit,
+        'Buffered input would exceed the limit of $limit bytes - '
+        'frame too large or malformed',
+      );
+    }
+    add(data);
+  }
+
+  /// Discards the consumed bytes before [cursor] once they are all of the
+  /// buffer or at least 8 KB, so the copy is not repeated for every chunk.
+  void compact() {
+    if (cursor > 0 && (cursor >= _length || cursor >= 8192)) {
+      discard(cursor);
+      cursor = 0;
+    }
+  }
 
   /// Appends [data].
   void add(final Uint8List data) {

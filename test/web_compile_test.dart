@@ -21,7 +21,7 @@ void main() {
       reason: [
         result.stdout,
         result.stderr,
-      ].where((line) => line.toString().trim().isNotEmpty).join('\n'),
+      ].where((final line) => line.toString().trim().isNotEmpty).join('\n'),
     );
   }, timeout: const Timeout(Duration(seconds: 90)));
 }

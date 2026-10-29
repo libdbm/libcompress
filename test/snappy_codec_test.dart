@@ -4,10 +4,12 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:libcompress/libcompress.dart';
+import 'package:libcompress/src/util/varint.dart';
 import 'package:libcompress/src/snappy/snappy_decoder.dart';
 import 'package:libcompress/src/snappy/snappy_stream_encoder.dart';
 import 'package:libcompress/src/snappy/snappy_stream_decoder.dart';
 
+import 'support/differential_fuzz.dart';
 import 'test_utils.dart';
 
 /// Valid Snappy framing stream identifier (0xff, len=6, "sNaPpY").
@@ -32,7 +34,10 @@ void main() {
     group('round-trips standardFixtures (raw block)', () {
       for (final path in standardFixtures) {
         test('round-trips $path', () {
-          expectRoundTrip(SnappyCodec(framing: false), readDataFixture(path));
+          expectRoundTrip(
+            SnappyCodec(format: SnappyFormat.raw),
+            readDataFixture(path),
+          );
         });
       }
     });
@@ -40,40 +45,70 @@ void main() {
     group('round-trips standardFixtures (framing)', () {
       for (final path in standardFixtures) {
         test('round-trips $path', () {
-          expectRoundTrip(SnappyCodec(framing: true), readDataFixture(path));
+          expectRoundTrip(
+            SnappyCodec(format: SnappyFormat.framed),
+            readDataFixture(path),
+          );
         });
       }
     });
 
     group('edge cases (raw block)', () {
-      standardEdgeCases().forEach((label, data) {
+      standardEdgeCases().forEach((final label, final data) {
         test(label, () {
-          expectRoundTrip(SnappyCodec(framing: false), data);
+          expectRoundTrip(SnappyCodec(format: SnappyFormat.raw), data);
         });
       });
     });
 
     group('edge cases (framing)', () {
-      standardEdgeCases().forEach((label, data) {
+      standardEdgeCases().forEach((final label, final data) {
         test(label, () {
-          expectRoundTrip(SnappyCodec(framing: true), data);
+          expectRoundTrip(SnappyCodec(format: SnappyFormat.framed), data);
         });
+      });
+    });
+
+    group('copies', () {
+      test('a 66-byte copy is split 60 + 6, not 64 + 2', () {
+        // 20 bytes of noise repeated to 86 bytes: a length byte, a 20-byte
+        // literal (1 + 20), then a 3-byte copy of 60 and a 2-byte copy of 6
+        // (the reference split, leaving at least 4; 64 + 2 takes 6 bytes).
+        final noise = pseudoRandom(20, 9);
+        final data = bytes([for (var i = 0; i < 86; i++) noise[i % 20]]);
+        final compressed = SnappyCodec().compress(data);
+        expect(compressed.length, 1 + 21 + 5);
+        expect(SnappyCodec().decompress(compressed), equals(data));
+      });
+
+      test('long copies round-trip at every split', () {
+        for (var length = 60; length < 200; length++) {
+          final half = pseudoRandom(length, length);
+          final data = bytes([...half, ...half, ...pseudoRandom(20, 1)]);
+          expectRoundTrip(SnappyCodec(), data);
+        }
       });
     });
 
     group('knobs', () {
       test('raw block round-trips', () {
-        expectRoundTrip(SnappyCodec(framing: false), readDataFixture('html'));
+        expectRoundTrip(
+          SnappyCodec(format: SnappyFormat.raw),
+          readDataFixture('html'),
+        );
       });
 
       test('framing round-trips', () {
-        expectRoundTrip(SnappyCodec(framing: true), readDataFixture('html'));
+        expectRoundTrip(
+          SnappyCodec(format: SnappyFormat.framed),
+          readDataFixture('html'),
+        );
       });
 
       test('default max chunk size (framing)', () {
         expectRoundTrip(
           SnappyCodec(
-            framing: true,
+            format: SnappyFormat.framed,
             chunkSize: SnappyStreamEncoder.maxChunkSize,
           ),
           readDataFixture('canterbury/alice29.txt'),
@@ -82,29 +117,29 @@ void main() {
 
       test('small chunk size 1024 (framing)', () {
         expectRoundTrip(
-          SnappyCodec(framing: true, chunkSize: 1024),
+          SnappyCodec(format: SnappyFormat.framed, chunkSize: 1024),
           readDataFixture('canterbury/alice29.txt'),
         );
       });
 
       test('chunk size 4096 (framing)', () {
         expectRoundTrip(
-          SnappyCodec(framing: true, chunkSize: 4096),
+          SnappyCodec(format: SnappyFormat.framed, chunkSize: 4096),
           readDataFixture('html'),
         );
       });
 
       test('data exactly at chunk boundary', () {
         expectRoundTrip(
-          SnappyCodec(framing: true, chunkSize: 1000),
-          bytes(List.generate(1000, (i) => i % 256)),
+          SnappyCodec(format: SnappyFormat.framed, chunkSize: 1000),
+          bytes(List.generate(1000, (final i) => i % 256)),
         );
       });
 
       test('data spanning multiple chunks', () {
         expectRoundTrip(
-          SnappyCodec(framing: true, chunkSize: 500),
-          bytes(List.generate(2500, (i) => i % 256)),
+          SnappyCodec(format: SnappyFormat.framed, chunkSize: 500),
+          bytes(List.generate(2500, (final i) => i % 256)),
         );
       });
 
@@ -116,7 +151,7 @@ void main() {
       });
 
       test('empty data (framing) round-trips', () {
-        final codec = SnappyCodec(framing: true);
+        final codec = SnappyCodec(format: SnappyFormat.framed);
         expect(codec.decompress(codec.compress(Uint8List(0))).length, 0);
       });
 
@@ -133,7 +168,7 @@ void main() {
     // multiple concatenated framed streams / multiple stream identifiers.
     group('concatenation (framing only)', () {
       test('decodes two concatenated framed streams', () {
-        final codec = SnappyCodec(framing: true);
+        final codec = SnappyCodec(format: SnappyFormat.framed);
         final a = bytes('Hello, '.codeUnits);
         final b = bytes('Snappy!'.codeUnits);
         final concatenated = bytes([
@@ -148,7 +183,10 @@ void main() {
 
       test('handles multiple stream identifiers (second ignored)', () {
         final data = bytes([..._streamId, ..._streamId]);
-        expect(SnappyCodec(framing: true).decompress(data).length, 0);
+        expect(
+          SnappyCodec(format: SnappyFormat.framed).decompress(data).length,
+          0,
+        );
       });
     });
 
@@ -161,14 +199,16 @@ void main() {
         'calgary/paper1': 43,
         'large/bible.txt': 47,
       };
-      floors.forEach((file, floor) {
+      floors.forEach((final file, final floor) {
         final path = 'test/fixtures/data/$file';
         if (!File(path).existsSync()) {
           markTestSkipped('fixture missing: $path');
           return;
         }
         final data = readDataFixture(file);
-        final compressed = SnappyCodec(framing: true).compress(data);
+        final compressed = SnappyCodec(
+          format: SnappyFormat.framed,
+        ).compress(data);
         final savings = (data.length - compressed.length) * 100.0 / data.length;
         expect(
           savings,
@@ -192,7 +232,7 @@ void main() {
       await expectStreamRoundTrip(SnappyStreamCodec(chunkSize: 1024), [
         bytes('Hello, '.codeUnits),
         bytes('Snappy '.codeUnits),
-        bytes(List.generate(5000, (i) => i & 0xff)),
+        bytes(List.generate(5000, (final i) => i & 0xff)),
       ]);
     });
 
@@ -213,7 +253,7 @@ void main() {
     test('round-trips data exactly at chunk boundary (65536)', () {
       final encoder = SnappyStreamEncoder();
       final decoder = SnappyStreamDecoder();
-      final original = bytes(List.generate(65536, (i) => i & 0xff));
+      final original = bytes(List.generate(65536, (final i) => i & 0xff));
       expect(
         decoder.decompress(encoder.compress(original)),
         orderedEquals(original),
@@ -223,7 +263,7 @@ void main() {
     test('round-trips data larger than one chunk', () {
       final encoder = SnappyStreamEncoder();
       final decoder = SnappyStreamDecoder();
-      final original = bytes(List.generate(100 * 1024, (i) => i & 0xff));
+      final original = bytes(List.generate(100 * 1024, (final i) => i & 0xff));
       expect(
         decoder.decompress(encoder.compress(original)),
         orderedEquals(original),
@@ -234,7 +274,7 @@ void main() {
       final encoder = SnappyStreamEncoder();
       final decoder = SnappyStreamDecoder();
       final original = bytes(
-        List.generate(100 * 1024, (i) => (i % 256) & 0xff),
+        List.generate(100 * 1024, (final i) => (i % 256) & 0xff),
       );
       final compressed = encoder.compress(original);
       expect(decoder.decompress(compressed), orderedEquals(original));
@@ -331,7 +371,18 @@ void main() {
   });
 
   group('Snappy limits & validation', () {
-    final data = bytes(List.generate(200000, (i) => (i * 31 + 7) % 256));
+    test('rejects empty input in block and stream mode', () async {
+      await expectEmptyRejected<SnappyFormatException>(
+        SnappyCodec(),
+        SnappyStreamCodec(),
+      );
+      await expectEmptyRejected<SnappyFormatException>(
+        SnappyCodec(format: SnappyFormat.framed),
+        SnappyStreamCodec(),
+      );
+    });
+
+    final data = bytes(List.generate(200000, (final i) => (i * 31 + 7) % 256));
 
     test('default maxSize is 256MB; null means unlimited', () {
       expect(SnappyCodec().maxSize, 256 * 1024 * 1024);
@@ -353,7 +404,7 @@ void main() {
         () => SnappyCodec().decompress(bomb),
         throwsA(
           isA<SnappyFormatException>().having(
-            (e) => e.message,
+            (final e) => e.message,
             'message',
             contains('maximum expansion'),
           ),
@@ -398,13 +449,21 @@ void main() {
     });
 
     test('framed: small limit rejects, null allows', () {
-      final compressed = SnappyCodec(framing: true).compress(data);
+      final compressed = SnappyCodec(
+        format: SnappyFormat.framed,
+      ).compress(data);
       expect(
-        () => SnappyCodec(framing: true, maxSize: 1000).decompress(compressed),
+        () => SnappyCodec(
+          format: SnappyFormat.framed,
+          maxSize: 1000,
+        ).decompress(compressed),
         throwsA(isA<CompressionFormatException>()),
       );
       expect(
-        SnappyCodec(framing: true, maxSize: null).decompress(compressed),
+        SnappyCodec(
+          format: SnappyFormat.framed,
+          maxSize: null,
+        ).decompress(compressed),
         orderedEquals(data),
       );
     });
@@ -419,9 +478,9 @@ void main() {
         () => SnappyDecoder.decompress(malicious),
         throwsA(
           isA<FormatException>().having(
-            (e) => e.message,
+            (final e) => e.message,
             'message',
-            contains('exceeds maximum'),
+            contains('exceeds the limit'),
           ),
         ),
       );
@@ -431,18 +490,22 @@ void main() {
       );
     });
 
-    test('fromOptions preserves maxSize / framing / chunkSize', () {
+    test('fromOptions preserves maxSize / format / chunkSize', () {
       final codec = SnappyCodec.fromOptions(
-        SnappyOptions(framing: true, chunkSize: 4096, maxSize: 1024 * 1024),
+        SnappyOptions(
+          format: SnappyFormat.framed,
+          chunkSize: 4096,
+          maxSize: 1024 * 1024,
+        ),
       );
-      expect(codec.framing, true);
+      expect(codec.format, SnappyFormat.framed);
       expect(codec.chunkSize, 4096);
       expect(codec.maxSize, 1024 * 1024);
     });
 
     test('default options preserve defaults', () {
       final codec = SnappyCodec.fromOptions(SnappyOptions());
-      expect(codec.framing, false);
+      expect(codec.format, SnappyFormat.raw);
       expect(codec.maxSize, 256 * 1024 * 1024);
     });
 
@@ -461,8 +524,8 @@ void main() {
     });
 
     test('maxBufferSize preflight rejects oversized whole blob', () {
-      final big = bytes(List.generate(5000, (i) => (i * 131 + 7) % 256));
-      final framed = SnappyCodec(framing: true).compress(big);
+      final big = bytes(List.generate(5000, (final i) => (i * 131 + 7) % 256));
+      final framed = SnappyCodec(format: SnappyFormat.framed).compress(big);
       expect(framed.length, greaterThan(64));
       expect(
         _decodeStream(
@@ -477,15 +540,19 @@ void main() {
     test('cumulative cap via stream codec rejects ~400KB', () {
       // ~400 KB -> multiple <=64 KB framing chunks, each under the 100 KB cap
       // but cumulatively over it.
-      final big = bytes(List.generate(400 * 1024, (i) => (i * 31 + 7) % 256));
-      final framed = SnappyCodec(framing: true).compress(big);
+      final big = bytes(
+        List.generate(400 * 1024, (final i) => (i * 31 + 7) % 256),
+      );
+      final framed = SnappyCodec(format: SnappyFormat.framed).compress(big);
       expect(
         _decodeStream(SnappyStreamCodec(maxSize: 100 * 1024), framed),
         throwsA(isA<CompressionFormatException>()),
       );
       expect(
-        () =>
-            SnappyCodec(framing: true, maxSize: 100 * 1024).decompress(framed),
+        () => SnappyCodec(
+          format: SnappyFormat.framed,
+          maxSize: 100 * 1024,
+        ).decompress(framed),
         throwsA(isA<CompressionFormatException>()),
       );
     });
@@ -498,7 +565,9 @@ void main() {
         return;
       }
       final original = readDataFixture('html');
-      final compressed = SnappyCodec(framing: true).compress(original);
+      final compressed = SnappyCodec(
+        format: SnappyFormat.framed,
+      ).compress(original);
       final path = '/tmp/libcompress_snappy_test.sz';
       try {
         await File(path).writeAsBytes(compressed);
@@ -518,6 +587,28 @@ void main() {
       }
     });
 
+    test('ratio is within 5% of snzip', () async {
+      if (!await cliAvailableCached('snzip')) {
+        markTestSkipped('snzip CLI tool not available');
+        return;
+      }
+      for (final name in ['geo.protodata', 'large/world192.txt', 'html']) {
+        final result = await Process.run('snzip', [
+          '-c',
+          'test/fixtures/data/$name',
+        ], stdoutEncoding: null);
+        final theirs = (result.stdout as List<int>).length;
+        final ours = SnappyCodec(
+          format: SnappyFormat.framed,
+        ).compress(readDataFixture(name)).length;
+        expect(
+          ours,
+          lessThanOrEqualTo(theirs * 1.05),
+          reason: '$name: $ours vs snzip $theirs',
+        );
+      }
+    });
+
     test('small chunk size readable by snzip', () async {
       if (!await cliAvailableCached('snzip')) {
         markTestSkipped('snzip CLI tool not available');
@@ -525,7 +616,7 @@ void main() {
       }
       final original = readDataFixture('canterbury/alice29.txt');
       final compressed = SnappyCodec(
-        framing: true,
+        format: SnappyFormat.framed,
         chunkSize: 4096,
       ).compress(original);
       final path = '/tmp/libcompress_snappy_small.sz';
@@ -552,7 +643,7 @@ void main() {
         markTestSkipped('snzip CLI tool not available');
         return;
       }
-      final codec = SnappyCodec(framing: true);
+      final codec = SnappyCodec(format: SnappyFormat.framed);
       final original = readDataFixture('calgary/paper1');
       final libCompressed = codec.compress(original);
       final path = '/tmp/libcompress_snappy_bidir.sz';
@@ -597,7 +688,9 @@ void main() {
             return;
           }
           final original = readDataFixture(path);
-          final libCompressed = SnappyCodec(framing: true).compress(original);
+          final libCompressed = SnappyCodec(
+            format: SnappyFormat.framed,
+          ).compress(original);
           final tmpPath =
               '/tmp/libcompress_snappy_rt_${path.replaceAll('/', '_')}.sz';
           try {
@@ -625,6 +718,23 @@ void main() {
     });
   });
 
+  defineDifferentialFuzz(
+    title: 'Snappy framed',
+    reference: const Reference('snzip', ['-d', '-c', '-t', 'framing2']),
+    frames: {
+      'snzip CLI': () => const Reference('snzip', []).encode([
+        '-c',
+        '-t',
+        'framing2',
+      ], readDataFixture('canterbury/alice29.txt')),
+      'libcompress encoder': () async => SnappyCodec(
+        format: SnappyFormat.framed,
+      ).compress(readDataFixture('canterbury/alice29.txt')),
+    },
+    block: SnappyCodec(format: SnappyFormat.framed).decompress,
+    stream: SnappyStreamCodec().decompress,
+  );
+
   group('Snappy fuzzing / malformed input', () {
     final random = Random(42);
     final codec = SnappyCodec();
@@ -636,7 +746,7 @@ void main() {
         );
         expect(
           () => codec.decompress(noise),
-          throwsA(isA<SnappyFormatException>()),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Random noise iteration $i should be rejected',
         );
       }
@@ -647,7 +757,7 @@ void main() {
         final noise = bytes(List.generate(length, (_) => random.nextInt(256)));
         expect(
           () => codec.decompress(noise),
-          throwsA(isA<SnappyFormatException>()),
+          throwsA(isA<CompressionFormatException>()),
           reason: 'Short random data ($length bytes) should be rejected',
         );
       }
@@ -661,7 +771,9 @@ void main() {
     });
 
     test('rejects truncated data at various positions', () {
-      final valid = codec.compress(bytes(List.generate(1000, (i) => i % 256)));
+      final valid = codec.compress(
+        bytes(List.generate(1000, (final i) => i % 256)),
+      );
       for (var cutoff = 1; cutoff < valid.length; cutoff++) {
         final truncated = Uint8List.sublistView(valid, 0, cutoff);
         expect(
@@ -676,7 +788,7 @@ void main() {
       final malicious = bytes([0x80, 0x80, 0x80, 0x80, 0x04, 0x00]);
       expect(
         () => SnappyDecoder.decompress(malicious),
-        throwsA(isA<SnappyFormatException>()),
+        throwsA(isA<LimitException>()),
       );
     });
 
@@ -802,7 +914,50 @@ void main() {
     });
 
     group('framing malformations', () {
-      final framingCodec = SnappyCodec(framing: true);
+      test('no chunk may come before the stream identifier', () {
+        final framed = SnappyCodec(
+          format: SnappyFormat.framed,
+        ).compress(bytes('hello'.codeUnits));
+        for (final type in [0xfe, 0x80, 0xfd]) {
+          final data = bytes([type, 2, 0, 0, 0, 0, ...framed]);
+          expect(
+            () => SnappyCodec(format: SnappyFormat.framed).decompress(data),
+            throwsA(isA<SnappyFormatException>()),
+            reason: 'type 0x${type.toRadixString(16)}',
+          );
+        }
+      });
+
+      test('an uncompressed chunk over 64 KB is a format error', () {
+        final payload = Uint8List(70000);
+        final crc = Crc32c.mask(Crc32c.hash(payload));
+        final size = payload.length + 4;
+        final data = bytes([
+          0xff, 6, 0, 0, ...'sNaPpY'.codeUnits, //
+          0x01, size & 255, (size >> 8) & 255, size >> 16,
+          crc & 255, (crc >> 8) & 255, (crc >> 16) & 255, crc >> 24,
+          ...payload,
+        ]);
+        expect(
+          () => SnappyCodec(format: SnappyFormat.framed).decompress(data),
+          throwsA(isA<SnappyFormatException>()),
+        );
+      });
+
+      test('a chunk over 64 KB is a format error, not a size limit', () {
+        final block = SnappyCodec().compress(Uint8List(70000));
+        final data = bytes([
+          0xff, 6, 0, 0, ...'sNaPpY'.codeUnits, //
+          0, (block.length + 4) & 255, (block.length + 4) >> 8, 0,
+          0, 0, 0, 0, ...block,
+        ]);
+        expect(
+          () => SnappyCodec(format: SnappyFormat.framed).decompress(data),
+          throwsA(isA<SnappyFormatException>()),
+        );
+      });
+
+      final framingCodec = SnappyCodec(format: SnappyFormat.framed);
 
       test('rejects random noise in framing format', () {
         for (var i = 0; i < 50; i++) {
@@ -864,7 +1019,7 @@ void main() {
       final bomb = bytes([0x80, 0x80, 0x80, 0x80, 0x04, 0x00]);
       expect(
         () => SnappyDecoder.decompress(bomb, maxUncompressedSize: 1024),
-        throwsA(isA<SnappyFormatException>()),
+        throwsA(isA<LimitException>()),
       );
     });
 
@@ -872,12 +1027,12 @@ void main() {
       final compressed = codec.compress(bytes(List.filled(10000, 0x41)));
       expect(
         () => SnappyCodec(maxSize: 1000).decompress(compressed),
-        throwsA(isA<SnappyFormatException>()),
+        throwsA(isA<LimitException>()),
       );
     });
 
     test('single-byte corruptions never cause RangeError', () {
-      final original = bytes(List.generate(5000, (i) => i % 256));
+      final original = bytes(List.generate(5000, (final i) => i % 256));
       final valid = codec.compress(original);
       for (var i = 0; i < min(100, valid.length); i++) {
         final corrupted = bytes(valid);
@@ -896,17 +1051,75 @@ void main() {
     });
   });
 
+  group('CRC32C', () {
+    test('matches the RFC 3720 known answers', () {
+      // RFC 3720 Appendix B.4, and the common "123456789" check value.
+      expect(Crc32c.hash(Uint8List(32)), 0x8A9136AA);
+      expect(Crc32c.hash(Uint8List(32)..fillRange(0, 32, 0xFF)), 0x62A8AB43);
+      expect(Crc32c.hash(bytes(List.generate(32, (final i) => i))), 0x46DD794E);
+      expect(
+        Crc32c.hash(bytes(List.generate(32, (final i) => 31 - i))),
+        0x113FDB5C,
+      );
+      expect(Crc32c.hash(bytes('123456789'.codeUnits)), 0xE3069283);
+    });
+
+    test('agrees with the byte-wise form at every length and split', () {
+      final data = pseudoRandom(64, 99);
+      for (var length = 0; length <= 40; length++) {
+        final slice = Uint8List.sublistView(data, 0, length);
+        final expected = Crc32c.hashFromList(slice);
+        expect(Crc32c.hash(slice), expected, reason: 'length $length');
+        for (var split = 0; split <= length; split++) {
+          final first = Crc32c.update(
+            Uint8List.sublistView(slice, 0, split),
+            0xFFFFFFFF,
+          );
+          final whole = Crc32c.update(
+            Uint8List.sublistView(slice, split),
+            first,
+          );
+          expect(whole ^ 0xFFFFFFFF, expected, reason: '$length at $split');
+        }
+      }
+    });
+  });
+
   group('Snappy format', () {
+    group('formats', () {
+      final text = bytes('hello hello hello'.codeUnits);
+
+      test('raw is the default format: a varint length, then the block', () {
+        expect(SnappyCodec().format, SnappyFormat.raw);
+        expect(SnappyCodec().compress(text).first, text.length);
+      });
+
+      test('framed output starts with the stream identifier', () {
+        final framed = SnappyCodec(format: SnappyFormat.framed).compress(text);
+        expect(
+          framed.sublist(0, 10),
+          orderedEquals([0xFF, 0x06, 0x00, 0x00, ...'sNaPpY'.codeUnits]),
+        );
+      });
+
+      test('options carry the format', () {
+        final codec = SnappyCodec.fromOptions(
+          SnappyOptions(format: SnappyFormat.framed),
+        );
+        expect(codec.format, SnappyFormat.framed);
+      });
+    });
+
     test('framing output starts with stream identifier byte', () {
       final compressed = SnappyCodec(
-        framing: true,
+        format: SnappyFormat.framed,
       ).compress(readDataFixture('html'));
       expect(compressed[0], 0xFF);
     });
 
     test('raw output starts with varint length preamble', () {
       final compressed = SnappyCodec(
-        framing: false,
+        format: SnappyFormat.raw,
       ).compress(bytes([1, 2, 3, 4, 5]));
       expect(compressed[0], 5);
     });
@@ -926,7 +1139,7 @@ void main() {
       // A lone padding chunk (type 0xfe), no stream identifier.
       final noId = bytes([0xfe, 0x01, 0x00, 0x00, 0x00]);
       expect(
-        () => SnappyCodec(framing: true).decompress(noId),
+        () => SnappyCodec(format: SnappyFormat.framed).decompress(noId),
         throwsA(isA<CompressionFormatException>()),
       );
       expect(
@@ -940,6 +1153,56 @@ void main() {
         _decodeStream(SnappyStreamCodec(), Uint8List(0)),
         throwsA(isA<CompressionFormatException>()),
       );
+    });
+  });
+
+  group('Snappy regressions', () {
+    test(
+      'raw compressed result does not retain the input-sized allocation',
+      () {
+        final encoded = SnappyCodec().compress(Uint8List(1 << 20));
+        expect(encoded.buffer.lengthInBytes, encoded.length);
+      },
+    );
+
+    test(
+      'copy tags preserve overlapping patterns at every offset and length',
+      () {
+        final codec = SnappyCodec();
+        for (var offset = 1; offset <= 64; offset++) {
+          for (var length = 1; length <= 64; length++) {
+            final seed = List.generate(offset, (final i) => i + 1);
+            final packed = bytes([
+              ...Varint.encode(offset + length),
+              if (offset <= 60) (offset - 1) << 2 else ...[60 << 2, offset - 1],
+              ...seed,
+              ((length - 1) << 2) | 2,
+              offset,
+              0,
+            ]);
+            expect(
+              codec.decompress(packed),
+              orderedEquals([
+                ...seed,
+                for (var i = 0; i < length; i++) seed[i % offset],
+              ]),
+              reason: 'offset=$offset length=$length',
+            );
+          }
+        }
+      },
+    );
+
+    test('multi-block matching never leaks history from a previous block', () {
+      final data = bytes([
+        ...pseudoRandom(65536),
+        ...Uint8List(65536),
+        ...pseudoRandom(65536, 123),
+        ...List.generate(65537, (final i) => i % 7),
+      ]);
+      for (final format in SnappyFormat.values) {
+        expectRoundTrip(SnappyCodec(format: format), data);
+      }
     });
   });
 }

@@ -2,12 +2,99 @@ import 'dart:typed_data';
 import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/growable_buffer.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/window_buffer.dart';
 import '../util/xxh64.dart';
 import '../util/byte_utils.dart';
 import 'zstd_common.dart';
 import 'compressed_block_decoder.dart';
+import '../compression_options.dart';
+
+/// Window_Size from a Window_Descriptor byte (RFC 8878 §3.1.1.1.2). The base
+/// is built by doubling, not `1 << (10 + exponent)`: windows reach 2^41, and
+/// dart2js shifts are 32-bit.
+int _windowSize(final int descriptor) {
+  var base = 1 << 10;
+  for (var exponent = descriptor >> 3; exponent > 0; exponent--) {
+    base *= 2;
+  }
+  return base + (base ~/ 8) * (descriptor & 0x07);
+}
+
+int _maximumBlockSize(final int? window) =>
+    window != null && window < zstdMaxBlockSize ? window : zstdMaxBlockSize;
+
+/// The header of a frame, or of a skippable frame ([skip] not null).
+class _Start {
+  _Start(this.length, {this.skip, this.frame});
+
+  /// Header bytes, from the magic number to the end of the frame header.
+  final int length;
+
+  /// For a skippable frame, the bytes that follow the header.
+  final int? skip;
+
+  final ZstdFrameHeader? frame;
+}
+
+/// Parses the frame header at `data[offset..end)` for the one-shot and
+/// incremental decoders. Returns null when more bytes are needed, and throws
+/// once the bytes present are invalid.
+_Start? _start(final Uint8List data, final int offset, final int end) {
+  final available = end - offset;
+  if (available < 4) return null;
+  final magic = ByteUtils.readUint32LE(data, offset);
+  if ((magic & zstdSkippableFrameMagicMask) == zstdSkippableFrameMagicBase) {
+    if (available < 8) return null;
+    return _Start(8, skip: ByteUtils.readUint32LE(data, offset + 4));
+  }
+  if (magic != zstdMagicNumber) {
+    throw ZstdFormatException(
+      'Invalid Zstd magic number: 0x${magic.toRadixString(16)}',
+    );
+  }
+  if (available < 5) return null;
+  final descriptor = ZstdFrameHeaderDescriptor.parse(data[offset + 4]);
+  final dictionaryBytes = descriptor.dictionaryIdFlag > 0
+      ? 1 << (descriptor.dictionaryIdFlag - 1)
+      : 0;
+  // Frame_Content_Size bytes per RFC 8878: flag 0 is 1 byte when single
+  // segment, else absent; flag 1 is 2 bytes holding size - 256.
+  final sizeBytes = descriptor.singleSegment
+      ? const [1, 2, 4, 8][descriptor.contentSizeFlag]
+      : const [0, 2, 4, 8][descriptor.contentSizeFlag];
+  final length =
+      5 + (descriptor.singleSegment ? 0 : 1) + dictionaryBytes + sizeBytes;
+  if (available < length) return null;
+
+  var position = offset + 5;
+  int? windowSize;
+  if (!descriptor.singleSegment) {
+    windowSize = _windowSize(data[position++]);
+  }
+  if (dictionaryBytes > 0) {
+    final dictionary = ByteUtils.readUintLE(data, position, dictionaryBytes);
+    position += dictionaryBytes;
+    if (dictionary != 0) {
+      throw ZstdFormatException(
+        'Dictionary compression (id=$dictionary) is not supported',
+      );
+    }
+  }
+  int? contentSize;
+  if (sizeBytes > 0) {
+    contentSize = ByteUtils.readUintLE(data, position, sizeBytes);
+    if (descriptor.contentSizeFlag == 1) contentSize += 256;
+  }
+  return _Start(
+    length,
+    frame: ZstdFrameHeader(
+      descriptor: descriptor,
+      windowSize: windowSize,
+      contentSize: contentSize,
+    ),
+  );
+}
 
 /// Zstandard decompressor
 ///
@@ -29,12 +116,15 @@ class ZstdDecoder {
 
   /// Creates a decoder with optional size limit
   ///
-  /// [maxSize] defaults to [zstdDefaultMaxDecompressedSize] (256MB).
+  /// [maxSize] defaults to [defaultMaxSize] (256MB).
   /// Set to null to allow unlimited output (use with trusted input only).
-  ZstdDecoder({this.maxSize = zstdDefaultMaxDecompressedSize});
+  ZstdDecoder({this.maxSize = defaultMaxSize});
 
-  Uint8List decompress(final Uint8List data) =>
-      guardFormat(() => _decompress(data), ZstdFormatException.new);
+  Uint8List decompress(final Uint8List data) => guardFormat(
+    () => _decompress(data),
+    ZstdFormatException.new,
+    limit: maxSize,
+  );
 
   Uint8List _decompress(final Uint8List data) {
     if (data.isEmpty) {
@@ -45,103 +135,73 @@ class ZstdDecoder {
     var total = 0;
     final limit = maxSize;
 
-    // Use maxSize for merged output buffer too
-    final merged = GrowableBuffer(data.length, maxSize);
+    // Each frame's output; a single frame is returned without a merge copy.
+    final outputs = <Uint8List>[];
     var offset = 0;
-    var frames = 0;
     var skippableFrames = 0;
 
     while (offset < data.length) {
-      if (offset + 4 > data.length) {
-        throw ZstdFormatException(
-          'Unexpected end of input while reading frame magic',
-        );
+      final start = _start(data, offset, data.length);
+      if (start == null) {
+        throw ZstdFormatException('Incomplete frame header');
       }
-
-      final magic = ByteUtils.readUint32LE(data, offset);
-
-      if (_isSkippableMagic(magic)) {
-        if (offset + 8 > data.length) {
-          throw ZstdFormatException('Incomplete skippable frame header');
-        }
-        final size = ByteUtils.readUint32LE(data, offset + 4);
-        offset += 8;
-        final skipEnd = offset + size;
-        if (skipEnd > data.length) {
+      offset += start.length;
+      final skip = start.skip;
+      if (skip != null) {
+        if (offset + skip > data.length) {
           throw ZstdFormatException('Skippable frame exceeds input bounds');
         }
-        offset = skipEnd;
+        offset += skip;
         skippableFrames++;
         continue;
       }
 
-      if (magic != zstdMagicNumber) {
-        throw ZstdFormatException(
-          'Invalid Zstd magic number: 0x${magic.toRadixString(16)}',
-        );
-      }
-
       // Calculate remaining capacity for this frame
       final remaining = limit != null ? limit - total : null;
-      final result = _decompressFrame(data, offset + 4, remaining);
+      final result = _decompressFrame(data, offset, start.frame!, remaining);
       offset = result.$1;
       final frameBytes = result.$2;
 
       // Check cumulative limit before adding
       if (limit != null && total + frameBytes.length > limit) {
-        throw ZstdFormatException(
-          'Cumulative decompressed size ${total + frameBytes.length} exceeds '
-          'maximum allowed size $limit',
-        );
+        throw LimitException(limit);
       }
 
-      merged.addBytes(frameBytes);
+      outputs.add(frameBytes);
       total += frameBytes.length;
-      frames++;
     }
 
     // Valid input must have at least one frame (data or skippable)
-    if (frames == 0 && skippableFrames == 0) {
+    if (outputs.isEmpty && skippableFrames == 0) {
       throw ZstdFormatException('No Zstd frame found in input');
     }
 
-    return merged.toBytes();
-  }
-
-  bool _isSkippableMagic(int magic) {
-    return (magic & zstdSkippableFrameMagicMask) == zstdSkippableFrameMagicBase;
+    if (outputs.length == 1) return outputs.first;
+    final merged = Uint8List(total);
+    var position = 0;
+    for (final output in outputs) {
+      merged.setRange(position, position + output.length, output);
+      position += output.length;
+    }
+    return merged;
   }
 
   /// Decompress a single frame. [remaining] is the remaining capacity
   /// for the cumulative output across all frames (null = unlimited).
   (int, Uint8List) _decompressFrame(
-    Uint8List data,
+    final Uint8List data,
     int offset,
-    int? remaining,
+    final ZstdFrameHeader header,
+    final int? remaining,
   ) {
-    final frameHeader = _parseFrameHeader(data, offset);
-    offset = frameHeader.$1;
-    final header = frameHeader.$2;
-
-    if (header.dictionaryId != null) {
-      throw ZstdFormatException(
-        'Dictionary compression (id=${header.dictionaryId}) is not supported',
-      );
-    }
-
-    // Use the smaller of maxSize and remaining capacity
-    final limit = (maxSize != null && remaining != null)
-        ? (maxSize! < remaining ? maxSize! : remaining)
-        : (maxSize ?? remaining);
+    // The frame's share of maxSize (never more than maxSize itself).
+    final limit = remaining;
 
     // Validate declared content size against limit early
     if (limit != null &&
         header.contentSize != null &&
         header.contentSize! > limit) {
-      throw ZstdFormatException(
-        'Declared content size ${header.contentSize} exceeds '
-        'maximum allowed size $limit',
-      );
+      throw LimitException(limit);
     }
 
     // Cap initial allocation to prevent OOM from malicious headers:
@@ -163,6 +223,8 @@ class ZstdDecoder {
     }
 
     final output = GrowableBuffer(capacity, limit);
+    final frameWindow = header.windowSize ?? header.contentSize;
+    final maxBlockSize = _maximumBlockSize(frameWindow);
     final offsets = [1, 4, 8];
     final blockDecoder = CompressedBlockDecoder()..reset();
 
@@ -181,11 +243,12 @@ class ZstdDecoder {
       final blockHeader = ZstdBlockHeader.parse(data, offset);
       offset += 3;
 
-      // Validate block size against spec limit (128KB max)
-      if (blockHeader.blockSize > zstdMaxBlockSize) {
+      // Both compressed and regenerated block sizes are bounded by the
+      // smaller of the declared frame window and 128 KiB.
+      if (blockHeader.blockSize > maxBlockSize) {
         throw ZstdFormatException(
           'Block size ${blockHeader.blockSize} exceeds maximum '
-          '$zstdMaxBlockSize bytes',
+          '$maxBlockSize bytes',
         );
       }
 
@@ -195,20 +258,14 @@ class ZstdDecoder {
         case ZstdBlockType.raw:
           // For raw blocks, block size equals output size
           if (limit != null && blockHeader.blockSize > limit - output.length) {
-            throw ZstdFormatException(
-              'Raw block size ${blockHeader.blockSize} exceeds remaining '
-              'capacity ${limit - output.length} bytes',
-            );
+            throw LimitException(limit);
           }
           offset = _decodeRawBlock(data, offset, blockHeader.blockSize, output);
           break;
         case ZstdBlockType.rle:
           // For RLE blocks, block size equals output size
           if (limit != null && blockHeader.blockSize > limit - output.length) {
-            throw ZstdFormatException(
-              'RLE block size ${blockHeader.blockSize} exceeds remaining '
-              'capacity ${limit - output.length} bytes',
-            );
+            throw LimitException(limit);
           }
           offset = _decodeRleBlock(data, offset, blockHeader.blockSize, output);
           break;
@@ -217,9 +274,9 @@ class ZstdDecoder {
             data,
             offset,
             blockHeader.blockSize,
-            output,
+            BlockOutput(output, maxBlockSize),
             offsets,
-            windowSize: header.windowSize,
+            windowSize: frameWindow,
           );
           offset += blockHeader.blockSize;
           break;
@@ -255,85 +312,6 @@ class ZstdDecoder {
     return (offset, frameBytes);
   }
 
-  /// Parse frame header and return (new offset, header)
-  (int, ZstdFrameHeader) _parseFrameHeader(
-    final Uint8List data,
-    final int offset,
-  ) {
-    var pos = offset;
-
-    if (pos >= data.length) {
-      throw ZstdFormatException('Incomplete frame header');
-    }
-
-    // Parse frame header descriptor
-    final descriptor = ZstdFrameHeaderDescriptor.parse(data[pos++]);
-
-    // Parse window descriptor
-    int? windowSize;
-    if (!descriptor.singleSegment) {
-      if (pos >= data.length) {
-        throw ZstdFormatException('Missing window descriptor');
-      }
-      final windowByte = data[pos++];
-      final exponent = windowByte >> 3;
-      final mantissa = windowByte & 0x07;
-      final base = 1 << (10 + exponent);
-      windowSize = base + (base ~/ 8) * mantissa;
-    }
-
-    // Parse dictionary ID
-    int? dictionaryId;
-    if (descriptor.dictionaryIdFlag > 0) {
-      final dictIdSize = 1 << (descriptor.dictionaryIdFlag - 1);
-      if (pos + dictIdSize > data.length) {
-        throw ZstdFormatException('Missing dictionary ID');
-      }
-      var dictId = 0;
-      for (var i = 0; i < dictIdSize; i++) {
-        dictId |= data[pos++] << (i * 8);
-      }
-      dictionaryId = dictId;
-    }
-
-    // Parse frame content size per RFC 8878
-    // FCS_Field_Size depends on Frame_Content_Size_flag:
-    //   0: 1 byte if Single_Segment_Flag, else 0 bytes
-    //   1: 2 bytes (values 256-65791, with 256 offset)
-    //   2: 4 bytes
-    //   3: 8 bytes
-    int? contentSize;
-    if (descriptor.singleSegment || descriptor.contentSizeFlag > 0) {
-      final sizeBytes = descriptor.singleSegment
-          ? [1, 2, 4, 8][descriptor.contentSizeFlag]
-          : [0, 2, 4, 8][descriptor.contentSizeFlag];
-
-      if (sizeBytes > 0) {
-        if (pos + sizeBytes > data.length) {
-          throw ZstdFormatException('Missing frame content size');
-        }
-        var size = ByteUtils.readUintLE(data, pos, sizeBytes);
-        pos += sizeBytes;
-        // Apply 256 offset for FCS flag 1 (2-byte encoding)
-        // This encoding covers values 256-65791
-        if (descriptor.contentSizeFlag == 1) {
-          size += 256;
-        }
-        contentSize = size;
-      }
-    }
-
-    return (
-      pos,
-      ZstdFrameHeader(
-        descriptor: descriptor,
-        windowSize: windowSize,
-        dictionaryId: dictionaryId,
-        contentSize: contentSize,
-      ),
-    );
-  }
-
   /// Decode raw (uncompressed) block
   int _decodeRawBlock(
     final Uint8List data,
@@ -360,10 +338,7 @@ class ZstdDecoder {
       throw ZstdFormatException('RLE block missing byte value');
     }
 
-    final byte = data[offset];
-    for (var i = 0; i < size; i++) {
-      output.addByte(byte);
-    }
+    output.addBytes(Uint8List(size)..fillRange(0, size, data[offset]));
 
     return offset + 1;
   }
@@ -396,7 +371,6 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   BytesBuilder? _hold;
 
   final BytePending _pending = BytePending();
-  int _cursor = 0;
   int _total = 0; // decompressed bytes across completed frames
 
   bool _inFrame = false;
@@ -408,33 +382,28 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   bool _checksumFlag = false;
   int? _frameWindowSize;
   int? _frameContentSize;
+  int _frameBlockMaxSize = zstdMaxBlockSize;
 
-  int get _avail => _pending.length - _cursor;
-
-  int _u32(final int o) =>
-      _pending[o] +
-      _pending[o + 1] * 0x100 +
-      _pending[o + 2] * 0x10000 +
-      _pending[o + 3] * 0x1000000;
+  // True until a non-empty chunk arrives: empty input is an error.
+  bool _empty = true;
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    // Reject before appending so an oversized chunk can't force the
-    // allocation/copy in _pending.add ahead of the limit check.
-    if (_avail + input.length > maxBufferSize) {
-      throw ZstdFormatException(
-        'Stream buffer would exceed $maxBufferSize bytes - '
-        'frame too large or malformed',
-      );
-    }
-    _pending.add(input);
-    guardFormat(() => _drive(emit), ZstdFormatException.new);
+    if (input.isNotEmpty) _empty = false;
+    _pending.append(input, maxBufferSize);
+    guardFormat(() => _drive(emit), ZstdFormatException.new, limit: maxSize);
   }
+
+  // Bytes of a skippable frame still to discard; they are never buffered.
+  int _skipping = 0;
 
   @override
   void close(final void Function(Uint8List) emit) {
-    guardFormat(() => _drive(emit), ZstdFormatException.new);
-    if (_inFrame || _avail != 0) {
+    guardFormat(() => _drive(emit), ZstdFormatException.new, limit: maxSize);
+    if (_empty) {
+      throw ZstdFormatException('Empty Zstd stream');
+    }
+    if (_inFrame || _skipping > 0 || _pending.available != 0) {
       throw ZstdFormatException('Incomplete Zstd frame at end of stream');
     }
   }
@@ -442,81 +411,42 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
   void _drive(final void Function(Uint8List) emit) {
     var progressed = true;
     while (progressed) {
-      if (!_inFrame) {
-        progressed = _avail > 0 && _startFrame();
+      if (_skipping > 0) {
+        final count = _pending.available < _skipping
+            ? _pending.available
+            : _skipping;
+        _pending.cursor += count;
+        _skipping -= count;
+        progressed = count > 0;
+      } else if (!_inFrame) {
+        progressed = _pending.available > 0 && _startFrame();
       } else if (_lastBlockSeen) {
         progressed = _finishFrame(emit);
       } else {
         progressed = _decodeNextBlock(emit);
       }
     }
-    _compact();
+    _pending.compact();
   }
 
   /// Reads a frame magic; skips skippable frames; parses a normal frame header.
   bool _startFrame() {
-    if (_avail < 4) return false;
-    final magic = _u32(_cursor);
-
-    if ((magic & zstdSkippableFrameMagicMask) == zstdSkippableFrameMagicBase) {
-      if (_avail < 8) return false;
-      final size = _u32(_cursor + 4);
-      if (_avail < 8 + size) return false;
-      _cursor += 8 + size;
+    final start = _start(_pending.bytes, _pending.cursor, _pending.length);
+    if (start == null) return false;
+    final skip = start.skip;
+    if (skip != null) {
+      // Discard the payload as it arrives rather than buffering it whole.
+      _pending.cursor += start.length;
+      _skipping = skip;
       return true;
     }
-
-    if (magic != zstdMagicNumber) {
-      throw ZstdFormatException(
-        'Invalid Zstd magic number: 0x${magic.toRadixString(16)}',
-      );
-    }
-
-    if (_avail < 5) return false; // magic + descriptor
-    final descriptor = ZstdFrameHeaderDescriptor.parse(_pending[_cursor + 4]);
-    final windowBytes = descriptor.singleSegment ? 0 : 1;
-    final dictIdBytes = descriptor.dictionaryIdFlag > 0
-        ? 1 << (descriptor.dictionaryIdFlag - 1)
-        : 0;
-    final fcsBytes = descriptor.singleSegment
-        ? const [1, 2, 4, 8][descriptor.contentSizeFlag]
-        : const [0, 2, 4, 8][descriptor.contentSizeFlag];
-    final headerLen = 1 + windowBytes + dictIdBytes + fcsBytes;
-    if (_avail < 4 + headerLen) return false;
-
-    var p = _cursor + 5; // past magic + descriptor
-    int? windowSize;
-    if (!descriptor.singleSegment) {
-      final windowByte = _pending[p++];
-      final exponent = windowByte >> 3;
-      final mantissa = windowByte & 0x07;
-      final base = 1 << (10 + exponent);
-      windowSize = base + (base ~/ 8) * mantissa;
-    }
-    if (descriptor.dictionaryIdFlag > 0) {
-      var dictId = 0;
-      for (var i = 0; i < dictIdBytes; i++) {
-        dictId |= _pending[p++] << (i * 8);
-      }
-      if (dictId != 0) {
-        throw ZstdFormatException(
-          'Dictionary compression (id=$dictId) is not supported',
-        );
-      }
-    }
-    int? contentSize;
-    if (fcsBytes > 0) {
-      var size = ByteUtils.readUintLE(_pending.bytes, p, fcsBytes);
-      p += fcsBytes;
-      if (descriptor.contentSizeFlag == 1) size += 256;
-      contentSize = size;
-    }
+    final header = start.frame!;
+    final windowSize = header.windowSize;
+    final contentSize = header.contentSize;
 
     final frameLimit = maxSize != null ? maxSize! - _total : null;
     if (frameLimit != null && contentSize != null && contentSize > frameLimit) {
-      throw ZstdFormatException(
-        'Declared content size $contentSize exceeds maximum allowed size $maxSize',
-      );
+      throw LimitException(frameLimit);
     }
 
     // The window bounds the largest back-reference: windowSize if present,
@@ -525,51 +455,50 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     if (frameLimit != null && window > frameLimit) window = frameLimit;
     if (window < 1) window = 1;
 
-    _cursor += 4 + headerLen;
+    _pending.cursor += start.length;
     _inFrame = true;
     _lastBlockSeen = false;
-    _checksumFlag = descriptor.checksumFlag;
-    _frameWindowSize = windowSize;
+    _checksumFlag = header.descriptor.checksumFlag;
+    _frameWindowSize = windowSize ?? contentSize;
+    _frameBlockMaxSize = _maximumBlockSize(_frameWindowSize);
     _frameContentSize = contentSize;
     _offsets = [1, 4, 8];
     _output = WindowBuffer(window, maxSize: frameLimit);
     _hold = verified ? BytesBuilder(copy: false) : null;
-    _sink = descriptor.checksumFlag ? Xxh64Sink() : null;
+    _sink = header.descriptor.checksumFlag ? Xxh64Sink() : null;
     _blockDecoder = CompressedBlockDecoder()..reset();
     return true;
   }
 
   bool _decodeNextBlock(final void Function(Uint8List) emit) {
-    if (_avail < 3) return false;
+    if (_pending.available < 3) return false;
     final header = ZstdBlockHeader.parse(
       Uint8List.fromList([
-        _pending[_cursor],
-        _pending[_cursor + 1],
-        _pending[_cursor + 2],
+        _pending[_pending.cursor],
+        _pending[_pending.cursor + 1],
+        _pending[_pending.cursor + 2],
       ]),
       0,
     );
-    if (header.blockSize > zstdMaxBlockSize) {
+    if (header.blockSize > _frameBlockMaxSize) {
       throw ZstdFormatException(
-        'Block size ${header.blockSize} exceeds maximum $zstdMaxBlockSize bytes',
+        'Block size ${header.blockSize} exceeds maximum $_frameBlockMaxSize bytes',
       );
     }
     final content = header.blockType == ZstdBlockType.rle
         ? 1
         : header.blockSize;
-    if (_avail < 3 + content) return false;
+    if (_pending.available < 3 + content) return false;
 
     final output = _output!;
-    final start = _cursor + 3;
+    final start = _pending.cursor + 3;
     switch (header.blockType) {
       case ZstdBlockType.raw:
         output.addBytes(_pending.bytes, start, header.blockSize);
         break;
       case ZstdBlockType.rle:
-        final byte = _pending[start];
-        for (var i = 0; i < header.blockSize; i++) {
-          output.addByte(byte);
-        }
+        final size = header.blockSize;
+        output.addBytes(Uint8List(size)..fillRange(0, size, _pending[start]));
         break;
       case ZstdBlockType.compressed:
         final block = _pending.slice(start, start + header.blockSize);
@@ -577,7 +506,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
           block,
           0,
           header.blockSize,
-          output,
+          BlockOutput(output, _frameBlockMaxSize),
           _offsets,
           windowSize: _frameWindowSize,
         );
@@ -586,7 +515,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
         throw ZstdFormatException('Reserved block type encountered');
     }
 
-    _cursor = start + content;
+    _pending.cursor = start + content;
     _flush(output.drain(), emit);
     if (header.lastBlock) _lastBlockSeen = true;
     return true;
@@ -597,12 +526,12 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     _flush(output.finish(), emit);
 
     if (_checksumFlag) {
-      if (_avail < 4) return false;
-      final expected = _u32(_cursor);
+      if (_pending.available < 4) return false;
+      final expected = _pending.u32(_pending.cursor);
       if (expected != _sink!.digestLow32()) {
         throw ZstdFormatException('Content checksum mismatch');
       }
-      _cursor += 4;
+      _pending.cursor += 4;
     }
     if (_frameContentSize != null && output.length != _frameContentSize) {
       throw ZstdFormatException(
@@ -634,13 +563,6 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
       hold.add(bytes); // verified mode: release only after the frame validates
     } else {
       emit(bytes);
-    }
-  }
-
-  void _compact() {
-    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.discard(_cursor);
-      _cursor = 0;
     }
   }
 }

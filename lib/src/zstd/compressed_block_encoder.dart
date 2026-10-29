@@ -103,14 +103,11 @@ class CompressedBlockEncoder {
       output.setRange(0, literalSection.length, literalSection);
       output.setRange(literalSection.length, output.length, sequencesSection);
 
-      final validateSource = limit == input.length
-          ? input
-          : Uint8List.sublistView(input, 0, limit);
-      if (validate && !_validateEncodedBlock(output, validateSource)) {
-        lastValidationError ??= 'Unknown validation error';
-        return Uint8List(0);
+      if (validate) {
+        _validateEncodedBlock(output, input, from: from, end: limit);
       }
       lastValidationError = null;
+      lastValidationStack = null;
 
       return output;
     } catch (e, st) {
@@ -271,50 +268,50 @@ class CompressedBlockEncoder {
 
   /// Encode raw literals section (header + payload)
   Uint8List _encodeRawLiteralsOnly(final Uint8List literals) {
-    final output = <int>[];
+    final output = BytesBuilder(copy: false);
 
     // Literals section header - Raw format
     final size = literals.length;
     if (size < 32) {
       // Small raw: Bits[0-1]=00 (raw), Bits[2-3]=00 (format), Bits[4-8]=size (5 bits)
-      output.add((size << 3) | 0x00);
+      output.addByte((size << 3) | 0x00);
     } else if (size < 4096) {
       // Medium raw: Bits[0-1]=00 (raw), Bits[2-3]=01 (format), Bits[4-15]=size (12 bits)
       // Byte 1: bits 0-3 = 0100, bits 4-7 = size[0:3]
       // Byte 2: bits 0-7 = size[4:11]
-      output.add(((size & 0x0F) << 4) | 0x04);
-      output.add((size >> 4) & 0xFF);
+      output.addByte(((size & 0x0F) << 4) | 0x04);
+      output.addByte((size >> 4) & 0xFF);
     } else {
       // Large raw: Bits[0-1]=00 (raw), Bits[2-3]=11 (format), Bits[4-23]=size (20 bits)
       // Byte 1: bits 0-3 = 1100, bits 4-7 = size[0:3]
       // Byte 2: bits 0-7 = size[4:11]
       // Byte 3: bits 0-7 = size[12:19]
-      output.add(((size & 0x0F) << 4) | 0x0C);
-      output.add((size >> 4) & 0xFF);
-      output.add((size >> 12) & 0xFF);
+      output.addByte(((size & 0x0F) << 4) | 0x0C);
+      output.addByte((size >> 4) & 0xFF);
+      output.addByte((size >> 12) & 0xFF);
     }
 
-    output.addAll(literals);
+    output.add(literals);
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   /// Encode sequences section using FSE with optimal table selection
-  Uint8List _encodeSequencesSectionFse(List<ZstdMatch> matches) {
-    final output = <int>[];
+  Uint8List _encodeSequencesSectionFse(final List<ZstdMatch> matches) {
+    final output = BytesBuilder(copy: false);
 
     // Write sequence count per RFC 8878 Section 3.1.1.3.2.1.1
     final count = matches.length;
     if (count < 128) {
-      output.add(count);
+      output.addByte(count);
     } else if (count < 0x7F00) {
-      output.add(128 + (count >> 8));
-      output.add(count & 0xFF);
+      output.addByte(128 + (count >> 8));
+      output.addByte(count & 0xFF);
     } else {
-      output.add(0xFF);
+      output.addByte(0xFF);
       final adjusted = count - 0x7F00;
-      output.add(adjusted & 0xFF);
-      output.add((adjusted >> 8) & 0xFF);
+      output.addByte(adjusted & 0xFF);
+      output.addByte((adjusted >> 8) & 0xFF);
     }
 
     // Gather symbol statistics using SequenceSymbols to ensure correct
@@ -342,30 +339,30 @@ class CompressedBlockEncoder {
     );
 
     // Write symbol compression modes byte
-    output.add(encodeSymbolMode(llMode, ofMode, mlMode));
+    output.addByte(encodeSymbolMode(llMode, ofMode, mlMode));
 
     // Write table descriptions per RFC 8878 Section 3.1.1.3.2.1
     // Order: LL, OF, ML. Each gets FSE table (mode 2) or RLE byte (mode 1)
 
     // Literal Lengths table
     if (llMode == 2 && llEnc != null) {
-      output.addAll(llEnc.encodeHeader());
+      output.add(llEnc.encodeHeader());
     } else if (llMode == 1) {
-      output.add(_findRleSymbol(llStats));
+      output.addByte(_findRleSymbol(llStats));
     }
 
     // Offsets table
     if (ofMode == 2 && ofEnc != null) {
-      output.addAll(ofEnc.encodeHeader());
+      output.add(ofEnc.encodeHeader());
     } else if (ofMode == 1) {
-      output.add(_findRleSymbol(ofStats));
+      output.addByte(_findRleSymbol(ofStats));
     }
 
     // Match Lengths table
     if (mlMode == 2 && mlEnc != null) {
-      output.addAll(mlEnc.encodeHeader());
+      output.add(mlEnc.encodeHeader());
     } else if (mlMode == 1) {
-      output.add(_findRleSymbol(mlStats));
+      output.addByte(_findRleSymbol(mlStats));
     }
 
     // Encode sequences using appropriate tables
@@ -382,9 +379,9 @@ class CompressedBlockEncoder {
     );
 
     final bits = encoder.encodeSequences(matches);
-    output.addAll(bits);
+    output.add(bits);
 
-    return Uint8List.fromList(output);
+    return output.takeBytes();
   }
 
   int _findRleSymbol(final SymbolStats stats) {
@@ -394,35 +391,35 @@ class CompressedBlockEncoder {
     return 0;
   }
 
-  bool _validateEncodedBlock(Uint8List blockData, Uint8List source) {
+  void _validateEncodedBlock(
+    final Uint8List blockData,
+    final Uint8List source, {
+    required final int from,
+    required final int end,
+  }) {
     final decoder = CompressedBlockDecoder();
     final previousOffsets = [1, 4, 8];
-    final buffer = GrowableBuffer(source.length);
-
-    try {
-      decoder.decodeBlock(
-        blockData,
-        0,
-        blockData.length,
-        buffer,
-        previousOffsets,
+    final buffer = GrowableBuffer(end, end);
+    // The block encodes only source[from..end), but its matches can reference
+    // source[0..from). Reconstruct the same history used by the encoder.
+    buffer.addBytes(source, 0, from);
+    decoder.decodeBlock(
+      blockData,
+      0,
+      blockData.length,
+      buffer,
+      previousOffsets,
+    );
+    final decoded = buffer.toBytes();
+    if (decoded.length != end) {
+      throw StateError(
+        'Block validation size mismatch: ${decoded.length} != $end',
       );
-      final decoded = buffer.toBytes();
-      if (decoded.length != source.length) {
-        return false;
+    }
+    for (var i = from; i < end; i++) {
+      if (decoded[i] != source[i]) {
+        throw StateError('Block validation byte mismatch at $i');
       }
-      for (var i = 0; i < decoded.length; i++) {
-        if (decoded[i] != source[i]) {
-          return false;
-        }
-      }
-      lastValidationError = null;
-      lastValidationStack = null;
-      return true;
-    } catch (error, stack) {
-      lastValidationError = error.toString();
-      lastValidationStack = stack.toString();
-      return false;
     }
   }
 }

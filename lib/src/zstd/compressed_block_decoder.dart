@@ -1,284 +1,54 @@
 import 'dart:typed_data';
-import '../util/bit_math.dart';
+
 import '../util/byte_sink.dart';
-import 'fse_decoder.dart';
-import 'huffman_decoder.dart';
-import 'sequence_bit_reader.dart';
-import 'sequence_constants.dart' as seq;
+import 'backward_bit_reader.dart';
+import 'literals_decoder.dart';
+import 'sequence_tables.dart';
 import 'zstd_common.dart';
+import '../util/platform.dart';
 
-enum SequenceComponent { literalLength, offset, matchLength }
+export 'sequence_tables.dart' show SequenceComponent;
 
-class SequenceSymbol {
-  final int symbol;
-  final int baseValue;
-  final int additionalBits;
-  final int numberOfBits;
-  final int nextState;
+/// The output of one block: writes go to [output] and may not take it past
+/// [end], the block's maximum size.
+class BlockOutput implements ByteSink {
+  BlockOutput(this.output, final int maxBlockSize)
+    : end = output.length + maxBlockSize;
 
-  const SequenceSymbol({
-    required this.symbol,
-    required this.baseValue,
-    required this.additionalBits,
-    required this.numberOfBits,
-    required this.nextState,
-  });
-}
+  final ByteSink output;
+  final int end;
 
-/// Represents an FSE decoding table for sequence components (LL/Off/ML).
-class SequenceCodingTable {
-  final int tableLog;
-  final List<SequenceSymbol> entries;
-  final bool isPredefined;
+  @override
+  int get length => output.length;
 
-  const SequenceCodingTable._({
-    required this.tableLog,
-    required this.entries,
-    required this.isPredefined,
-  });
-
-  factory SequenceCodingTable.rleSymbol(
-    SequenceComponent component,
-    int symbolIndex,
-  ) {
-    return SequenceCodingTable._(
-      tableLog: 0,
-      entries: [
-        _symbolForComponent(
-          component,
-          symbolIndex,
-          numberOfBits: 0,
-          nextState: 0,
-        ),
-      ],
-      isPredefined: false,
-    );
-  }
-
-  factory SequenceCodingTable.fromFse(
-    int tableLog,
-    List<FseStateEntry> entries,
-    SequenceComponent component, {
-    bool isPredefined = false,
-  }) {
-    final symbols = List<SequenceSymbol>.generate(entries.length, (index) {
-      final entry = entries[index];
-      return _symbolForComponent(
-        component,
-        entry.symbol,
-        numberOfBits: entry.numberOfBits,
-        nextState: entry.baseline,
-      );
-    }, growable: false);
-
-    return SequenceCodingTable._(
-      tableLog: tableLog,
-      entries: List<SequenceSymbol>.unmodifiable(symbols),
-      isPredefined: isPredefined,
-    );
-  }
-
-  bool get isRle => tableLog == 0;
-
-  int initializeState(SequenceBitReader reader) {
-    if (tableLog == 0) {
-      return 0;
+  void _check(final int count) {
+    if (count < 0 || count > end - length) {
+      throw ZstdFormatException('Regenerated block exceeds maximum block size');
     }
-    return reader.readBits(tableLog);
   }
 
-  (SequenceSymbol, int) decodeSymbol(
-    SequenceBitReader reader,
-    int state, {
-    bool readNextState = true,
-  }) {
-    if (state < 0 || state >= entries.length) {
-      throw ZstdFormatException('FSE state out of range: $state');
-    }
-
-    final symbol = entries[state];
-    var nextState = state;
-    if (readNextState) {
-      if (symbol.numberOfBits > 0) {
-        nextState = symbol.nextState + reader.readBits(symbol.numberOfBits);
-      } else {
-        nextState = symbol.nextState;
-      }
-    }
-    return (symbol, nextState);
+  @override
+  void addByte(final int byte) {
+    _check(1);
+    output.addByte(byte);
   }
 
-  /// Get symbol for current state without reading bits
-  SequenceSymbol peekSymbol(final int state) {
-    if (state < 0 || state >= entries.length) {
-      throw ZstdFormatException('FSE state out of range: $state');
-    }
-    return entries[state];
+  @override
+  void addBytes(
+    final List<int> bytes, [
+    final int offset = 0,
+    final int? count,
+  ]) {
+    final size = count ?? bytes.length - offset;
+    _check(size);
+    output.addBytes(bytes, offset, size);
   }
 
-  /// Compute next state by reading bits from stream
-  int readNextState(SequenceBitReader reader, final int state) {
-    final symbol = entries[state];
-    if (symbol.numberOfBits > 0) {
-      return symbol.nextState + reader.readBits(symbol.numberOfBits);
-    }
-    return symbol.nextState;
+  @override
+  void copyFromHistory(final int distance, final int length) {
+    _check(length);
+    output.copyFromHistory(distance, length);
   }
-}
-
-class _NormalizedCountsResult {
-  final List<int> counts;
-  final int tableLog;
-  final int nextOffset;
-  final int maxSymbol;
-
-  _NormalizedCountsResult(
-    this.counts,
-    this.tableLog,
-    this.nextOffset,
-    this.maxSymbol,
-  );
-}
-
-class _SequenceTableResult {
-  final SequenceCodingTable table;
-  final int nextOffset;
-
-  _SequenceTableResult(this.table, this.nextOffset);
-}
-
-class _CompressedLiteralHeader {
-  final int headerSize;
-  final int regeneratedSize;
-  final int compressedSize;
-  final int numStreams;
-
-  const _CompressedLiteralHeader({
-    required this.headerSize,
-    required this.regeneratedSize,
-    required this.compressedSize,
-    required this.numStreams,
-  });
-}
-
-SequenceSymbol _symbolForComponent(
-  SequenceComponent component,
-  int symbolIndex, {
-  required int numberOfBits,
-  required int nextState,
-}) {
-  final base = _baseValueFor(component, symbolIndex);
-  final extraBits = _extraBitsFor(component, symbolIndex);
-  return SequenceSymbol(
-    symbol: symbolIndex,
-    baseValue: base,
-    additionalBits: extraBits,
-    numberOfBits: numberOfBits,
-    nextState: nextState,
-  );
-}
-
-int _baseValueFor(SequenceComponent component, int symbolIndex) {
-  switch (component) {
-    case SequenceComponent.literalLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.literalLengthBase.length) {
-        throw ZstdFormatException(
-          'Literal length symbol out of range: $symbolIndex',
-        );
-      }
-      return seq.literalLengthBase[symbolIndex];
-    case SequenceComponent.offset:
-      if (symbolIndex < 0 || symbolIndex >= seq.offsetBase.length) {
-        throw ZstdFormatException('Offset symbol out of range: $symbolIndex');
-      }
-      return seq.offsetBase[symbolIndex];
-    case SequenceComponent.matchLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.matchLengthBase.length) {
-        throw ZstdFormatException(
-          'Match length symbol out of range: $symbolIndex',
-        );
-      }
-      return seq.matchLengthBase[symbolIndex];
-  }
-}
-
-int _extraBitsFor(SequenceComponent component, int symbolIndex) {
-  switch (component) {
-    case SequenceComponent.literalLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.literalLengthBits.length) {
-        throw ZstdFormatException(
-          'Literal length bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.literalLengthBits[symbolIndex];
-    case SequenceComponent.offset:
-      if (symbolIndex < 0 || symbolIndex >= seq.offsetBits.length) {
-        throw ZstdFormatException(
-          'Offset bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.offsetBits[symbolIndex];
-    case SequenceComponent.matchLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.matchLengthBits.length) {
-        throw ZstdFormatException(
-          'Match length bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.matchLengthBits[symbolIndex];
-  }
-}
-
-class _ForwardBitReader {
-  final Uint8List _data;
-  final int _end;
-  final int _start;
-  int _bytePos;
-  int _bitBuffer = 0;
-  int _bitsAvailable = 0;
-
-  _ForwardBitReader(this._data, int offset, int end)
-    : _end = end,
-      _start = offset,
-      _bytePos = offset;
-
-  int _ensureBits(int count) {
-    while (_bitsAvailable < count) {
-      if (_bytePos >= _end) {
-        throw ZstdFormatException(
-          'Unexpected end of data while reading sequences',
-        );
-      }
-      _bitBuffer |= _data[_bytePos++] << _bitsAvailable;
-      _bitsAvailable += 8;
-    }
-    return _bitsAvailable;
-  }
-
-  int readBits(int count) {
-    if (count == 0) return 0;
-    _ensureBits(count);
-    final value = _bitBuffer & ((1 << count) - 1);
-    _bitBuffer >>= count;
-    _bitsAvailable -= count;
-    return value;
-  }
-
-  int peekBits(int count) {
-    if (count == 0) return 0;
-    _ensureBits(count);
-    return _bitBuffer & ((1 << count) - 1);
-  }
-
-  void skipBits(int count) {
-    if (count == 0) return;
-    _ensureBits(count);
-    _bitBuffer >>= count;
-    _bitsAvailable -= count;
-  }
-
-  int get bitsConsumed => (_bytePos - _start) * 8 - _bitsAvailable;
-
-  int get bytesConsumed => (bitsConsumed + 7) >> 3;
 }
 
 /// Decoder for Zstd compressed blocks
@@ -290,18 +60,13 @@ class CompressedBlockDecoder {
     reset();
   }
 
-  /// Cached Huffman decoder from previous compressed block
-  HuffmanDecoder? _cachedHuffmanTree;
-  SequenceCodingTable? _cachedLiteralLengthTable;
-  SequenceCodingTable? _cachedOffsetTable;
-  SequenceCodingTable? _cachedMatchLengthTable;
+  final LiteralsDecoder _literals = LiteralsDecoder();
+  final SequenceTables _tables = SequenceTables();
 
   /// Clear cached state (should be called between frames)
   void reset() {
-    _cachedHuffmanTree = null;
-    _cachedLiteralLengthTable = _predefinedLiteralLengthTable;
-    _cachedOffsetTable = _predefinedOffsetTable;
-    _cachedMatchLengthTable = _predefinedMatchLengthTable;
+    _literals.reset();
+    _tables.reset();
   }
 
   /// Decode a compressed block
@@ -309,12 +74,12 @@ class CompressedBlockDecoder {
   /// [windowSize] is used to validate that match offsets don't exceed
   /// the declared window size. If null, no window size validation is performed.
   void decodeBlock(
-    Uint8List data,
-    int offset,
-    int blockSize,
-    ByteSink output,
-    List<int> previousOffsets, {
-    int? windowSize,
+    final Uint8List data,
+    final int offset,
+    final int blockSize,
+    final ByteSink output,
+    final List<int> previousOffsets, {
+    final int? windowSize,
   }) {
     final blockEnd = offset + blockSize;
 
@@ -328,7 +93,7 @@ class CompressedBlockDecoder {
     var pos = offset;
 
     // Decode literals section
-    final literalsResult = _decodeLiteralsSection(data, pos, blockEnd);
+    final literalsResult = _literals.decode(data, pos, blockEnd);
     final literals = literalsResult.$1;
     pos = literalsResult.$2;
 
@@ -345,476 +110,17 @@ class CompressedBlockDecoder {
     );
   }
 
-  /// Decode literals section
-  (Uint8List, int) _decodeLiteralsSection(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-  ) {
-    if (offset >= blockEnd) {
-      throw ZstdFormatException('Invalid literals section');
-    }
-
-    final header = data[offset];
-    final literalsBlockType = header & 0x03;
-    final sizeFormat = (header >> 2) & 0x03;
-
-    if (literalsBlockType == 0 || literalsBlockType == 1) {
-      // Raw or RLE literals
-      final (regeneratedSize, headerSize) = _parseRawOrRleLiteralHeader(
-        data,
-        offset,
-        blockEnd,
-        sizeFormat,
-      );
-      offset += headerSize;
-
-      if (literalsBlockType == 0) {
-        if (offset + regeneratedSize > blockEnd) {
-          throw ZstdFormatException(
-            'Raw literals extend beyond block boundary',
-          );
-        }
-        final literals = Uint8List.sublistView(
-          data,
-          offset,
-          offset + regeneratedSize,
-        );
-        return (literals, offset + regeneratedSize);
-      } else {
-        if (offset >= blockEnd && regeneratedSize > 0) {
-          throw ZstdFormatException('RLE byte missing');
-        }
-        final byte = regeneratedSize > 0 ? data[offset] : 0;
-        final literals = Uint8List(regeneratedSize);
-        if (regeneratedSize > 0) {
-          literals.fillRange(0, regeneratedSize, byte);
-        }
-        return (literals, offset + (regeneratedSize > 0 ? 1 : 0));
-      }
-    }
-
-    final compressedHeader = _parseCompressedLiteralHeader(
-      data,
-      offset,
-      blockEnd,
-      sizeFormat,
-    );
-
-    final payloadStart = offset + compressedHeader.headerSize;
-    final payloadEnd = payloadStart + compressedHeader.compressedSize;
-
-    if (payloadEnd > blockEnd) {
-      throw ZstdFormatException(
-        'Compressed literals extend beyond block boundary: '
-        'start=$payloadStart, size=${compressedHeader.compressedSize}, '
-        'blockEnd=$blockEnd',
-      );
-    }
-
-    if (compressedHeader.regeneratedSize == 0) {
-      return (Uint8List(0), payloadEnd);
-    }
-
-    final literals = _decodeHuffmanLiterals(
-      data,
-      payloadStart,
-      compressedHeader.compressedSize,
-      compressedHeader.regeneratedSize,
-      literalsBlockType == 2,
-      compressedHeader.numStreams,
-    );
-
-    if (literals.length != compressedHeader.regeneratedSize) {
-      throw ZstdFormatException(
-        'Literal size mismatch: expected ${compressedHeader.regeneratedSize}, '
-        'decoded ${literals.length}',
-      );
-    }
-
-    return (literals, payloadEnd);
-  }
-
-  (int, int) _parseRawOrRleLiteralHeader(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-    int sizeFormat,
-  ) {
-    if (offset >= blockEnd) {
-      throw ZstdFormatException('Literals header exceeds block boundary');
-    }
-
-    final firstByte = data[offset];
-    switch (sizeFormat) {
-      case 0:
-      case 2:
-        return ((firstByte >> 3) & 0x1F, 1);
-      case 1:
-        if (offset + 1 >= blockEnd) {
-          throw ZstdFormatException('Literals header exceeds block boundary');
-        }
-        final regen =
-            ((firstByte >> 4) & 0x0F) | ((data[offset + 1] & 0xFF) << 4);
-        return (regen & 0x0FFF, 2);
-      case 3:
-        if (offset + 2 >= blockEnd) {
-          throw ZstdFormatException('Literals header exceeds block boundary');
-        }
-        final regen =
-            ((firstByte >> 4) & 0x0F) |
-            ((data[offset + 1] & 0xFF) << 4) |
-            ((data[offset + 2] & 0xFF) << 12);
-        return (regen & 0xFFFFF, 3);
-      default:
-        throw ZstdFormatException(
-          'Unsupported literals size format for raw/RLE block: $sizeFormat',
-        );
-    }
-  }
-
-  _CompressedLiteralHeader _parseCompressedLiteralHeader(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-    int sizeFormat,
-  ) {
-    int headerSize;
-    int numStreams;
-    int bitsPerSize;
-
-    switch (sizeFormat) {
-      case 0:
-        headerSize = 3;
-        numStreams = 1;
-        bitsPerSize = 10;
-        break;
-      case 1:
-        headerSize = 3;
-        numStreams = 4;
-        bitsPerSize = 10;
-        break;
-      case 2:
-        headerSize = 4;
-        numStreams = 4;
-        bitsPerSize = 14;
-        break;
-      case 3:
-        headerSize = 5;
-        numStreams = 4;
-        bitsPerSize = 18;
-        break;
-      default:
-        throw ZstdFormatException(
-          'Unsupported literals size format for compressed block: $sizeFormat',
-        );
-    }
-
-    if (offset + headerSize > blockEnd) {
-      throw ZstdFormatException(
-        'Literals header extends beyond block boundary',
-      );
-    }
-
-    // Up to 40 bits: assemble with multiplication and split with integer
-    // division, which are exact on the VM and dart2js alike (JS bitwise
-    // operators truncate to 32 bits).
-    var value = 0;
-    var scale = 1;
-    for (var i = 0; i < headerSize; i++) {
-      value += data[offset + i] * scale;
-      scale *= 256;
-    }
-
-    final sizeRange = 1 << bitsPerSize;
-    final regeneratedSize = (value ~/ 16) % sizeRange;
-    final compressedSize = (value ~/ (1 << (4 + bitsPerSize))) % sizeRange;
-
-    return _CompressedLiteralHeader(
-      headerSize: headerSize,
-      regeneratedSize: regeneratedSize,
-      compressedSize: compressedSize,
-      numStreams: numStreams,
-    );
-  }
-
-  /// Decode Huffman-compressed literals
-  Uint8List _decodeHuffmanLiterals(
-    Uint8List data,
-    int offset,
-    int compressedSize,
-    int regeneratedSize,
-    bool hasTree,
-    int numStreams,
-  ) {
-    var pos = offset;
-
-    // Build Huffman decoder if we have a tree
-    HuffmanDecoder? decoder;
-    if (hasTree) {
-      final weightsResult = _decodeHuffmanWeights(data, pos);
-      final weights = weightsResult.$1;
-      pos = weightsResult.$2;
-
-      decoder = HuffmanDecoder();
-      decoder.buildFromWeights(weights);
-
-      // Cache the tree for potential treeless reuse
-      _cachedHuffmanTree = decoder;
-    } else {
-      // Treeless mode: reuse previous tree
-      decoder = _cachedHuffmanTree;
-      if (decoder == null) {
-        throw ZstdFormatException(
-          'Treeless Huffman mode requires previous tree',
-        );
-      }
-    }
-
-    final compressedEnd = offset + compressedSize;
-    if (compressedEnd > data.length) {
-      throw ZstdFormatException(
-        'Compressed literals exceed input buffer: '
-        'end=$compressedEnd, length=${data.length}',
-      );
-    }
-
-    final treeBytes = pos - offset;
-    if (treeBytes < 0 || treeBytes > compressedSize) {
-      throw ZstdFormatException(
-        'Invalid Huffman tree size: treeBytes=$treeBytes, compressedSize=$compressedSize',
-      );
-    }
-
-    final totalStreamsSize = compressedSize - treeBytes;
-    if (totalStreamsSize < 0) {
-      throw ZstdFormatException('Negative total streams size');
-    }
-
-    final literals = Uint8List(regeneratedSize);
-
-    if (numStreams == 1) {
-      // Single stream decoding
-      decoder.decodeSingle(
-        data,
-        pos,
-        compressedEnd,
-        literals,
-        0,
-        regeneratedSize,
-      );
-    } else if (numStreams == 4) {
-      // 4-stream decoding
-      if (totalStreamsSize < 6) {
-        throw ZstdFormatException(
-          'Insufficient data for jump table: totalStreamsSize=$totalStreamsSize',
-        );
-      }
-      decoder.decode4Streams(
-        data,
-        pos,
-        compressedEnd,
-        literals,
-        0,
-        regeneratedSize,
-      );
-    } else {
-      throw ZstdFormatException(
-        'Unsupported literals stream count: $numStreams',
-      );
-    }
-
-    return literals;
-  }
-
-  /// Decode FSE-compressed Huffman weights
-  /// Uses backward bitstream reading per RFC 8878
-  List<int> _decodeFseCompressedHuffmanWeights(
-    Uint8List data,
-    int offset,
-    int streamEnd,
-    int expectedSymbolCount,
-  ) {
-    if (streamEnd > data.length) {
-      throw ZstdFormatException(
-        'FSE stream extends beyond available data: streamEnd=$streamEnd, length=${data.length}',
-      );
-    }
-
-    // First 4 bits encode the accuracy log. The Huffman-weight FSE table is
-    // capped at accuracy log 6 (RFC 8878); reject larger before allocating.
-    final accuracyLog = (data[offset] & 0x0F) + 5;
-    if (accuracyLog > 6) {
-      throw ZstdFormatException(
-        'Huffman weight FSE accuracy log $accuracyLog exceeds maximum 6',
-      );
-    }
-
-    // Decode the FSE distribution (normalized counters) - uses forward reading
-    // Start from the same byte but skip the first 4 bits (accuracy log)
-    final result = FseDecoder.decodeNormalizedCounters(
-      data,
-      offset,
-      12, // Max symbol for Huffman weights
-      accuracyLog,
-      skipBits: 4, // Skip accuracy log bits
-    );
-    final normalizedCounters = result.$1;
-    offset = result.$2;
-
-    // Build FSE decoder table
-    final fseDecoder = FseDecoder();
-    fseDecoder.buildTable(normalizedCounters, accuracyLog);
-
-    // FSE decompression uses backward bitstream (MSB-first from end)
-    // Use the same SequenceBitReader that works for sequences
-    final reader = SequenceBitReader(data, streamEnd, startOffset: offset);
-
-    // Initialize FSE states (read tableLog bits each)
-    // Note: like Java, read state first, then load
-    var state1 = reader.readBits(accuracyLog);
-    var state2 = reader.readBits(accuracyLog);
-
-    // Now load before decoding loop
-    reader.load();
-
-    // Decode weights from FSE stream
-    final weights = <int>[];
-
-    // Main decode loop - decode 4 symbols at a time
-    mainLoop:
-    while (true) {
-      for (var i = 0; i < 4; i++) {
-        // Alternate between state1 and state2
-        final state = (i & 1) == 0 ? state1 : state2;
-        final entry = fseDecoder.tableEntries[state];
-
-        weights.add(entry.symbol);
-
-        final bits = reader.readBits(entry.numberOfBits);
-        final newState = entry.baseline + bits;
-
-        if ((i & 1) == 0) {
-          state1 = newState;
-        } else {
-          state2 = newState;
-        }
-      }
-
-      // Try to reload - if we're at the start of stream, switch to tail
-      if (reader.load()) {
-        break mainLoop;
-      }
-    }
-
-    // Tail loop - decode remaining symbols one by one
-    var tailIter = 0;
-    while (true) {
-      tailIter++;
-      if (tailIter > 100) {
-        throw ZstdFormatException(
-          'FSE weight decode: tail loop exceeded 100 iterations',
-        );
-      }
-
-      // Decode from state1
-      var entry = fseDecoder.tableEntries[state1];
-      weights.add(entry.symbol);
-
-      final bits1 = reader.readBits(entry.numberOfBits);
-      state1 = entry.baseline + bits1;
-
-      reader.load();
-      if (reader.isOverflow) {
-        // Emit final symbol from state2
-        weights.add(fseDecoder.tableEntries[state2].symbol);
-        break;
-      }
-
-      // Decode from state2
-      entry = fseDecoder.tableEntries[state2];
-      weights.add(entry.symbol);
-
-      final bits2 = reader.readBits(entry.numberOfBits);
-      state2 = entry.baseline + bits2;
-
-      reader.load();
-      if (reader.isOverflow) {
-        // Emit final symbol from state1
-        weights.add(fseDecoder.tableEntries[state1].symbol);
-        break;
-      }
-    }
-
-    return weights;
-  }
-
-  /// Decode Huffman weights from header
-  (List<int>, int) _decodeHuffmanWeights(Uint8List data, int offset) {
-    if (offset >= data.length) {
-      throw ZstdFormatException('Missing Huffman weights header');
-    }
-
-    final header = data[offset++];
-
-    if (header < 128) {
-      // FSE compressed weights
-      // Header byte contains the total compressed size of the FSE stream
-      final fseStreamSize = header;
-      final fseStreamEnd = offset + fseStreamSize;
-
-      if (fseStreamEnd > data.length) {
-        throw ZstdFormatException('FSE Huffman stream exceeds data length');
-      }
-
-      // Maximum possible Huffman symbols is 256 (one per byte value)
-      // We decode until the FSE stream is exhausted
-      const expectedSymbolCount = 256;
-
-      // Decode the FSE compressed stream of weights
-      final weights = _decodeFseCompressedHuffmanWeights(
-        data,
-        offset,
-        fseStreamEnd,
-        expectedSymbolCount,
-      );
-
-      return (weights, fseStreamEnd);
-    } else {
-      // Direct representation: 4-bit weights packed 2 per byte
-      final numWeights = header - 127;
-      final numBytes = (numWeights + 1) ~/ 2; // Round up
-
-      if (offset + numBytes > data.length) {
-        throw ZstdFormatException('Not enough data for Huffman weights');
-      }
-
-      final weights = List<int>.filled(numWeights, 0, growable: false);
-      for (var i = 0; i < numWeights; i += 2) {
-        final byte = data[offset + i ~/ 2];
-        weights[i] = byte >> 4; // High 4 bits
-        if (i + 1 < numWeights) {
-          weights[i + 1] = byte & 0x0F; // Low 4 bits
-        }
-      }
-
-      return (weights, offset + numBytes);
-    }
-  }
-
-  /// Decode sequences section
   void _decodeAndExecuteSequencesSection(
-    Uint8List data,
+    final Uint8List data,
     int offset,
-    int blockEnd,
-    Uint8List literals,
-    ByteSink output,
-    List<int> previousOffsets,
-    int? windowSize,
+    final int blockEnd,
+    final Uint8List literals,
+    final ByteSink output,
+    final List<int> previousOffsets,
+    final int? windowSize,
   ) {
     if (offset >= blockEnd) {
-      output.addBytes(literals, 0, literals.length);
-      return;
+      throw ZstdFormatException('Missing Number_of_Sequences');
     }
 
     // Read sequence count
@@ -848,63 +154,19 @@ class CompressedBlockDecoder {
       throw ZstdFormatException('Missing sequence compression modes');
     }
     final modes = data[offset++];
-    final literalLengthsMode = modes >> 6;
-    final offsetsMode = (modes >> 4) & 0x03;
-    final matchLengthsMode = (modes >> 2) & 0x03;
-
-    final llTableResult = _readSequenceTable(
-      data,
-      offset,
-      blockEnd,
-      literalLengthsMode,
-      _cachedLiteralLengthTable,
-      _predefinedLiteralLengthTable,
-      SequenceComponent.literalLength,
-      maxSymbolValue: 35,
-    );
-    final literalLengthTable = llTableResult.table;
-    offset = llTableResult.nextOffset;
-    if (literalLengthsMode != 3) {
-      _cachedLiteralLengthTable = literalLengthTable;
+    if (modes & 0x03 != 0) {
+      throw ZstdFormatException('Sequence compression modes reserved bits set');
     }
 
-    final ofTableResult = _readSequenceTable(
-      data,
-      offset,
-      blockEnd,
-      offsetsMode,
-      _cachedOffsetTable,
-      _predefinedOffsetTable,
-      SequenceComponent.offset,
-      maxSymbolValue: 31,
-    );
-    final offsetTable = ofTableResult.table;
-    offset = ofTableResult.nextOffset;
-    if (offsetsMode != 3) {
-      _cachedOffsetTable = offsetTable;
-    }
-
-    final mlTableResult = _readSequenceTable(
-      data,
-      offset,
-      blockEnd,
-      matchLengthsMode,
-      _cachedMatchLengthTable,
-      _predefinedMatchLengthTable,
-      SequenceComponent.matchLength,
-      maxSymbolValue: 52,
-    );
-    final matchLengthTable = mlTableResult.table;
-    offset = mlTableResult.nextOffset;
-    if (matchLengthsMode != 3) {
-      _cachedMatchLengthTable = matchLengthTable;
-    }
+    final (literalLengthTable, offsetTable, matchLengthTable, next) = _tables
+        .read(data, offset, blockEnd, modes);
+    offset = next;
 
     if (offset > blockEnd) {
       throw ZstdFormatException('Sequence headers exceed block boundary');
     }
 
-    final reader = _decodeAndExecuteSequences(
+    _decodeAndExecuteSequences(
       data,
       offset,
       blockEnd,
@@ -917,290 +179,254 @@ class CompressedBlockDecoder {
       previousOffsets,
       windowSize,
     );
-
-    // Validate bitstream was fully consumed (no trailing bytes)
-    // A well-formed block should consume all bits in the sequences section
-    if (!reader.isFullyConsumed && reader.remaining > 0) {
-      throw ZstdFormatException(
-        'Sequences bitstream not fully consumed: '
-        '~${reader.remaining} bytes remaining',
-      );
-    }
   }
 
-  static final SequenceCodingTable _predefinedLiteralLengthTable =
-      _buildPredefinedTable(
-        seq.llDefaultNorm,
-        seq.llDefaultNormLog,
-        SequenceComponent.literalLength,
-        isPredefined: true,
-      );
-
-  static final SequenceCodingTable _predefinedOffsetTable =
-      _buildPredefinedTable(
-        seq.ofDefaultNorm,
-        seq.ofDefaultNormLog,
-        SequenceComponent.offset,
-        isPredefined: true,
-      );
-
-  static final SequenceCodingTable _predefinedMatchLengthTable =
-      _buildPredefinedTable(
-        seq.mlDefaultNorm,
-        seq.mlDefaultNormLog,
-        SequenceComponent.matchLength,
-        isPredefined: true,
-      );
-
-  static SequenceCodingTable _buildPredefinedTable(
-    List<int> normalizedCounters,
-    int tableLog,
-    SequenceComponent component, {
-    required bool isPredefined,
-  }) {
-    final decoder = FseDecoder();
-    decoder.buildTable(List<int>.from(normalizedCounters), tableLog);
-    return SequenceCodingTable.fromFse(
-      tableLog,
-      decoder.tableEntries,
-      component,
-      isPredefined: isPredefined,
-    );
-  }
-
-  _SequenceTableResult _readSequenceTable(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-    int mode,
-    SequenceCodingTable? cached,
-    SequenceCodingTable predefined,
-    SequenceComponent component, {
-    required int maxSymbolValue,
-  }) {
-    // RFC 8878 Section 3.1.1.3.2.1:
-    // Mode 0: Predefined
-    // Mode 1: RLE
-    // Mode 2: FSE compressed
-    // Mode 3: Repeat (reuse from previous block)
-    switch (mode) {
-      case 0:
-        return _SequenceTableResult(predefined, offset);
-      case 1:
-        if (offset >= blockEnd) {
-          throw ZstdFormatException('RLE sequence table missing symbol byte');
-        }
-        final symbol = data[offset];
-        if (symbol > maxSymbolValue) {
-          throw ZstdFormatException(
-            'RLE sequence symbol $symbol exceeds max $maxSymbolValue',
-          );
-        }
-        return _SequenceTableResult(
-          SequenceCodingTable.rleSymbol(component, symbol),
-          offset + 1,
-        );
-      case 2:
-        final result = _readFseSequenceTable(
-          data,
-          offset,
-          blockEnd,
-          maxSymbolValue,
-          component,
-        );
-        return result;
-      case 3:
-        if (cached == null) {
-          throw ZstdFormatException(
-            'Repeat sequence table requested but none cached',
-          );
-        }
-        return _SequenceTableResult(cached, offset);
-      default:
-        throw ZstdFormatException('Unsupported sequence table mode: $mode');
-    }
-  }
-
-  _SequenceTableResult _readFseSequenceTable(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-    int maxSymbolValue,
-    SequenceComponent component,
+  void _decodeAndExecuteSequences(
+    final Uint8List data,
+    final int bitstreamStart,
+    final int blockEnd,
+    final int count,
+    final SequenceCodingTable literalLengthTable,
+    final SequenceCodingTable offsetTable,
+    final SequenceCodingTable matchLengthTable,
+    final Uint8List literals,
+    final ByteSink output,
+    final List<int> previousOffsets,
+    final int? windowSize,
   ) {
-    // RFC 8878 caps the FSE accuracy log per component (LL/ML 9, OF 8); reject
-    // anything larger before a 1<<tableLog table is allocated.
-    final maxTableLog = component == SequenceComponent.offset ? 8 : 9;
-    final countsResult = _readNormalizedCounts(
-      data,
-      offset,
-      blockEnd,
-      maxSymbolValue,
-      maxTableLog,
-    );
-    final decoder = FseDecoder();
-    decoder.buildTable(countsResult.counts, countsResult.tableLog);
-    final table = SequenceCodingTable.fromFse(
-      countsResult.tableLog,
-      decoder.tableEntries,
-      component,
-    );
-    return _SequenceTableResult(table, countsResult.nextOffset);
-  }
-
-  _NormalizedCountsResult _readNormalizedCounts(
-    Uint8List data,
-    int offset,
-    int blockEnd,
-    int maxSymbolValue,
-    int maxTableLog,
-  ) {
-    final reader = _ForwardBitReader(data, offset, blockEnd);
-
-    final tableLog = reader.readBits(4) + 5; // FSE_MIN_TABLELOG
-    if (tableLog > maxTableLog) {
-      throw ZstdFormatException(
-        'FSE accuracy log $tableLog exceeds maximum $maxTableLog',
-      );
-    }
-    var remaining = (1 << tableLog) + 1;
-    var threshold = 1 << tableLog;
-    var nbBits = tableLog + 1;
-    var symbol = 0;
-    var previousZero = false;
-
-    final counts = List<int>.filled(maxSymbolValue + 1, 0);
-
-    while (symbol <= maxSymbolValue && remaining > 1) {
-      if (previousZero) {
-        var zeros = 0;
-        while (true) {
-          final code = reader.readBits(2);
-          if (code == 3) {
-            zeros += 3;
-          } else {
-            zeros += code;
-            break;
-          }
-        }
-        symbol += zeros;
-        if (symbol > maxSymbolValue + 1) {
-          throw ZstdFormatException('Zero run exceeds symbol capacity');
-        }
-        previousZero = false;
-        continue;
-      }
-
-      if (symbol > maxSymbolValue) {
-        break;
-      }
-
-      final max = (2 * threshold - 1) - remaining;
-      int count;
-      final bitsMinusOne = nbBits - 1;
-      final value = bitsMinusOne > 0 ? reader.peekBits(bitsMinusOne) : 0;
-      if (value < max) {
-        if (bitsMinusOne > 0) {
-          reader.skipBits(bitsMinusOne);
-        }
-        count = value;
-      } else {
-        final fullValue = reader.readBits(nbBits);
-        count = fullValue;
-        if (fullValue >= threshold) {
-          count -= max;
-        }
-      }
-
-      count -= 1;
-
-      if (count >= 0) {
-        remaining -= count;
-      } else {
-        remaining += count;
-      }
-
-      if (symbol <= maxSymbolValue) {
-        counts[symbol] = count;
-      }
-      symbol++;
-      previousZero = count == 0;
-
-      if (remaining < threshold) {
-        if (remaining <= 1) {
-          break;
-        }
-        nbBits = BitMath.highBit32(remaining) + 1;
-        threshold = 1 << (nbBits - 1);
-      }
-    }
-
-    if (remaining != 1) {
-      throw ZstdFormatException(
-        'Invalid normalized counts (remaining=$remaining)',
-      );
-    }
-    final highestSymbol = symbol - 1;
-    if (highestSymbol > maxSymbolValue) {
-      throw ZstdFormatException('Normalized counts reference invalid symbol');
-    }
-
-    final nextOffset = offset + reader.bytesConsumed;
-    if (nextOffset > blockEnd) {
-      throw ZstdFormatException('Normalized counts exceed block boundary');
-    }
-
-    return _NormalizedCountsResult(counts, tableLog, nextOffset, highestSymbol);
-  }
-
-  SequenceBitReader _decodeAndExecuteSequences(
-    Uint8List data,
-    int bitstreamStart,
-    int blockEnd,
-    int count,
-    SequenceCodingTable literalLengthTable,
-    SequenceCodingTable offsetTable,
-    SequenceCodingTable matchLengthTable,
-    Uint8List literals,
-    ByteSink output,
-    List<int> previousOffsets,
-    int? windowSize,
-  ) {
-    final reader = SequenceBitReader(
-      data,
-      blockEnd,
-      startOffset: bitstreamStart,
-    );
+    final reader = BackwardBitReader(data, bitstreamStart, blockEnd);
 
     // Initialize states: LL, OF, ML (in that order per RFC 8878)
     var llState = literalLengthTable.initializeState(reader);
     var ofState = offsetTable.initializeState(reader);
     var mlState = matchLengthTable.initializeState(reader);
 
-    // Capture before any output is written for this block.
-    final isFirstOfFirstBlock = output.length == 0;
-    var literalPos = 0;
+    // Table fields as typed arrays indexed by state, and the frame's repeat
+    // offsets in locals for the block (written back below).
+    final llBases = literalLengthTable.bases;
+    final llExtras = literalLengthTable.extras;
+    final llWidths = literalLengthTable.widths;
+    final llNexts = literalLengthTable.nexts;
+    final ofSymbols = offsetTable.symbols;
+    final ofBases = offsetTable.bases;
+    final ofExtras = offsetTable.extras;
+    final ofWidths = offsetTable.widths;
+    final ofNexts = offsetTable.nexts;
+    final mlBases = matchLengthTable.bases;
+    final mlExtras = matchLengthTable.extras;
+    final mlWidths = matchLengthTable.widths;
+    final mlNexts = matchLengthTable.nexts;
+    var rep0 = previousOffsets[0];
+    var rep1 = previousOffsets[1];
+    var rep2 = previousOffsets[2];
 
-    for (var seqIndex = 0; seqIndex < count; seqIndex++) {
+    var literalPos = 0;
+    final last = count - 1;
+    var first = 0;
+
+    // On the VM, decode while at least 16 bitstream bytes remain with the
+    // 64-bit window in locals, writing straight into the output's array. A
+    // sequence reads at most 89 bits, so each reload within it is a full
+    // 8-byte load. The loop below finishes the block from the same position.
+    if (wide && output is BlockOutput && output.output is DirectSink) {
+      final sink = output.output as DirectSink;
+      final view = ByteData.sublistView(data);
+      final minimum = bitstreamStart + 16;
+      var current = reader.current;
+      var consumed = reader.consumed;
+      var container = 0;
+      var out = sink.bytes;
+      var op = sink.position;
+      // Indices in [out]: the oldest byte a match may read, the last byte
+      // writable without reserving, and the block's end.
+      var floor = sink.floor;
+      var room = sink.room;
+      var end = output.end - (sink.length - op);
+
+      while (first < last) {
+        final next = current - (consumed >> 3);
+        if (next < minimum) break;
+        current = next;
+        consumed &= 7;
+        container = view.getUint64(current, Endian.little);
+
+        final ofCode = ofSymbols[ofState];
+        final ofExtra = ofExtras[ofState];
+        var offsetValue = ofBases[ofState];
+        if (ofExtra > 0) {
+          offsetValue += (container << consumed) >>> (64 - ofExtra);
+          consumed += ofExtra;
+        }
+
+        current -= consumed >> 3;
+        consumed &= 7;
+        container = view.getUint64(current, Endian.little);
+        final mlExtra = mlExtras[mlState];
+        var matchLength = mlBases[mlState];
+        if (mlExtra > 0) {
+          matchLength += (container << consumed) >>> (64 - mlExtra);
+          consumed += mlExtra;
+        }
+        final llExtra = llExtras[llState];
+        var literalLength = llBases[llState];
+        if (llExtra > 0) {
+          literalLength += (container << consumed) >>> (64 - llExtra);
+          consumed += llExtra;
+        }
+
+        current -= consumed >> 3;
+        consumed &= 7;
+        container = view.getUint64(current, Endian.little);
+        final llWidth = llWidths[llState];
+        var llNext = llNexts[llState];
+        if (llWidth > 0) {
+          llNext += (container << consumed) >>> (64 - llWidth);
+          consumed += llWidth;
+        }
+        final mlWidth = mlWidths[mlState];
+        var mlNext = mlNexts[mlState];
+        if (mlWidth > 0) {
+          mlNext += (container << consumed) >>> (64 - mlWidth);
+          consumed += mlWidth;
+        }
+        final ofWidth = ofWidths[ofState];
+        var ofNext = ofNexts[ofState];
+        if (ofWidth > 0) {
+          ofNext += (container << consumed) >>> (64 - ofWidth);
+          consumed += ofWidth;
+        }
+        llState = llNext;
+        mlState = mlNext;
+        ofState = ofNext;
+
+        if (literalPos + literalLength > literals.length) {
+          throw ZstdFormatException(
+            'Sequence needs $literalLength literals but only '
+            '${literals.length - literalPos} remain',
+          );
+        }
+        final size = literalLength + matchLength;
+        if (size > end - op) {
+          throw ZstdFormatException(
+            'Regenerated block exceeds maximum block size',
+          );
+        }
+        if (op + size > room) {
+          sink.position = op;
+          sink.reserve(size);
+          out = sink.bytes;
+          op = sink.position;
+          floor = sink.floor;
+          room = sink.room;
+          end = output.end - (sink.length - op);
+        }
+        if (literalLength <= 16) {
+          for (var i = 0; i < literalLength; i++) {
+            out[op + i] = literals[literalPos + i];
+          }
+        } else {
+          out.setRange(op, op + literalLength, literals, literalPos);
+        }
+        op += literalLength;
+        literalPos += literalLength;
+
+        if (matchLength > 0) {
+          // As the loop below: offset codes 0 and 1 select repeat offsets.
+          var repeat = ofCode == 0 ? 0 : (ofCode == 1 ? offsetValue : 4);
+          if (ofCode <= 1 && literalLength == 0) repeat++;
+          final int offset;
+          if (repeat <= 3) {
+            final temp = switch (repeat) {
+              0 => rep0,
+              1 => rep1,
+              2 => rep2,
+              _ => rep0 - 1,
+            };
+            if (temp == 0) {
+              throw ZstdFormatException('Repeat offset resolves to 0');
+            }
+            switch (repeat) {
+              case 1:
+                rep1 = rep0;
+                rep0 = temp;
+              case 2:
+              case 3:
+                rep2 = rep1;
+                rep1 = rep0;
+                rep0 = temp;
+            }
+            offset = temp;
+          } else {
+            rep2 = rep1;
+            rep1 = rep0;
+            rep0 = offsetValue;
+            offset = offsetValue;
+          }
+          if (windowSize != null && offset > windowSize) {
+            throw ZstdFormatException(
+              'Match offset $offset exceeds window size $windowSize',
+            );
+          }
+          if (offset > op - floor) {
+            throw ZstdFormatException(
+              'Match offset $offset exceeds available ${op - floor} '
+              '(literalLength=$literalLength, matchLength=$matchLength)',
+            );
+          }
+          final from = op - offset;
+          if (offset >= matchLength) {
+            if (matchLength <= 16) {
+              for (var i = 0; i < matchLength; i++) {
+                out[op + i] = out[from + i];
+              }
+            } else {
+              out.setRange(op, op + matchLength, out, from);
+            }
+          } else if (offset == 1) {
+            out.fillRange(op, op + matchLength, out[from]);
+          } else if (matchLength <= 32) {
+            for (var i = 0; i < matchLength; i++) {
+              out[op + i] = out[from + i];
+            }
+          } else {
+            // Doubling copies of whole periods.
+            var copied = offset;
+            out.setRange(op, op + offset, out, from);
+            while (copied < matchLength) {
+              final count = copied < matchLength - copied
+                  ? copied
+                  : matchLength - copied;
+              out.setRange(op + copied, op + copied + count, out, from);
+              copied += count;
+            }
+          }
+          op += matchLength;
+        }
+        first++;
+      }
+
+      sink.position = op;
+      reader.resume(current, consumed);
+    }
+
+    for (var seqIndex = first; seqIndex < count; seqIndex++) {
       // Reload bits at start of each sequence
       reader.load();
       if (reader.isOverflow) {
-        if (seqIndex != count - 1) {
-          throw ZstdFormatException(
-            'Bitstream overflow at sequence $seqIndex of $count',
-          );
-        }
-        break;
+        throw ZstdFormatException(
+          'Bitstream overflow at sequence $seqIndex of $count',
+        );
       }
 
       // Step 1: Look up symbols from current states (NO bit reads)
-      final llSymbol = literalLengthTable.peekSymbol(llState);
-      final ofSymbol = offsetTable.peekSymbol(ofState);
-      final mlSymbol = matchLengthTable.peekSymbol(mlState);
+      final ofCode = ofSymbols[ofState];
+      final ofExtra = ofExtras[ofState];
+      final mlExtra = mlExtras[mlState];
+      final llExtra = llExtras[llState];
 
       // Step 2: Read offset extra bits first
-      final offsetBits = ofSymbol.additionalBits;
-      final offsetAdditional = offsetBits > 0 ? reader.readBits(offsetBits) : 0;
+      final offsetValue =
+          ofBases[ofState] + (ofExtra > 0 ? reader.readBits(ofExtra) : 0);
 
       // The 64-bit window holds ~57 readable bits after a reload, but offset +
       // ML + LL extra bits + the three FSE state transitions can exceed that.
@@ -1211,39 +437,77 @@ class CompressedBlockDecoder {
       // result for sequences that already fit.
       reader.load();
 
-      // Step 3: Read match length extra bits
-      final matchBits = mlSymbol.additionalBits;
-      final matchExtra = matchBits > 0 ? reader.readBits(matchBits) : 0;
-      final matchLength = mlSymbol.baseValue + matchExtra;
-
-      // Step 4: Read literal length extra bits
-      final literalBits = llSymbol.additionalBits;
-      final literalExtra = literalBits > 0 ? reader.readBits(literalBits) : 0;
-      final literalLength = llSymbol.baseValue + literalExtra;
+      // Steps 3-4: match length, then literal length extra bits
+      final matchLength =
+          mlBases[mlState] + (mlExtra > 0 ? reader.readBits(mlExtra) : 0);
+      final literalLength =
+          llBases[llState] + (llExtra > 0 ? reader.readBits(llExtra) : 0);
 
       // Step 5: Update states by reading bits (LL, ML, OF order per RFC)
       // Don't update on last sequence
-      if (seqIndex < count - 1) {
+      if (seqIndex < last) {
         reader.load();
-        llState = literalLengthTable.readNextState(reader, llState);
-        mlState = matchLengthTable.readNextState(reader, mlState);
-        ofState = offsetTable.readNextState(reader, ofState);
+        final llWidth = llWidths[llState];
+        llState =
+            llNexts[llState] + (llWidth > 0 ? reader.readBits(llWidth) : 0);
+        final mlWidth = mlWidths[mlState];
+        mlState =
+            mlNexts[mlState] + (mlWidth > 0 ? reader.readBits(mlWidth) : 0);
+        final ofWidth = ofWidths[ofState];
+        ofState =
+            ofNexts[ofState] + (ofWidth > 0 ? reader.readBits(ofWidth) : 0);
       }
 
       // Step 6: Execute immediately — copy literals, then the match. The
       // repeat-offset state evolves in sequence order exactly as before, so
       // fusing decode and execution is behaviour-preserving.
       if (literalLength > 0) {
+        if (literalPos + literalLength > literals.length) {
+          throw ZstdFormatException(
+            'Sequence needs $literalLength literals but only '
+            '${literals.length - literalPos} remain',
+          );
+        }
         output.addBytes(literals, literalPos, literalLength);
         literalPos += literalLength;
       }
       if (matchLength > 0) {
-        final offset = _computeOffset(
-          ofSymbol,
-          literalLength,
-          previousOffsets,
-          offsetAdditional,
-        );
+        // Offset codes 0 and 1 select repeat offsets (RFC 8878 §3.1.1.5);
+        // with no literals the choice shifts by one.
+        var repeat = ofCode == 0 ? 0 : (ofCode == 1 ? offsetValue : 4);
+        if (ofCode <= 1 && literalLength == 0) repeat++;
+        final int offset;
+        if (repeat <= 3) {
+          final temp = switch (repeat) {
+            0 => rep0,
+            1 => rep1,
+            2 => rep2,
+            _ => rep0 - 1,
+          };
+          if (temp == 0) {
+            throw ZstdFormatException('Repeat offset resolves to 0');
+          }
+          switch (repeat) {
+            case 1:
+              rep1 = rep0;
+              rep0 = temp;
+            case 2:
+              rep2 = rep1;
+              rep1 = rep0;
+              rep0 = temp;
+            case 3:
+              rep2 = rep1;
+              rep1 = rep0;
+              rep0 = temp;
+          }
+          offset = temp;
+        } else {
+          // Absolute offset: update history with new offset
+          rep2 = rep1;
+          rep1 = rep0;
+          rep0 = offsetValue;
+          offset = offsetValue;
+        }
         if (windowSize != null && offset > windowSize) {
           throw ZstdFormatException(
             'Match offset $offset exceeds window size $windowSize',
@@ -1251,101 +515,24 @@ class CompressedBlockDecoder {
         }
         final available = output.length;
         if (offset > available) {
-          // Valid only for the very first sequence of the first block without a
-          // dictionary; the format allows it and the match is ignored.
-          if (available == 0 && seqIndex == 0 && isFirstOfFirstBlock) {
-            continue;
-          }
           throw ZstdFormatException(
             'Match offset $offset exceeds available $available '
-            '(literalLength=$literalLength, matchLength=$matchLength, '
-            'isFirstSequence=${seqIndex == 0 && isFirstOfFirstBlock})',
+            '(literalLength=$literalLength, matchLength=$matchLength)',
           );
         }
         output.copyFromHistory(offset, matchLength);
       }
     }
 
+    previousOffsets[0] = rep0;
+    previousOffsets[1] = rep1;
+    previousOffsets[2] = rep2;
+
+    reader.finish();
+
     // Copy any remaining literals after the last sequence.
     if (literalPos < literals.length) {
       output.addBytes(literals, literalPos, literals.length - literalPos);
     }
-
-    return reader;
-  }
-
-  int _computeOffset(
-    SequenceSymbol symbol,
-    int literalLength,
-    List<int> previousOffsets,
-    int offsetAdditional,
-  ) {
-    final offsetValue = symbol.baseValue + offsetAdditional;
-    final symbolIndex = symbol.symbol;
-
-    var repeatValue = 0;
-    var isRepeat = false;
-
-    if (symbolIndex == 0) {
-      // Repeat offset value 0 (rep0)
-      isRepeat = true;
-      repeatValue = 0;
-    } else if (symbolIndex == 1) {
-      // Repeat offset value 1-2 (rep1/rep2)
-      isRepeat = true;
-      repeatValue = offsetValue;
-    }
-
-    if (isRepeat) {
-      if (literalLength == 0) {
-        repeatValue++;
-      }
-
-      if (repeatValue <= 3) {
-        int temp;
-        if (repeatValue == 0) {
-          temp = previousOffsets[0];
-        } else if (repeatValue == 3) {
-          temp = previousOffsets[0] - 1;
-        } else {
-          temp = previousOffsets[repeatValue];
-        }
-
-        if (temp == 0) {
-          temp = 1;
-        }
-
-        switch (repeatValue) {
-          case 0:
-            break;
-          case 1:
-            final prev0 = previousOffsets[0];
-            previousOffsets[0] = previousOffsets[1];
-            previousOffsets[1] = prev0;
-            break;
-          case 2:
-            final prev0 = previousOffsets[0];
-            final prev1 = previousOffsets[1];
-            previousOffsets[0] = previousOffsets[2];
-            previousOffsets[1] = prev0;
-            previousOffsets[2] = prev1;
-            break;
-          case 3:
-            previousOffsets[2] = previousOffsets[1];
-            previousOffsets[1] = previousOffsets[0];
-            previousOffsets[0] = temp;
-            break;
-        }
-
-        return temp;
-      }
-    }
-
-    // Absolute offset: update history with new offset
-    previousOffsets[2] = previousOffsets[1];
-    previousOffsets[1] = previousOffsets[0];
-    previousOffsets[0] = offsetValue;
-
-    return offsetValue;
   }
 }

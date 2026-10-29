@@ -24,7 +24,7 @@ void main() {
     });
 
     test('sequential bytes', () {
-      final data = Uint8List.fromList(List.generate(256, (i) => i));
+      final data = Uint8List.fromList(List.generate(256, (final i) => i));
       final crc = Crc32.hash(data);
       // Known CRC32 value for 0x00-0xFF
       expect(crc, equals(0x29058C73));

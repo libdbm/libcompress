@@ -10,19 +10,31 @@ import 'lz4/lz4_codec.dart';
 import 'lz4/lz4_stream_codec.dart';
 import 'zstd/zstd_codec.dart';
 import 'zstd/zstd_stream_codec.dart';
+import 'compression_options.dart' as options;
 
 /// Supported compression codec types
 enum CodecType {
+  /// No compression: data passes through unchanged.
   noop,
+
+  /// Snappy ([SnappyCodec]).
   snappy,
+
+  /// GZIP ([GzipCodec]).
   gzip,
+
+  /// LZ4 ([Lz4Codec]).
   lz4,
+
+  /// Zstandard ([ZstdCodec]).
   zstd;
 
-  /// Parse a string to a CodecType
+  /// The type whose [name] is [value], ignoring case, so both `'lz4'` and a
+  /// codec's upper-case `CompressionCodec.name` (`'LZ4'`) parse.
   static CodecType parse(final String value) {
+    final lower = value.toLowerCase();
     return CodecType.values.firstWhere(
-      (final type) => type.name == value,
+      (final type) => type.name == lower,
       orElse: () => throw ArgumentError('Unknown codec type: $value'),
     );
   }
@@ -38,15 +50,15 @@ class CodecFactory {
 
   /// Default cumulative decompressed-output cap applied by [codec]/[streaming]
   /// when the caller doesn't specify one (matches each codec's own default).
-  static const int defaultMaxDecompressedSize = 256 * 1024 * 1024;
+  static const int defaultMaxSize = options.defaultMaxSize;
 
   /// Default buffered-compressed-input cap for [streaming].
-  static const int defaultMaxBufferSize = 64 * 1024 * 1024;
+  static const int defaultMaxBufferSize = options.defaultMaxBufferSize;
 
   /// Get a block-based (whole-buffer) codec for the given type.
   ///
   /// Block codecs operate on a complete byte array: decompression materializes
-  /// the entire output (up to the codec's `maxDecompressedSize`) and verifies
+  /// the entire output (up to the codec's `maxSize`) and verifies
   /// trailers/checksums only at the end, so corrupt or adversarial data can
   /// allocate and burn CPU up to that cap before being rejected; compression
   /// likewise allocates an estimated full-output buffer. This is fine for small
@@ -56,25 +68,25 @@ class CodecFactory {
   /// incremental and bounded (and supports `verified: true` for all-or-nothing
   /// integrity).
   ///
-  /// [maxDecompressedSize] caps decode output (the central place to enforce a
+  /// [maxSize] caps decode output (the central place to enforce a
   /// tenant/request limit); omit it for the default cap, or pass `null` for
   /// unlimited (trusted input only).
   ///
   /// Example:
   /// ```dart
-  /// final codec = CodecFactory.codec(CodecType.lz4, maxDecompressedSize: 8 << 20);
+  /// final codec = CodecFactory.codec(CodecType.lz4, maxSize: 8 << 20);
   /// final compressed = codec.compress(data);
   /// ```
   static CompressionCodec codec(
     final CodecType type, {
-    final int? maxDecompressedSize = defaultMaxDecompressedSize,
+    final int? maxSize = defaultMaxSize,
   }) {
     return switch (type) {
-      CodecType.noop => NoopCodec(),
-      CodecType.snappy => SnappyCodec(maxSize: maxDecompressedSize),
-      CodecType.gzip => GzipCodec(maxDecompressedSize: maxDecompressedSize),
-      CodecType.lz4 => Lz4Codec(maxDecompressedSize: maxDecompressedSize),
-      CodecType.zstd => ZstdCodec(maxDecompressedSize: maxDecompressedSize),
+      CodecType.noop => NoopCodec(maxSize: maxSize),
+      CodecType.snappy => SnappyCodec(maxSize: maxSize),
+      CodecType.gzip => GzipCodec(maxSize: maxSize),
+      CodecType.lz4 => Lz4Codec(maxSize: maxSize),
+      CodecType.zstd => ZstdCodec(maxSize: maxSize),
     };
   }
 
@@ -85,7 +97,7 @@ class CodecFactory {
   /// oversized input chunk is rejected before being buffered. See [codec] for
   /// the block (whole-buffer) alternative.
   ///
-  /// [maxDecompressedSize] caps cumulative decode output (omit for the default,
+  /// [maxSize] caps cumulative decode output (omit for the default,
   /// `null` for unlimited); [maxBufferSize] caps buffered compressed input;
   /// [verified] withholds each member/frame's output until its trailer/checksum
   /// validates (all-or-nothing integrity; not applicable to Snappy, whose chunks
@@ -94,48 +106,36 @@ class CodecFactory {
   /// Example:
   /// ```dart
   /// final codec = CodecFactory.streaming(CodecType.zstd,
-  ///     maxDecompressedSize: 64 << 20, verified: true);
+  ///     maxSize: 64 << 20, verified: true);
   /// final out = await codec.decompress(inputStream).toList();
   /// ```
   static CompressionStreamCodec streaming(
     final CodecType type, {
-    final int? maxDecompressedSize = defaultMaxDecompressedSize,
+    final int? maxSize = defaultMaxSize,
     final int maxBufferSize = defaultMaxBufferSize,
     final bool verified = false,
   }) {
     return switch (type) {
-      CodecType.noop => NoopStreamCodec(),
+      CodecType.noop => NoopStreamCodec(maxSize: maxSize),
       CodecType.snappy => SnappyStreamCodec(
-        maxSize: maxDecompressedSize,
+        maxSize: maxSize,
         maxBufferSize: maxBufferSize,
       ),
       CodecType.gzip => GzipStreamCodec(
-        maxSize: maxDecompressedSize,
+        maxSize: maxSize,
         maxBufferSize: maxBufferSize,
         verified: verified,
       ),
       CodecType.lz4 => Lz4StreamCodec(
-        maxSize: maxDecompressedSize,
+        maxSize: maxSize,
         maxBufferSize: maxBufferSize,
         verified: verified,
       ),
       CodecType.zstd => ZstdStreamCodec(
-        maxSize: maxDecompressedSize,
+        maxSize: maxSize,
         maxBufferSize: maxBufferSize,
         verified: verified,
       ),
     };
-  }
-
-  /// Check if a codec type supports a given mode
-  ///
-  /// Example:
-  /// ```dart
-  /// if (CodecFactory.supports(CodecType.lz4, CodecMode.stream)) {
-  ///   final streamCodec = CodecFactory.streaming(CodecType.lz4);
-  /// }
-  /// ```
-  static bool supports(final CodecType type, final CodecMode mode) {
-    return codec(type).supports(mode);
   }
 }

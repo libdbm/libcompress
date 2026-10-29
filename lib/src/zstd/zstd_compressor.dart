@@ -10,7 +10,7 @@ class ZstdCompressor {
   ZstdCompressor({
     required this.level,
     required this.blockSize,
-    required this.enableChecksum,
+    required this.checksum,
     this.validate = false,
     this.strict = false,
     this.onFallback,
@@ -18,16 +18,16 @@ class ZstdCompressor {
 
   final int level;
   final int blockSize;
-  final bool enableChecksum;
+  final bool checksum;
   final bool validate;
   final bool strict;
   final void Function(Object error, StackTrace stackTrace)? onFallback;
 
-  Uint8List compress(Uint8List data) {
+  Uint8List compress(final Uint8List data) {
     final encoder = ZstdEncoder(
       level: level,
       blockSize: blockSize,
-      enableChecksum: enableChecksum,
+      checksum: checksum,
       validate: validate,
       strict: strict,
       onFallback: onFallback,

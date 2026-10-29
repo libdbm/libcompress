@@ -31,7 +31,7 @@ void main() {
             maxBits,
           );
           expect(
-            lengths.every((length) => length > 0 && length <= maxBits),
+            lengths.every((final length) => length > 0 && length <= maxBits),
             isTrue,
             reason: 'count $count',
           );

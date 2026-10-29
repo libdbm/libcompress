@@ -36,28 +36,6 @@ class Varint {
     return bytes;
   }
 
-  /// Encodes an unsigned integer as a varint into an existing buffer
-  ///
-  /// Appends the varint-encoded bytes to [output].
-  /// Returns the number of bytes written.
-  static int encodeInto(List<int> output, int value) {
-    if (value < 0) {
-      throw ArgumentError('Value must be non-negative');
-    }
-
-    var count = 0;
-
-    while (value > 127) {
-      output.add(0x80 | (value & 0x7f));
-      value >>= 7;
-      count++;
-    }
-    output.add(value);
-    count++;
-
-    return count;
-  }
-
   /// Decodes a varint from a byte array
   ///
   /// Reads from [data] starting at [offset] and returns a [VarintResult]
@@ -77,7 +55,11 @@ class Varint {
   /// `<< shift`, so the result is exact and non-negative on both the VM and
   /// dart2js (a shifted value past bit 31 would wrap/sign on JS, yielding a
   /// negative size that could slip past a bounds check).
-  static VarintResult decode(Uint8List data, int offset, {int maxBytes = 10}) {
+  static VarintResult decode(
+    final Uint8List data,
+    final int offset, {
+    final int maxBytes = 10,
+  }) {
     var value = 0;
     var multiplier = 1;
     var bytesRead = 0;
@@ -103,30 +85,6 @@ class Varint {
 
       multiplier *= 128;
     }
-  }
-
-  /// Decodes a varint and returns only the value
-  ///
-  /// Convenience method when you don't need to know how many bytes were consumed.
-  /// Starts reading from [offset] in [data].
-  static int decodeValue(Uint8List data, int offset) {
-    return decode(data, offset).value;
-  }
-
-  /// Calculates the encoded size of a value without actually encoding it
-  ///
-  /// Returns the number of bytes that would be used to encode [value].
-  static int encodedSize(int value) {
-    if (value < 0) {
-      throw ArgumentError('Value must be non-negative');
-    }
-
-    var size = 1;
-    while (value > 127) {
-      value >>= 7;
-      size++;
-    }
-    return size;
   }
 }
 

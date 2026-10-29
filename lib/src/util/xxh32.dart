@@ -19,7 +19,7 @@ class XXH32 {
   /// [data] - The input data to hash
   /// [seed] - Optional seed value (default: 0)
   /// Returns the 32-bit hash as an unsigned integer
-  static int hash(Uint8List data, [int seed = 0]) {
+  static int hash(final Uint8List data, [final int seed = 0]) {
     final length = data.length;
     int h32;
     int index = 0;
@@ -81,25 +81,26 @@ class XXH32 {
   }
 
   /// Computes XXH32 hash of a list of integers (treating each as a byte).
-  static int hashFromList(List<int> data, [int seed = 0]) {
+  static int hashFromList(final List<int> data, [final int seed = 0]) {
     return hash(Uint8List.fromList(data), seed);
   }
 
-  static int _round(int acc, int input) {
+  static int _round(int acc, final int input) {
     acc = (acc + _mul32(input, _prime2)) & 0xFFFFFFFF;
     acc = _rotateLeft(acc, 13);
     acc = _mul32(acc, _prime1);
     return acc;
   }
 
-  static int _mul32(int left, int right) => ByteUtils.mul32(left, right);
+  static int _mul32(final int left, final int right) =>
+      ByteUtils.mul32(left, right);
 
-  static int _rotateLeft(int value, int amount) {
+  static int _rotateLeft(int value, final int amount) {
     value &= 0xFFFFFFFF;
     return ((value << amount) | (value >> (32 - amount))) & 0xFFFFFFFF;
   }
 
-  static int _readLittleEndian32(Uint8List data, int offset) {
+  static int _readLittleEndian32(final Uint8List data, final int offset) {
     return data[offset] |
         (data[offset + 1] << 8) |
         (data[offset + 2] << 16) |

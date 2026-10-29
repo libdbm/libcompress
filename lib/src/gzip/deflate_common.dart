@@ -28,17 +28,11 @@ const int hashSize = 1 << 15; // 32K entries
 /// Hash shift amount
 const int hashShift = 5;
 
-/// Number of bits for length codes
-const int lengthCodes = 29;
-
 /// Number of literal/length codes (0-285)
 const int literals = 256;
 
 /// Number of distance codes (0-29)
 const int distanceCodes = 30;
-
-/// Number of bit length codes (0-18)
-const int bitLengthCodes = 19;
 
 /// End-of-block symbol
 const int endBlock = 256;
@@ -140,7 +134,7 @@ const List<int> codeLengthOrder = [
 ];
 
 /// Computes hash value for LZ77 match finding
-int hash(Uint8List data, int pos) {
+int hash(final Uint8List data, final int pos) {
   if (pos + 2 >= data.length) return 0;
   return ((data[pos] << (hashShift * 2)) ^
           (data[pos + 1] << hashShift) ^
@@ -154,7 +148,7 @@ int hash(Uint8List data, int pos) {
 /// extra-bits/value decomposition is uniform across all codes.
 ///
 /// Throws [ArgumentError] if length is not between [minMatch] and [maxMatch].
-LengthCode encodeLength(int length) {
+LengthCode encodeLength(final int length) {
   if (length < minMatch || length > maxMatch) {
     throw ArgumentError.value(
       length,
@@ -168,7 +162,7 @@ LengthCode encodeLength(int length) {
 }
 
 /// Encodes a distance value into distance code and extra bits (O(1) lookup).
-DistanceCode encodeDistance(int distance) {
+DistanceCode encodeDistance(final int distance) {
   if (distance < 1 || distance > maxDistance) {
     throw DeflateFormatException(
       'Invalid distance: $distance (must be 1-$maxDistance)',

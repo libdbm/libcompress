@@ -48,7 +48,7 @@ void main() {
     });
 
     test('respects a non-zero seed', () {
-      final data = Uint8List.fromList(List.generate(80, (i) => i));
+      final data = Uint8List.fromList(List.generate(80, (final i) => i));
       final sink = Xxh64Sink(0xBEEF);
       sink.add(data, 0, 33);
       sink.add(data, 33);

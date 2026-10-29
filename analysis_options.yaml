@@ -7,6 +7,7 @@ linter:
   rules:
     # Style
     - prefer_final_locals
+    - prefer_final_parameters
     - prefer_final_in_for_each
     - prefer_is_empty
     - sort_pub_dependencies

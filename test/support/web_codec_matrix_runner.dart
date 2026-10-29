@@ -16,16 +16,56 @@ Future<void> main() async {
   // The factory leaves the Zstd content checksum off; cover XXH64 explicitly.
   results['zstdChecksum'] = await _runCodec(
     CodecType.zstd,
-    ZstdCodec(enableChecksum: true),
+    ZstdCodec(checksum: true),
     ZstdStreamCodec(checksum: true),
   );
+  results['zstdLargeWindow'] = await _largeWindows();
   print(jsonEncode(results));
 }
 
+/// Decodes frames whose Window_Descriptor exponent makes the window 2^31 bytes
+/// or more (exponent 22 is 2^32), which a 32-bit shift gets wrong on the web.
+/// Each frame holds one raw block, `abc`.
+Future<List<Object?>> _largeWindows() async {
+  final results = <Object?>[];
+  for (final exponent in [21, 22, 31]) {
+    final frame = Uint8List.fromList([
+      0x28, 0xB5, 0x2F, 0xFD, 0x00, exponent << 3, //
+      (3 << 3) | 1, 0, 0, 0x61, 0x62, 0x63,
+    ]);
+    results
+      ..add(_attempt(() => ZstdCodec().decompress(frame)))
+      ..add(
+        await _attemptAsync(
+          () => ZstdStreamCodec().decompress(Stream.value(frame)).toList(),
+        ),
+      );
+  }
+  return results;
+}
+
+Object? _attempt(final Uint8List Function() decode) {
+  try {
+    return _encode(decode());
+  } on ZstdFormatException catch (error) {
+    return 'error: ${error.message}';
+  }
+}
+
+Future<Object?> _attemptAsync(
+  final Future<List<Uint8List>> Function() decode,
+) async {
+  try {
+    return _encode(_concat(await decode()));
+  } on ZstdFormatException catch (error) {
+    return 'error: ${error.message}';
+  }
+}
+
 Future<Map<String, Object?>> _runCodec(
-  CodecType type,
-  CompressionCodec blockCodec,
-  CompressionStreamCodec streamCodec,
+  final CodecType type,
+  final CompressionCodec blockCodec,
+  final CompressionStreamCodec streamCodec,
 ) async {
   final cases = _dataCases();
   final blockResults = <Map<String, Object?>>[];
@@ -77,7 +117,7 @@ Map<String, Uint8List> _dataCases() {
       utf8.encode(List<String>.filled(128, 'plate-label-').join()),
     ),
     'binary': Uint8List.fromList(
-      List<int>.generate(1024, (index) => (index * 37 + 11) & 0xff),
+      List<int>.generate(1024, (final index) => (index * 37 + 11) & 0xff),
     ),
     'large': _large(),
   };
@@ -99,7 +139,7 @@ Uint8List _large() {
   return data;
 }
 
-List<Uint8List> _splitData(Uint8List data) {
+List<Uint8List> _splitData(final Uint8List data) {
   if (data.isEmpty) {
     return <Uint8List>[Uint8List(0)];
   }
@@ -110,7 +150,7 @@ List<Uint8List> _splitData(Uint8List data) {
   ];
 }
 
-Uint8List _normalizeCompressed(CodecType type, Uint8List bytes) {
+Uint8List _normalizeCompressed(final CodecType type, final Uint8List bytes) {
   if (type != CodecType.gzip) {
     return bytes;
   }
@@ -134,7 +174,7 @@ Uint8List _normalizeCompressed(CodecType type, Uint8List bytes) {
   return normalized;
 }
 
-int? _nextGzipMemberOffset(Uint8List bytes, int offset) {
+int? _nextGzipMemberOffset(final Uint8List bytes, final int offset) {
   var pos = offset + 10;
   final flags = bytes[offset + 3];
   if ((flags & 0x04) != 0) {
@@ -166,8 +206,11 @@ int? _nextGzipMemberOffset(Uint8List bytes, int offset) {
   return bytes.length;
 }
 
-Uint8List _concat(List<Uint8List> chunks) {
-  final total = chunks.fold<int>(0, (sum, chunk) => sum + chunk.length);
+Uint8List _concat(final List<Uint8List> chunks) {
+  final total = chunks.fold<int>(
+    0,
+    (final sum, final chunk) => sum + chunk.length,
+  );
   final result = Uint8List(total);
   var offset = 0;
   for (final chunk in chunks) {
@@ -179,7 +222,7 @@ Uint8List _concat(List<Uint8List> chunks) {
 
 /// Small payloads are compared byte for byte; large ones by length and digest
 /// to keep the VM/JS comparison output small.
-String _encode(Uint8List bytes) {
+String _encode(final Uint8List bytes) {
   if (bytes.length <= 4096) return base64Encode(bytes);
   var digest = 17;
   for (final byte in bytes) {
@@ -188,7 +231,7 @@ String _encode(Uint8List bytes) {
   return '${bytes.length}:$digest';
 }
 
-bool _bytesEqual(Uint8List left, Uint8List right) {
+bool _bytesEqual(final Uint8List left, final Uint8List right) {
   if (left.length != right.length) {
     return false;
   }

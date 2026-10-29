@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../compression_codec.dart';
+import '../util/expected_size.dart';
 import '../compression_options.dart';
 import 'zstd_common.dart';
 import 'zstd_compressor.dart';
@@ -27,12 +28,11 @@ import 'zstd_decoder.dart';
 ///
 /// Not implemented:
 /// - Dictionary compression
-/// - Window sizes larger than frame content
 ///
 /// CLI compatibility: Files produced by this codec decompress correctly with
 /// the standard `zstd` CLI tool, and non-dictionary `.zst` files from the CLI
 /// decode here. Dictionary frames (`zstd -D`) are the exception — they fail.
-class ZstdCodec extends CompressionCodec {
+final class ZstdCodec extends CompressionCodec {
   /// Compression level (1-22)
   final int level;
 
@@ -40,11 +40,11 @@ class ZstdCodec extends CompressionCodec {
   final int blockSize;
 
   /// Whether to include XXH64 content checksum
-  final bool enableChecksum;
+  final bool checksum;
 
   /// Maximum decompressed size (prevents OOM on malicious input)
   /// Set to null for unlimited (not recommended for untrusted input)
-  final int? maxDecompressedSize;
+  final int? maxSize;
 
   /// Whether to validate compressed blocks by decompressing them
   ///
@@ -67,15 +67,15 @@ class ZstdCodec extends CompressionCodec {
   ZstdCodec({
     this.level = 3,
     this.blockSize = 128 * 1024,
-    this.enableChecksum = false,
-    this.maxDecompressedSize = zstdDefaultMaxDecompressedSize,
+    this.checksum = false,
+    this.maxSize = defaultMaxSize,
     this.validate = false,
     this.strict = false,
     this.onFallback,
   }) {
     validateLevel(level, 1, 22);
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
-    validateOptionalPositive(maxDecompressedSize, 'maxDecompressedSize');
+    validateOptionalPositive(maxSize, 'maxSize');
   }
 
   /// Creates a Zstd codec from compression options
@@ -83,9 +83,11 @@ class ZstdCodec extends CompressionCodec {
     return ZstdCodec(
       level: options.level,
       blockSize: options.blockSize,
-      enableChecksum: options.checksum,
+      checksum: options.checksum,
       validate: options.validate,
-      maxDecompressedSize: options.maxDecompressedSize,
+      strict: options.strict,
+      maxSize: options.maxSize,
+      onFallback: options.onFallback,
     );
   }
 
@@ -94,7 +96,7 @@ class ZstdCodec extends CompressionCodec {
     final compressor = ZstdCompressor(
       level: level,
       blockSize: blockSize,
-      enableChecksum: enableChecksum,
+      checksum: checksum,
       validate: validate,
       strict: strict,
       onFallback: onFallback,
@@ -103,16 +105,16 @@ class ZstdCodec extends CompressionCodec {
   }
 
   @override
-  Uint8List decompress(final Uint8List data) {
-    return ZstdDecoder(maxSize: maxDecompressedSize).decompress(data);
+  Uint8List decompress(final Uint8List data, {final int? size}) {
+    return checkSize(
+      ZstdDecoder(maxSize: capFor(maxSize, size)).decompress(data),
+      size,
+      ZstdFormatException.new,
+    );
   }
 
   @override
   String get name => 'ZSTD';
-
-  @override
-  bool supports(final CodecMode mode) =>
-      mode == CodecMode.block || mode == CodecMode.stream;
 }
 
 /// Zstd-specific compression options
@@ -126,6 +128,15 @@ class ZstdOptions extends CompressionOptions {
   /// to verify correctness. This doubles CPU work but is useful for debugging.
   final bool validate;
 
+  /// Fail loud if an unexpected error makes a compressed block fall back to raw
+  /// output, instead of silently degrading to raw framing (see
+  /// [ZstdCodec.strict]).
+  final bool strict;
+
+  /// Called when a compressed block falls back to raw output after an
+  /// unexpected error (see [ZstdCodec.onFallback]).
+  final void Function(Object error, StackTrace stackTrace)? onFallback;
+
   /// Creates Zstd options with specified parameters
   ///
   /// [level] must be between 1 and 22 (Zstd supports higher levels than other codecs).
@@ -133,12 +144,13 @@ class ZstdOptions extends CompressionOptions {
   ZstdOptions({
     super.level = 3,
     super.checksum = false,
-    super.maxDecompressedSize,
+    super.maxSize,
     this.blockSize = 128 * 1024,
     this.validate = false,
+    this.strict = false,
+    this.onFallback,
   }) {
-    if (level < 1 || level > 22) {
-      throw ArgumentError.value(level, 'level', 'Must be between 1 and 22');
-    }
+    validateLevel(level, 1, 22);
+    validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
   }
 }

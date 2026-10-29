@@ -12,11 +12,11 @@ import 'stream_pump.dart';
 /// trailers.
 abstract class IncrementalDecoder {
   /// Consumes [input], emitting any decompressed output now available.
-  void add(Uint8List input, void Function(Uint8List) emit);
+  void add(final Uint8List input, final void Function(Uint8List) emit);
 
   /// Signals end of input; emits the tail and validates trailers (throws on
   /// an incomplete or invalid stream).
-  void close(void Function(Uint8List) emit);
+  void close(final void Function(Uint8List) emit);
 }
 
 /// Drives an [IncrementalDecoder] over a `Stream<Uint8List>`.

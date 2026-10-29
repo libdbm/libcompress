@@ -5,11 +5,12 @@ import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/byte_sink.dart';
 import '../util/byte_utils.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
+import '../compression_options.dart';
 
 class Lz4Decoder {
   /// Maximum allowed decompressed size (prevents OOM attacks)
@@ -18,25 +19,199 @@ class Lz4Decoder {
 
   /// Creates a decoder with optional size limit
   ///
-  /// [maxSize] defaults to [lz4DefaultMaxDecompressedSize] (256MB).
+  /// [maxSize] defaults to [defaultMaxSize] (256MB).
   /// Set to null to allow unlimited output (use with trusted input only).
-  Lz4Decoder({this.maxSize = lz4DefaultMaxDecompressedSize});
+  Lz4Decoder({this.maxSize = defaultMaxSize});
 
-  Uint8List decompress(Uint8List input) =>
-      guardFormat(() => _decompress(input), Lz4FormatException.new);
+  Uint8List decompress(final Uint8List input) => guardFormat(
+    () => _decompress(input),
+    Lz4FormatException.new,
+    limit: maxSize,
+  );
 
   /// Decompresses a single raw LZ4 block (no frame header, block-size prefix,
   /// end mark, or checksum) — the bare LZ77 token stream produced by
   /// [Lz4Encoder.compressBlock] and by containers such as Parquet `LZ4_RAW`.
   /// The whole [input] is treated as one block and decoded until consumed.
-  /// Output is bounded by [maxSize] (defaults to this decoder's [maxSize]).
-  Uint8List decompressBlock(Uint8List input, {int? maxSize}) => guardFormat(
-    () => _decompressBlock(input, maxSize ?? this.maxSize),
+  /// Output is bounded by [maxSize]. When the decoded [size] is known, the
+  /// block is decoded straight into a buffer of exactly that size.
+  Uint8List decompressBlock(final Uint8List input, {final int? size}) =>
+      guardFormat(
+        () => size == null
+            ? _decompressBlock(input, maxSize)
+            : _decompressExact(input, size),
+        Lz4FormatException.new,
+        limit: maxSize,
+      );
+
+  /// Decodes one raw block into exactly [size] bytes: no growable buffer and
+  /// no per-byte dispatch, one bounds check per literal run and per match.
+  /// Accepts and rejects exactly the blocks [_decompressBlock] does, given
+  /// the same expected length.
+  Uint8List _decompressExact(final Uint8List input, final int size) {
+    final limit = maxSize;
+    if (limit != null && size > limit) throw LimitException(limit);
+    if (input.isEmpty) {
+      throw Lz4FormatException('Empty LZ4 block');
+    }
+    final out = Uint8List(size);
+    final end = input.length;
+    var ip = 0;
+    var op = 0;
+    while (ip < end) {
+      final token = input[ip++];
+
+      var literals = token >> 4;
+      if (literals == 15) {
+        int value;
+        do {
+          if (ip >= end) {
+            throw Lz4FormatException(
+              'Unexpected end while reading literal length extension',
+            );
+          }
+          value = input[ip++];
+          literals += value;
+        } while (value == 255);
+      }
+      if (literals > 0) {
+        if (ip + literals > end) {
+          throw Lz4FormatException('Literal length exceeds block size');
+        }
+        if (op + literals > size) throw LimitException(size);
+        if (literals <= 16) {
+          for (var i = 0; i < literals; i++) {
+            out[op + i] = input[ip + i];
+          }
+        } else {
+          out.setRange(op, op + literals, input, ip);
+        }
+        ip += literals;
+        op += literals;
+      }
+      if (ip >= end) break;
+
+      if (ip + 1 >= end) {
+        throw Lz4FormatException('Truncated offset in block');
+      }
+      final offset = input[ip] | (input[ip + 1] << 8);
+      ip += 2;
+      if (offset == 0) {
+        throw Lz4FormatException(
+          'Invalid match offset: 0 (offset must be at least 1)',
+        );
+      }
+      if (offset > op) {
+        throw Lz4FormatException(
+          'Invalid match offset: $offset exceeds output length $op',
+        );
+      }
+
+      var length = token & 0x0F;
+      if (length == 15) {
+        int value;
+        do {
+          if (ip >= end) {
+            throw Lz4FormatException(
+              'Unexpected end while reading match length extension',
+            );
+          }
+          value = input[ip++];
+          length += value;
+        } while (value == 255);
+      }
+      length += lz4MinMatch;
+      if (op + length > size) throw LimitException(size);
+
+      final from = op - offset;
+      if (offset == 1) {
+        out.fillRange(op, op + length, out[from]);
+      } else if (offset >= length) {
+        // Source and destination do not overlap.
+        if (length <= 16) {
+          for (var i = 0; i < length; i++) {
+            out[op + i] = out[from + i];
+          }
+        } else {
+          out.setRange(op, op + length, out, from);
+        }
+      } else {
+        // Overlapping: each byte may read one written earlier in this copy.
+        for (var i = 0; i < length; i++) {
+          out[op + i] = out[from + i];
+        }
+      }
+      op += length;
+    }
+    if (op != size) {
+      throw Lz4FormatException('Decompressed size $op != expected size $size');
+    }
+    return out;
+  }
+
+  /// Decompresses Hadoop block framing: outer blocks of a big-endian u32
+  /// uncompressed length, each followed by one or more inner chunks of a
+  /// big-endian u32 compressed length and a raw block. Each chunk decodes on
+  /// its own, so matches cannot reach into an earlier chunk. Output is bounded
+  /// by [maxSize].
+  Uint8List decompressHadoop(final Uint8List input) => guardFormat(
+    () => _decompressHadoop(input),
     Lz4FormatException.new,
+    limit: maxSize,
   );
 
+  Uint8List _decompressHadoop(final Uint8List input) {
+    if (input.isEmpty) {
+      throw Lz4FormatException('Empty LZ4 input');
+    }
+    final view = ByteData.sublistView(input);
+    final output = BytesBuilder(copy: false);
+    var position = 0;
+    int u32() {
+      if (input.length - position < 4) {
+        throw Lz4FormatException('Truncated Hadoop LZ4 length');
+      }
+      final value = view.getUint32(position);
+      position += 4;
+      return value;
+    }
+
+    while (position < input.length) {
+      final total = u32();
+      final limit = maxSize;
+      if (limit != null && output.length + total > limit) {
+        throw LimitException(limit);
+      }
+      // At least one chunk per block: Arrow writes one even for empty data.
+      var produced = 0;
+      do {
+        final length = u32();
+        if (length > input.length - position) {
+          throw Lz4FormatException('Hadoop LZ4 chunk extends past the input');
+        }
+        // The block total was checked against maxSize above, so a chunk that
+        // runs past it is a framing error, not a limit breach.
+        final Uint8List chunk;
+        try {
+          chunk = _decompressBlock(
+            Uint8List.sublistView(input, position, position + length),
+            total - produced,
+          );
+        } on OutputLimitException {
+          throw Lz4FormatException('Hadoop LZ4 chunk decodes past its block');
+        }
+        position += length;
+        produced += chunk.length;
+        output.add(chunk);
+      } while (produced < total);
+    }
+    return output.takeBytes();
+  }
+
   Uint8List _decompressBlock(final Uint8List input, final int? cap) {
-    if (input.isEmpty) return Uint8List(0);
+    if (input.isEmpty) {
+      throw Lz4FormatException('Empty LZ4 block');
+    }
     var initial = input.length * 3 + 64; // rough guess; grows as needed.
     if (cap != null && initial > cap) initial = cap;
     final output = GrowableBuffer(initial, cap);
@@ -46,9 +221,9 @@ class Lz4Decoder {
     return output.toBytes();
   }
 
-  Uint8List _decompress(Uint8List input) {
+  Uint8List _decompress(final Uint8List input) {
     if (input.isEmpty) {
-      return Uint8List(0);
+      throw Lz4FormatException('Empty LZ4 input');
     }
 
     final reader = _FrameReader(input);
@@ -71,70 +246,31 @@ class Lz4Decoder {
   /// output to [remaining] (null = unlimited), and advances the reader past the
   /// frame (end mark + optional content checksum).
   Uint8List _decodeFrame(final _FrameReader reader, final int? remaining) {
-    final magic = reader.readUint32();
-    if (magic != lz4FrameMagic) {
-      throw Lz4FormatException(
-        'Invalid LZ4 frame magic: 0x${magic.toRadixString(16)}',
-      );
+    final header = reader.header();
+    final skip = header.skip;
+    if (skip != null) {
+      reader.readBytes(skip);
+      return Uint8List(0);
+    }
+    final blockChecksumFlag = header.blockChecksum;
+    final contentChecksumFlag = header.contentChecksum;
+    final blockMaxSize = header.blockSize;
+    // One output buffer serves both: linked blocks match into earlier blocks
+    // (offsets are <= 64 KB); independent ones are bounded to their own.
+    final expectedContentSize = header.contentSize;
+    // Validate declared content size against the remaining limit early
+    if (remaining != null &&
+        expectedContentSize != null &&
+        expectedContentSize > remaining) {
+      throw LimitException(remaining);
     }
 
-    final flag = reader.readByte();
-    final version = flag >> 6;
-    if (version != 0x01) {
-      throw Lz4FormatException('Unsupported LZ4 frame version $version');
-    }
-    if ((flag & 0x02) != 0) {
-      throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
-    }
-
-    final blockChecksumFlag = (flag & 0x10) != 0;
-    final contentSizeFlag = (flag & 0x08) != 0;
-    final contentChecksumFlag = (flag & 0x04) != 0;
-    final dictIdFlag = (flag & 0x01) != 0;
-    final bd = reader.readByte();
-    if ((bd & 0x8F) != 0) {
-      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
-    }
-    final blockMaxSizeCode = (bd >> 4) & 0x07;
-    final blockMaxSize = blockSizeFromCode(blockMaxSizeCode);
-    // Both independent and linked (dependent) blocks decode correctly: a single
-    // shared output buffer is used, and LZ4 match offsets are <= 64 KB.
-    final headerBytes = <int>[flag, bd];
-
-    int? expectedContentSize;
-    if (contentSizeFlag) {
-      final sizeBytes = reader.readBytes(8);
-      headerBytes.addAll(sizeBytes);
-      final contentSize = ByteUtils.readUintLE(sizeBytes, 0, 8);
-      expectedContentSize = contentSize;
-
-      // Validate declared content size against the remaining limit early
-      if (remaining != null && contentSize > remaining) {
-        throw Lz4FormatException(
-          'Declared content size $contentSize exceeds '
-          'maximum allowed size $remaining',
-        );
-      }
-    }
-
-    if (dictIdFlag) {
-      final dictBytes = reader.readBytes(4);
-      headerBytes.addAll(dictBytes);
-      final dictId = ByteUtils.readUint32LE(dictBytes, 0);
-      if (dictId != 0) {
-        throw Lz4FormatException('External dictionaries are not supported');
-      }
-    }
-
-    final headerChecksum = reader.readByte();
-    final expectedHeaderChecksum = lz4HeaderChecksum(headerBytes);
-    if (headerChecksum != expectedHeaderChecksum) {
-      throw Lz4FormatException('Invalid LZ4 header checksum');
-    }
-
+    // Without a content size, start at a few times the input left (at least
+    // 1 KB, at most one block) and let the buffer double: allocating the
+    // Block Maximum Size (4 MB by default) dominated decoding small frames.
     var initialCapacity = expectedContentSize != null
         ? math.max(256, math.min(expectedContentSize, blockMaxSize * 2))
-        : blockMaxSize;
+        : math.min(blockMaxSize, math.max(1024, reader.remaining * 4));
     if (remaining != null && initialCapacity > remaining) {
       initialCapacity = remaining;
     }
@@ -170,7 +306,7 @@ class Lz4Decoder {
         output.addBytes(blockBytes, 0, blockBytes.length);
       } else {
         blockDecoder.reset(blockBytes);
-        blockDecoder.decode();
+        blockDecoder.decode(blockMaxSize, header.independent);
       }
     }
 
@@ -197,9 +333,9 @@ class Lz4Decoder {
 
 /// Incremental, memory-bounded LZ4 frame decoder.
 ///
-/// Emits one block at a time (LZ4 frame blocks are independent), so peak
-/// memory is roughly one block plus its decoded output rather than the whole
-/// frame and its whole output. Verifies the header checksum, optional
+/// Emits one block at a time, keeping a 64 KB window so linked blocks
+/// resolve, so peak memory is roughly one block plus its decoded output rather
+/// than the whole frame and its whole output. Verifies the header checksum, optional
 /// per-block checksums, and the optional content checksum (streamed via
 /// [Xxh32Sink]). Supports concatenated frames, matching the streaming codec.
 class Lz4IncrementalDecoder implements IncrementalDecoder {
@@ -224,10 +360,10 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   late final OutputLimit _limit = OutputLimit(maxSize);
 
   final BytePending _pending = BytePending();
-  int _cursor = 0;
 
   bool _inFrame = false;
   bool _blockChecksum = false;
+  bool _independent = false;
   bool _contentChecksumFlag = false;
   int _blockMaxSize = 0;
   int? _expectedContentSize;
@@ -239,32 +375,26 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   _BlockDecoder? _blockDecoder;
   bool _sawEndMark = false;
 
-  int get _avail => _pending.length - _cursor;
+  // Bytes of a skippable frame still to discard; they are never buffered.
+  int _skipping = 0;
 
-  int _u32(final int o) =>
-      _pending[o] +
-      _pending[o + 1] * 0x100 +
-      _pending[o + 2] * 0x10000 +
-      _pending[o + 3] * 0x1000000;
+  // True until a non-empty chunk arrives: empty input is an error.
+  bool _empty = true;
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    // Reject before appending so an oversized chunk can't force the
-    // allocation/copy in _pending.add ahead of the limit check.
-    if (_avail + input.length > maxBufferSize) {
-      throw Lz4FormatException(
-        'Stream buffer would exceed $maxBufferSize bytes - '
-        'frame too large or malformed',
-      );
-    }
-    _pending.add(input);
-    guardFormat(() => _drive(emit), Lz4FormatException.new);
+    if (input.isNotEmpty) _empty = false;
+    _pending.append(input, maxBufferSize);
+    guardFormat(() => _drive(emit), Lz4FormatException.new, limit: maxSize);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    guardFormat(() => _drive(emit), Lz4FormatException.new);
-    if (_inFrame || _avail != 0) {
+    guardFormat(() => _drive(emit), Lz4FormatException.new, limit: maxSize);
+    if (_empty) {
+      throw Lz4FormatException('Empty LZ4 stream');
+    }
+    if (_inFrame || _skipping > 0 || _pending.available != 0) {
       throw Lz4FormatException('Incomplete LZ4 frame at end of stream');
     }
   }
@@ -272,81 +402,51 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   void _drive(final void Function(Uint8List) emit) {
     var progressed = true;
     while (progressed) {
-      if (!_inFrame) {
-        progressed = _avail > 0 && _parseHeader();
+      if (_skipping > 0) {
+        progressed = _skip();
+      } else if (!_inFrame) {
+        progressed = _pending.available > 0 && _parseHeader();
       } else if (_sawEndMark) {
         progressed = _finishFrame(emit);
       } else {
         progressed = _decodeBlock(emit);
       }
     }
-    _compact();
+    _pending.compact();
+  }
+
+  bool _skip() {
+    final count = _pending.available < _skipping
+        ? _pending.available
+        : _skipping;
+    if (count == 0) return false;
+    _pending.cursor += count;
+    _skipping -= count;
+    return true;
   }
 
   bool _parseHeader() {
-    if (_avail < 6) return false;
-    final base = _cursor;
-    final magic = _u32(base);
-    if (magic != lz4FrameMagic) {
-      throw Lz4FormatException(
-        'Invalid LZ4 frame magic: 0x${magic.toRadixString(16)}',
-      );
+    final header = lz4Header(_pending.bytes, _pending.cursor, _pending.length);
+    if (header == null) return false;
+    _pending.cursor += header.length;
+    final skip = header.skip;
+    if (skip != null) {
+      _skipping = skip;
+      return true;
     }
-    final flag = _pending[base + 4];
-    if (flag >> 6 != 0x01) {
-      throw Lz4FormatException('Unsupported LZ4 frame version ${flag >> 6}');
+    final size = header.contentSize;
+    final budget = _limit.remaining;
+    if (size != null && budget != null && size > budget) {
+      throw LimitException(budget);
     }
-    if ((flag & 0x02) != 0) {
-      throw Lz4FormatException('Reserved bit set in LZ4 FLG byte');
-    }
-    final bd = _pending[base + 5];
-    if ((bd & 0x8F) != 0) {
-      throw Lz4FormatException('Reserved bits set in LZ4 BD byte');
-    }
-    final contentSizeFlag = (flag & 0x08) != 0;
-    final dictIdFlag = (flag & 0x01) != 0;
-    final needed = 6 + (contentSizeFlag ? 8 : 0) + (dictIdFlag ? 4 : 0) + 1;
-    if (_avail < needed) return false;
 
-    final headerBytes = <int>[flag, bd];
-    var p = base + 6;
-    int? expectedContentSize;
-    if (contentSizeFlag) {
-      for (var i = 0; i < 8; i++) {
-        headerBytes.add(_pending[p + i]);
-      }
-      final size = ByteUtils.readUintLE(_pending.bytes, p, 8);
-      p += 8;
-      expectedContentSize = size;
-      final budget = _limit.remaining;
-      if (budget != null && size > budget) {
-        throw Lz4FormatException(
-          'Declared content size $size exceeds remaining budget $budget '
-          '(maximum $maxSize)',
-        );
-      }
-    }
-    if (dictIdFlag) {
-      for (var i = 0; i < 4; i++) {
-        headerBytes.add(_pending[p + i]);
-      }
-      if (_u32(p) != 0) {
-        throw Lz4FormatException('External dictionaries are not supported');
-      }
-      p += 4;
-    }
-    if (_pending[p] != lz4HeaderChecksum(headerBytes)) {
-      throw Lz4FormatException('Invalid LZ4 header checksum');
-    }
-    p += 1;
-
-    _cursor = p;
     _inFrame = true;
     _sawEndMark = false;
-    _blockChecksum = (flag & 0x10) != 0;
-    _contentChecksumFlag = (flag & 0x04) != 0;
-    _blockMaxSize = blockSizeFromCode((bd >> 4) & 0x07);
-    _expectedContentSize = expectedContentSize;
+    _blockChecksum = header.blockChecksum;
+    _independent = header.independent;
+    _contentChecksumFlag = header.contentChecksum;
+    _blockMaxSize = header.blockSize;
+    _expectedContentSize = size;
     _contentSink = _contentChecksumFlag ? Xxh32Sink() : null;
     // 64 KB LZ4 window, capped at the remaining cumulative budget so a single
     // block can't balloon memory before the post-decode check, and so many
@@ -358,10 +458,10 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
   }
 
   bool _decodeBlock(final void Function(Uint8List) emit) {
-    if (_avail < 4) return false;
-    final sizeField = _u32(_cursor);
+    if (_pending.available < 4) return false;
+    final sizeField = _pending.u32(_pending.cursor);
     if (sizeField == 0) {
-      _cursor += 4;
+      _pending.cursor += 4;
       _sawEndMark = true;
       return true;
     }
@@ -373,13 +473,13 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       );
     }
     final trailer = _blockChecksum ? 4 : 0;
-    if (_avail < 4 + blockSize + trailer) return false;
+    if (_pending.available < 4 + blockSize + trailer) return false;
 
-    final start = _cursor + 4;
+    final start = _pending.cursor + 4;
     final blockBytes = _pending.slice(start, start + blockSize);
     var p = start + blockSize;
     if (_blockChecksum) {
-      if (_u32(p) != XXH32.hash(blockBytes)) {
+      if (_pending.u32(p) != XXH32.hash(blockBytes)) {
         throw Lz4FormatException('Block checksum mismatch');
       }
       p += 4;
@@ -391,11 +491,11 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     if (isCompressed) {
       _blockDecoder!
         ..reset(blockBytes)
-        ..decode();
+        ..decode(_blockMaxSize, _independent);
     } else {
       output.addBytes(blockBytes, 0, blockBytes.length);
     }
-    _cursor = p;
+    _pending.cursor = p;
     _flush(output.drain(), emit);
     return true;
   }
@@ -405,11 +505,11 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
     _flush(output.finish(), emit);
 
     if (_contentChecksumFlag) {
-      if (_avail < 4) return false;
-      if (_u32(_cursor) != _contentSink!.digest()) {
+      if (_pending.available < 4) return false;
+      if (_pending.u32(_pending.cursor) != _contentSink!.digest()) {
         throw Lz4FormatException('Content checksum mismatch');
       }
-      _cursor += 4;
+      _pending.cursor += 4;
     }
     if (_expectedContentSize != null && output.length != _expectedContentSize) {
       throw Lz4FormatException(
@@ -441,29 +541,15 @@ class Lz4IncrementalDecoder implements IncrementalDecoder {
       emit(bytes);
     }
   }
-
-  void _compact() {
-    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.discard(_cursor);
-      _cursor = 0;
-    }
-  }
 }
 
 class _FrameReader {
-  _FrameReader(Uint8List data) : _data = data;
+  _FrameReader(final Uint8List data) : _data = data;
 
   final Uint8List _data;
   int _offset = 0;
 
-  int readByte() {
-    if (_offset >= _data.length) {
-      throw Lz4FormatException('Unexpected end of input');
-    }
-    return _data[_offset++];
-  }
-
-  Uint8List readBytes(int length) {
+  Uint8List readBytes(final int length) {
     if (_offset + length > _data.length) {
       throw Lz4FormatException('Unexpected end of input');
     }
@@ -478,6 +564,19 @@ class _FrameReader {
   }
 
   bool get isAtEnd => _offset == _data.length;
+
+  /// Bytes left to read.
+  int get remaining => _data.length - _offset;
+
+  /// Reads a frame header, throwing if the input ends inside it.
+  Lz4Header header() {
+    final header = lz4Header(_data, _offset, _data.length);
+    if (header == null) {
+      throw Lz4FormatException('Unexpected end of input');
+    }
+    _offset += header.length;
+    return header;
+  }
 }
 
 class _BlockDecoder {
@@ -486,13 +585,19 @@ class _BlockDecoder {
   final ByteSink _output;
   late Uint8List _block;
 
-  void reset(Uint8List block) {
+  void reset(final Uint8List block) {
     _block = block;
   }
 
-  void decode() {
+  /// Decodes the block. [capacity], when given, is the Block Maximum Size of
+  /// the enclosing frame: decoding stops with an error before the block's
+  /// output would exceed it. When [independent], matches may not reach back
+  /// before the block's own output.
+  void decode([final int? capacity, final bool independent = false]) {
     var index = 0;
     final limit = _block.length;
+    final end = capacity == null ? null : _output.length + capacity;
+    final floor = independent ? _output.length : 0;
 
     while (index < limit) {
       final token = _block[index++];
@@ -520,6 +625,7 @@ class _BlockDecoder {
         if (index + literalLength > limit) {
           throw Lz4FormatException('Literal length exceeds block size');
         }
+        _checkCapacity(end, literalLength, capacity);
         _output.addBytes(_block, index, literalLength);
         index += literalLength;
       }
@@ -541,9 +647,10 @@ class _BlockDecoder {
           'Invalid match offset: 0 (offset must be at least 1)',
         );
       }
-      if (offset > _output.length) {
+      if (offset > _output.length - floor) {
         throw Lz4FormatException(
-          'Invalid match offset: $offset exceeds output length ${_output.length}',
+          'Invalid match offset: $offset exceeds output length '
+          '${_output.length - floor}',
         );
       }
 
@@ -566,11 +673,20 @@ class _BlockDecoder {
       }
       matchLength += lz4MinMatch;
 
+      _checkCapacity(end, matchLength, capacity);
       _output.copyFromHistory(offset, matchLength);
     }
 
     if (index != limit) {
       throw Lz4FormatException('Block was not fully decoded');
+    }
+  }
+
+  void _checkCapacity(final int? end, final int count, final int? capacity) {
+    if (end != null && _output.length + count > end) {
+      throw Lz4FormatException(
+        'Block decodes past the maximum block size $capacity',
+      );
     }
   }
 }

@@ -9,6 +9,7 @@ import 'package:libcompress/src/gzip/deflate_encoder.dart';
 import 'package:libcompress/src/util/bit_stream.dart';
 import 'package:test/test.dart';
 
+import 'support/differential_fuzz.dart';
 import 'test_utils.dart';
 
 /// Decodes [data] through a stream codec, feeding it in fixed-size chunks.
@@ -52,7 +53,7 @@ void main() {
 
     test('round-trips standard edge cases', () {
       final codec = GzipCodec();
-      standardEdgeCases().forEach((name, data) {
+      standardEdgeCases().forEach((final name, final data) {
         expect(
           codec.decompress(codec.compress(data)),
           orderedEquals(data),
@@ -87,6 +88,64 @@ void main() {
         final fast = GzipCodec(level: 1).compress(data);
         final best = GzipCodec(level: 9).compress(data);
         expect(best.length, lessThanOrEqualTo(fast.length));
+      });
+
+      test('level 9 compresses at least as well as level 6', () {
+        for (final name in [
+          'large/world192.txt',
+          'large/bible.txt',
+          'geo.protodata',
+        ]) {
+          final data = readDataFixture(name);
+          final six = GzipCodec(level: 6).compress(data).length;
+          final nine = GzipCodec(level: 9).compress(data).length;
+          expect(nine, lessThanOrEqualTo(six), reason: '$name: $six, $nine');
+        }
+      });
+
+      test('matches reach back across 64 KB block boundaries', () {
+        // Five copies of 20 KB of noise: every copy after the first is one
+        // match chain, including those after the 64 KB block boundary.
+        final noise = pseudoRandom(20000, 5);
+        final data = bytes([for (var i = 0; i < 5; i++) ...noise]);
+        for (var level = 1; level <= 9; level++) {
+          final compressed = GzipCodec(level: level).compress(data);
+          expect(compressed.length, lessThan(24000), reason: 'level $level');
+        }
+      });
+
+      test(
+        'incompressible data is stored: 1 MB of noise grows < 0.1%',
+        () async {
+          final data = pseudoRandom(1 << 20, 3);
+          for (var level = 1; level <= 9; level++) {
+            final block = GzipCodec(level: level).compress(data);
+            final stream = await collect(
+              GzipStreamCodec(level: level).compress(
+                Stream.fromIterable([
+                  for (var i = 0; i < data.length; i += 65536)
+                    Uint8List.sublistView(data, i, i + 65536),
+                ]),
+              ),
+            );
+            for (final (mode, out) in [('block', block), ('stream', stream)]) {
+              expect(
+                out.length,
+                lessThan(data.length * 1.001),
+                reason: '$mode level $level',
+              );
+              expect(GzipCodec().decompress(out), equals(data));
+            }
+          }
+        },
+      );
+
+      test('short input uses fixed Huffman, as gzip does', () {
+        // 3 literals and an end of block in a fixed block take 5 bytes; a
+        // dynamic block's code tables alone take more.
+        final out = GzipCodec().compress(bytes('abc'.codeUnits));
+        expect(out.length, 23);
+        expect(GzipCodec().decompress(out), equals('abc'.codeUnits));
       });
 
       test('levels use dynamic Huffman for better compression', () {
@@ -175,15 +234,12 @@ void main() {
 
         // Limit of 10: two members (10 bytes) decode successfully.
         final two = bytes([...compressed1, ...compressed2]);
-        expect(
-          GzipCodec(maxDecompressedSize: 10).decompress(two).length,
-          equals(10),
-        );
+        expect(GzipCodec(maxSize: 10).decompress(two).length, equals(10));
 
         // Limit of 12: three members (15 bytes) exceed the cumulative limit.
         final three = bytes([...compressed1, ...compressed2, ...compressed3]);
         expect(
-          () => GzipCodec(maxDecompressedSize: 12).decompress(three),
+          () => GzipCodec(maxSize: 12).decompress(three),
           throwsA(anything),
         );
       });
@@ -192,7 +248,7 @@ void main() {
     group('dart:io interop', () {
       test('output is readable by dart:io gzip decoder', () {
         final codec = GzipCodec();
-        final data = bytes(List.generate(256, (i) => i));
+        final data = bytes(List.generate(256, (final i) => i));
         expect(bytes(gzip.decode(codec.compress(data))), equals(data));
       });
     });
@@ -206,7 +262,7 @@ void main() {
         'calgary/paper1': 61,
         'large/bible.txt': 65,
       };
-      floors.forEach((file, floor) {
+      floors.forEach((final file, final floor) {
         final path = 'test/fixtures/data/$file';
         if (!File(path).existsSync()) {
           markTestSkipped('fixture missing: $path');
@@ -227,12 +283,112 @@ void main() {
   });
 
   group('GZIP streaming', () {
+    test('a large input chunk is decoded in bounded output chunks', () async {
+      final data = readDataFixture('large/bible.txt');
+      final compressed = GzipCodec().compress(data);
+      final sizes = <int>[];
+      final output = BytesBuilder(copy: false);
+      await for (final chunk in GzipStreamCodec().decompress(
+        Stream.value(compressed),
+      )) {
+        sizes.add(chunk.length);
+        output.add(chunk);
+      }
+      expect(output.takeBytes(), orderedEquals(data));
+      // One 64 KB drain interval plus at most one 258-byte match.
+      expect(sizes.reduce(max), lessThanOrEqualTo(65536 + 258));
+    });
+
+    test('stream output does not depend on how the input is chunked', () async {
+      final data = readDataFixture('canterbury/alice29.txt');
+      Future<Uint8List> compress(final int size) => collect(
+        GzipStreamCodec().compress(
+          Stream.fromIterable([
+            for (var i = 0; i < data.length; i += size)
+              Uint8List.sublistView(data, i, min(i + size, data.length)),
+          ]),
+        ),
+      );
+      final whole = await compress(data.length);
+      for (final size in [1, 300, 4096, 70000]) {
+        expect(await compress(size), equals(whole), reason: 'chunks of $size');
+      }
+      expect(GzipCodec().decompress(whole), equals(data));
+      // Blocks of 64 KB match across block boundaries like the one-shot codec.
+      expect(whole.length, lessThan(GzipCodec().compress(data).length * 1.01));
+    });
+
+    test(
+      'the stream codec writes filename and comment like GzipCodec',
+      () async {
+        final data = bytes('payload '.codeUnits);
+        final block = GzipCodec(
+          filename: 'a.txt',
+          comment: 'note',
+        ).compress(data);
+        final stream = await collect(
+          GzipStreamCodec(
+            filename: 'a.txt',
+            comment: 'note',
+          ).compress(Stream.value(data)),
+        );
+        const header = 10 + 6 + 5; // fixed part, 'a.txt' + NUL, 'note' + NUL
+        expect(stream.sublist(0, header), equals(block.sublist(0, header)));
+        expect(GzipCodec().decompress(stream), equals(data));
+        expect(() => GzipStreamCodec(filename: 'a\u0000'), throwsArgumentError);
+      },
+    );
+
+    test('a header with FNAME and FCOMMENT parses at every split', () async {
+      final data = bytes('payload '.codeUnits);
+      final member = GzipCodec(
+        filename: 'name.txt',
+        comment: 'a comment here',
+      ).compress(data);
+      for (var split = 1; split < member.length; split++) {
+        final out = await collect(
+          GzipStreamCodec().decompress(
+            Stream.fromIterable([
+              Uint8List.sublistView(member, 0, split),
+              Uint8List.sublistView(member, split),
+            ]),
+          ),
+        );
+        expect(out, equals(data), reason: 'split at $split');
+      }
+    });
+
+    test(
+      'a long FNAME split across many chunks parses in linear time',
+      () async {
+        final name = String.fromCharCodes(List.filled(8 << 20, 0x61));
+        final compressed = GzipCodec(filename: name).compress(bytes([1, 2, 3]));
+        const size = 4096;
+        final chunks = [
+          for (var start = 0; start < compressed.length; start += size)
+            Uint8List.sublistView(
+              compressed,
+              start,
+              min(start + size, compressed.length),
+            ),
+        ];
+        final watch = Stopwatch()..start();
+        final restored = await collect(
+          GzipStreamCodec().decompress(Stream.fromIterable(chunks)),
+        );
+        watch.stop();
+        expect(restored, orderedEquals([1, 2, 3]));
+        // Rescanning the header from the start on every chunk takes seconds.
+        expect(watch.elapsedMilliseconds, lessThan(500));
+      },
+    );
+
     test('round-trips multi-chunk input', () async {
       final chunks = [
         bytes('the quick brown fox '.codeUnits),
-        bytes(List.generate(5000, (i) => i % 256)),
+        bytes(List.generate(5000, (final i) => i % 256)),
         bytes('jumps over the lazy dog '.codeUnits),
-        bytes(List.generate(3000, (i) => (i * 7) % 13)),
+        bytes(List.generate(3000, (final i) => (i * 7) % 13)),
       ];
       await expectStreamRoundTrip(GzipStreamCodec(), chunks);
       // Block decoder must also read the streamed output.
@@ -241,12 +397,12 @@ void main() {
       );
       expect(
         GzipCodec().decompress(compressed),
-        orderedEquals(bytes(chunks.expand((c) => c))),
+        orderedEquals(bytes(chunks.expand((final c) => c))),
       );
     });
 
     test('output is a single GZIP member', () async {
-      final data = bytes(List.generate(40000, (i) => (i * 3) % 251));
+      final data = bytes(List.generate(40000, (final i) => (i * 3) % 251));
       final compressed = await collect(
         GzipStreamCodec().compress(Stream.value(data)),
       );
@@ -260,7 +416,7 @@ void main() {
       // The same 8 KB block sent as 8 separate chunks: with cross-chunk
       // history, chunks 2..8 are long back-references into chunk 1, so the
       // total is far smaller than 8x a single block.
-      final block = bytes(List.generate(8192, (i) => (i * 31 + 7) % 256));
+      final block = bytes(List.generate(8192, (final i) => (i * 31 + 7) % 256));
       final chunks = List.generate(8, (_) => block);
       final compressed = await collect(
         GzipStreamCodec().compress(Stream.fromIterable(chunks)),
@@ -276,7 +432,7 @@ void main() {
       final restored = await collect(
         GzipStreamCodec().decompress(Stream.value(compressed)),
       );
-      expect(restored, orderedEquals(bytes(chunks.expand((c) => c))));
+      expect(restored, orderedEquals(bytes(chunks.expand((final c) => c))));
     });
 
     test('round-trips empty stream', () async {
@@ -317,7 +473,10 @@ void main() {
     test('fragmented 1-byte round-trips compressible text', () async {
       const pattern = 'the quick brown fox jumps over the lazy dog. ';
       final data = bytes(
-        List.generate(8 * 1024, (i) => pattern.codeUnitAt(i % pattern.length)),
+        List.generate(
+          8 * 1024,
+          (final i) => pattern.codeUnitAt(i % pattern.length),
+        ),
       );
       await expectFragmentedRoundTrip(GzipStreamCodec(), data);
     });
@@ -341,7 +500,7 @@ void main() {
     });
 
     test('truncated member fed fragmented is rejected', () async {
-      final data = bytes(List.generate(4096, (i) => i % 256));
+      final data = bytes(List.generate(4096, (final i) => i % 256));
       final compressed = GzipCodec().compress(data);
       final truncated = Uint8List.sublistView(
         compressed,
@@ -360,7 +519,7 @@ void main() {
     });
 
     test('verified mode round-trips valid data', () async {
-      final data = bytes(List.generate(20000, (i) => (i * 5) % 97));
+      final data = bytes(List.generate(20000, (final i) => (i * 5) % 97));
       final codec = GzipStreamCodec(verified: true);
       final compressed = await collect(codec.compress(Stream.value(data)));
       final restored = await collect(
@@ -372,7 +531,9 @@ void main() {
     test(
       'verified mode withholds all output when a trailer CRC is corrupt',
       () async {
-        final payload = bytes(List.generate(5000, (i) => (i * 31 + 7) % 256));
+        final payload = bytes(
+          List.generate(5000, (final i) => (i * 31 + 7) % 256),
+        );
         final comp = bytes(GzipCodec().compress(payload));
         comp[comp.length - 5] ^= 0xFF; // flip a CRC32 trailer byte
         final out = <int>[];
@@ -398,30 +559,61 @@ void main() {
   });
 
   group('GZIP limits & validation', () {
-    test('maxDecompressedSize rejects oversized output', () {
+    test('a filename or comment containing NUL is rejected', () {
+      expect(() => GzipCodec(filename: 'a\u0000b'), throwsArgumentError);
+      expect(() => GzipCodec(comment: '\u0000'), throwsArgumentError);
+      final codec = GzipCodec(filename: 'a.txt', comment: 'ok');
+      expect(codec.decompress(codec.compress(bytes([1, 2]))), [1, 2]);
+    });
+
+    test('maxSize holds for literals at the end of the input', () {
+      // Mostly literals, so the last ones are decoded after the fast loop.
+      final random = Random(7);
+      for (final size in [5000, 9000, 20000]) {
+        final data = bytes(List.generate(size, (_) => 97 + random.nextInt(40)));
+        final packed = GzipCodec().compress(data);
+        for (final limit in [size - 1, size - 10]) {
+          expect(
+            () => GzipCodec(maxSize: limit).decompress(packed),
+            throwsA(isA<LimitException>()),
+            reason: '$size bytes, maxSize $limit',
+          );
+        }
+        expect(GzipCodec(maxSize: size).decompress(packed), equals(data));
+      }
+    });
+
+    test('rejects empty input in block and stream mode', () async {
+      await expectEmptyRejected<GzipFormatException>(
+        GzipCodec(),
+        GzipStreamCodec(),
+      );
+    });
+
+    test('maxSize rejects oversized output', () {
       final data = bytes(List.filled(10000, 0x41));
       final compressed = GzipCodec().compress(data);
       expect(
-        () => GzipCodec(maxDecompressedSize: 1000).decompress(compressed),
+        () => GzipCodec(maxSize: 1000).decompress(compressed),
         throwsA(isA<CompressionFormatException>()),
       );
     });
 
-    test('maxDecompressedSize is enforced cumulatively across members', () {
+    test('maxSize is enforced cumulatively across members', () {
       final first = GzipCodec().compress(bytes(List.filled(600, 0x41)));
       final second = GzipCodec().compress(bytes(List.filled(600, 0x42)));
       final concatenated = bytes([...first, ...second]);
       // Each member (600) fits under 1000, but the sum (1200) does not.
       expect(
-        () => GzipCodec(maxDecompressedSize: 1000).decompress(concatenated),
+        () => GzipCodec(maxSize: 1000).decompress(concatenated),
         throwsA(isA<CompressionFormatException>()),
       );
     });
 
     test('fromOptions preserves and enforces the limit', () {
-      final options = GzipOptions(maxDecompressedSize: 1000);
+      final options = GzipOptions(maxSize: 1000);
       final codec = GzipCodec.fromOptions(options);
-      expect(codec.maxDecompressedSize, 1000);
+      expect(codec.maxSize, 1000);
       final compressed = GzipCodec().compress(bytes(List.filled(10000, 0x41)));
       expect(
         () => codec.decompress(compressed),
@@ -456,9 +648,9 @@ void main() {
       expect(() => GzipCodec(level: 10), throwsArgumentError);
     });
 
-    test('rejects non-positive maxDecompressedSize', () {
-      expect(() => GzipCodec(maxDecompressedSize: 0), throwsArgumentError);
-      expect(() => GzipCodec(maxDecompressedSize: -1), throwsArgumentError);
+    test('rejects non-positive maxSize', () {
+      expect(() => GzipCodec(maxSize: 0), throwsArgumentError);
+      expect(() => GzipCodec(maxSize: -1), throwsArgumentError);
     });
 
     test('stream codec rejects out-of-range constructor params', () {
@@ -470,7 +662,7 @@ void main() {
     test('stream maxBufferSize rejects an oversized chunk before buffering', () {
       // Incompressible payload so the compressed blob stays well over the cap.
       final blob = GzipCodec().compress(
-        bytes(List.generate(5000, (i) => (i * 131 + 7) % 256)),
+        bytes(List.generate(5000, (final i) => (i * 131 + 7) % 256)),
       );
       expect(blob.length, greaterThan(64));
       // Whole compressed blob arrives as ONE chunk, far over the tiny cap.
@@ -505,15 +697,17 @@ void main() {
         // not be mistaken for truncated input.
         final size = chunk == 1 ? 20000 : 300000;
         final member = GzipCodec().compress(
-          bytes(List.generate(size, (i) => 'limit test '.codeUnitAt(i % 11))),
+          bytes(
+            List.generate(size, (final i) => 'limit test '.codeUnitAt(i % 11)),
+          ),
         );
         expect(
           decodeChunked(GzipStreamCodec(maxSize: 5000), member, chunk: chunk),
           throwsA(
-            isA<GzipFormatException>().having(
-              (e) => e.message,
+            isA<LimitException>().having(
+              (final e) => e.message,
               'message',
-              contains('exceeds maximum'),
+              contains('exceeds the limit'),
             ),
           ),
         );
@@ -564,6 +758,63 @@ void main() {
         }
       }
     });
+
+    test(
+      'levels 6 and 9 are within 5% of gzip, and gzip -t accepts every level',
+      () async {
+        if (!await cliAvailableCached('gzip')) return;
+        final dir = Directory.systemTemp.createTempSync('libcompress_gzip');
+        try {
+          for (final name in [
+            'large/world192.txt',
+            'large/bible.txt',
+            'geo.protodata',
+          ]) {
+            final source = 'test/fixtures/data/$name';
+            final original = readDataFixture(name);
+            for (var level = 1; level <= 9; level++) {
+              final compressed = GzipCodec(level: level).compress(original);
+              final path = '${dir.path}/l$level.gz';
+              File(path).writeAsBytesSync(compressed);
+              final check = await Process.run('gzip', ['-t', path]);
+              expect(check.exitCode, 0, reason: '$name $level ${check.stderr}');
+              if (level != 6 && level != 9) continue;
+
+              final reference = await Process.run('gzip', [
+                '-$level',
+                '-c',
+                source,
+              ], stdoutEncoding: null);
+              final theirs = (reference.stdout as List<int>).length;
+              final stream = await collect(
+                GzipStreamCodec(level: level).compress(
+                  Stream.fromIterable([
+                    for (var i = 0; i < original.length; i += 65536)
+                      Uint8List.sublistView(
+                        original,
+                        i,
+                        min(i + 65536, original.length),
+                      ),
+                  ]),
+                ),
+              );
+              for (final (mode, ours) in [
+                ('block', compressed.length),
+                ('stream', stream.length),
+              ]) {
+                expect(
+                  ours,
+                  lessThanOrEqualTo(theirs * 1.05),
+                  reason: '$name $mode level $level: $ours vs gzip $theirs',
+                );
+              }
+            }
+          }
+        } finally {
+          dir.deleteSync(recursive: true);
+        }
+      },
+    );
 
     test('filename header output readable by gzip CLI', () async {
       if (!await cliAvailableCached('gzip')) return;
@@ -678,6 +929,22 @@ void main() {
     });
   });
 
+  defineDifferentialFuzz(
+    title: 'GZIP',
+    reference: const Reference('gzip', ['-d', '-c']),
+    frames: {
+      for (final level in [1, 6, 9])
+        'gzip CLI -$level': () => const Reference(
+          'gzip',
+          [],
+        ).encode(['-c', '-$level'], readDataFixture('canterbury/alice29.txt')),
+      'libcompress encoder': () async =>
+          GzipCodec().compress(readDataFixture('canterbury/alice29.txt')),
+    },
+    block: GzipCodec().decompress,
+    stream: GzipStreamCodec().decompress,
+  );
+
   group('GZIP fuzzing / malformed input', () {
     final random = Random(42);
     final codec = GzipCodec();
@@ -706,7 +973,9 @@ void main() {
     });
 
     test('rejects truncation at various positions', () {
-      final valid = codec.compress(bytes(List.generate(1000, (i) => i % 256)));
+      final valid = codec.compress(
+        bytes(List.generate(1000, (final i) => i % 256)),
+      );
       for (var cutoff = 1; cutoff < valid.length; cutoff++) {
         final truncated = Uint8List.sublistView(valid, 0, cutoff);
         expect(
@@ -891,16 +1160,18 @@ void main() {
       );
     });
 
-    test('rejects decompression bomb via maxDecompressedSize', () {
+    test('rejects decompression bomb via maxSize', () {
       final compressed = codec.compress(bytes(List.filled(10000, 0x41)));
       expect(
-        () => GzipCodec(maxDecompressedSize: 1000).decompress(compressed),
+        () => GzipCodec(maxSize: 1000).decompress(compressed),
         throwsA(isA<CompressionFormatException>()),
       );
     });
 
     test('single-byte corruptions never leak StateError/RangeError', () {
-      final valid = codec.compress(bytes(List.generate(5000, (i) => i % 256)));
+      final valid = codec.compress(
+        bytes(List.generate(5000, (final i) => i % 256)),
+      );
       for (var i = 10; i < min(60, valid.length - 8); i++) {
         final corrupted = bytes(valid);
         corrupted[i] ^= 0xFF;
@@ -937,17 +1208,55 @@ void main() {
   });
 
   group('DEFLATE decoding', () {
+    test('many dynamic blocks with 15-bit codes decode within 3x zlib', () {
+      // 20,000 dynamic blocks whose literal code reaches 15 bits, each
+      // holding only an end-of-block code: table building dominates.
+      final bits = _Bits();
+      for (var i = 0; i < 20000; i++) {
+        _deepBlock(bits, last: i == 19999);
+      }
+      final deflate = bits.finish();
+      final member = bytes([
+        0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 3, //
+        ...deflate,
+        0, 0, 0, 0, 0, 0, 0, 0, // CRC32 and ISIZE of empty output
+      ]);
+      int time(final void Function() run) {
+        final watch = Stopwatch()..start();
+        run();
+        return watch.elapsedMicroseconds;
+      }
+
+      expect(GzipCodec().decompress(member), isEmpty);
+      GZipCodec().decode(member); // warm up
+      // Alternate the two so both see the same load from parallel tests.
+      var ours = 1 << 30;
+      var zlib = 1 << 30;
+      for (var i = 0; i < 10; i++) {
+        ours = min(ours, time(() => GzipCodec().decompress(member)));
+        zlib = min(zlib, time(() => GZipCodec().decode(member)));
+      }
+      expect(
+        ours,
+        lessThanOrEqualTo(zlib * 3),
+        reason: 'ours $ours us, zlib $zlib us',
+      );
+    }, retry: 2);
+
     // Raw DEFLATE body of a GZIP member (10-byte header, 8-byte trailer).
     Uint8List body(final Uint8List member) =>
         Uint8List.sublistView(member, 10, member.length - 8);
 
     final text = bytes(
-      List.generate(3000, (i) => 'deflate edge cases '.codeUnitAt(i % 19)),
+      List.generate(
+        3000,
+        (final i) => 'deflate edge cases '.codeUnitAt(i % 19),
+      ),
     );
 
     test('stored blocks of maximum and zero length decode', () {
-      final first = bytes(List.generate(65535, (i) => (i * 7) & 0xFF));
-      final last = bytes(List.generate(1000, (i) => (i * 13) & 0xFF));
+      final first = bytes(List.generate(65535, (final i) => (i * 7) & 0xFF));
+      final last = bytes(List.generate(1000, (final i) => (i * 13) & 0xFF));
       final writer = BitStreamWriter();
       void stored(final Uint8List data, {required final bool last}) {
         writer.writeBits(last ? 1 : 0, 1);
@@ -1013,6 +1322,40 @@ void main() {
   });
 
   group('GZIP format', () {
+    group('MTIME', () {
+      final text = bytes('reproducible'.codeUnits);
+      List<int> mtime(final Uint8List member) => member.sublist(4, 8);
+
+      test('defaults to 0, so identical input gives identical bytes', () async {
+        expect(mtime(GzipCodec().compress(text)), orderedEquals([0, 0, 0, 0]));
+        final streamed = await collect(
+          GzipStreamCodec().compress(Stream.value(text)),
+        );
+        expect(mtime(streamed), orderedEquals([0, 0, 0, 0]));
+      });
+
+      test('a given mtime is written little-endian', () async {
+        const value = 0x12345678;
+        final little = [0x78, 0x56, 0x34, 0x12];
+        expect(mtime(GzipCodec(mtime: value).compress(text)), little);
+        expect(
+          mtime(
+            GzipCodec.fromOptions(GzipOptions(mtime: value)).compress(text),
+          ),
+          little,
+        );
+        final streamed = await collect(
+          GzipStreamCodec(mtime: value).compress(Stream.value(text)),
+        );
+        expect(mtime(streamed), little);
+      });
+
+      test('rejects an mtime outside 32 bits', () {
+        expect(() => GzipCodec(mtime: -1), throwsArgumentError);
+        expect(() => GzipCodec(mtime: 1 << 32), throwsArgumentError);
+      });
+    });
+
     test('dynamic block with a deep Huffman tree stays decodable', () async {
       // Fibonacci literal frequencies push the unconstrained tree past 15
       // bits, so the encoder must limit code lengths without over-subscribing
@@ -1165,4 +1508,105 @@ void main() {
       },
     );
   });
+}
+
+/// LSB-first bit writer for hand-built DEFLATE streams.
+class _Bits {
+  final _bytes = <int>[];
+  var _pending = 0;
+  var _count = 0;
+
+  void write(final int value, final int count) {
+    for (var i = 0; i < count; i++) {
+      _pending |= ((value >> i) & 1) << _count;
+      if (++_count == 8) {
+        _bytes.add(_pending);
+        _pending = 0;
+        _count = 0;
+      }
+    }
+  }
+
+  /// Writes a Huffman [code] of [length] bits, most significant bit first.
+  void code(final int code, final int length) {
+    for (var i = length - 1; i >= 0; i--) {
+      write((code >> i) & 1, 1);
+    }
+  }
+
+  List<int> finish() {
+    if (_count > 0) _bytes.add(_pending);
+    return _bytes;
+  }
+}
+
+/// One dynamic block: literal lengths 1..14 for symbols 0..13 and 15 for
+/// symbol 14 and end-of-block (a complete code), one 1-bit distance code, and
+/// only the end-of-block symbol as content.
+void _deepBlock(final _Bits bits, {required final bool last}) {
+  bits
+    ..write(last ? 1 : 0, 1)
+    ..write(2, 2)
+    ..write(0, 5) // HLIT 257
+    ..write(0, 5) // HDIST 1
+    ..write(15, 4); // HCLEN 19
+  // Code-length code: symbols 1..15 and 18 get length 4 (16 codes, complete).
+  const order = [
+    16,
+    17,
+    18,
+    0,
+    8,
+    7,
+    9,
+    6,
+    10,
+    5,
+    11,
+    4,
+    12,
+    3,
+    13,
+    2,
+    14,
+    1,
+    15,
+  ];
+  for (final symbol in order) {
+    bits.write((symbol >= 1 && symbol <= 15) || symbol == 18 ? 4 : 0, 3);
+  }
+  final codes = <int, int>{};
+  var next = 0;
+  for (final symbol in [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    18,
+  ]) {
+    codes[symbol] = next++;
+  }
+  for (var length = 1; length <= 14; length++) {
+    bits.code(codes[length]!, 4); // symbols 0..13
+  }
+  bits
+    ..code(codes[15]!, 4) // symbol 14: length 15
+    ..code(codes[18]!, 4)
+    ..write(138 - 11, 7) // symbols 15..152: unused
+    ..code(codes[18]!, 4)
+    ..write(103 - 11, 7) // symbols 153..255: unused
+    ..code(codes[15]!, 4) // end-of-block: length 15
+    ..code(codes[1]!, 4) // distance code 0: length 1
+    ..code(0x7FFF, 15); // end-of-block
 }

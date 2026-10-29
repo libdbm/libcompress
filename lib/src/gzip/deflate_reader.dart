@@ -94,18 +94,43 @@ class DeflateReader {
   /// Decodes one symbol with [decoder]'s lookup table.
   int decode(final HuffmanDecoder decoder) {
     _fill(decoder.bits);
-    final entry = decoder.table[_hold & ((1 << decoder.bits) - 1)];
+    final table = decoder.table;
+    var entry = table[_hold & ((1 << decoder.root) - 1)];
+    if (entry & 16 != 0) {
+      entry =
+          table[(entry >> 5) +
+              ((_hold >> decoder.root) & ((1 << (entry & 0xF)) - 1))];
+    }
     if (entry == 0) {
       // With padding in the peeked bits the code may simply be incomplete.
       if (partial && _padded) _exhausted();
       throw DeflateFormatException('Invalid Huffman code');
     }
     _drop(entry & 0xF);
-    return entry >> 4;
+    return entry >> 5;
   }
 
   /// Discards bits up to the next byte boundary.
   void align() => _drop(_count & 7);
+
+  /// The input bytes, for a decoder that reads bits itself between [state]
+  /// and [resume].
+  Uint8List get data => _data;
+
+  /// Index one past the last input byte.
+  int get end => _end;
+
+  /// The bit position as (next byte to load, pending bits, pending count).
+  (int, int, int) get state => (_next, _hold, _count);
+
+  /// Continues from a position taken with [state] and advanced by the caller,
+  /// who may have loaded more whole bytes than it consumed: those are handed
+  /// back, so at most 7 bits stay pending.
+  void resume(final int next, final int hold, final int count) {
+    _next = next - (count >> 3);
+    _count = count & 7;
+    _hold = hold & ((1 << _count) - 1);
+  }
 
   /// Returns the next [count] bytes (byte-aligned) without copying them.
   Uint8List take(final int count) {
@@ -139,59 +164,49 @@ class DeflateReader {
   final decoder = buildDecoder(lengths);
 
   // Decode literal/length and distance code lengths
-  final codeLengths = <int>[];
   final totalLength = hlit + hdist;
-  while (codeLengths.length < totalLength) {
+  final codeLengths = Uint8List(totalLength);
+  var filled = 0;
+  while (filled < totalLength) {
     final symbol = input.decode(decoder);
 
     if (symbol < 16) {
       // Literal code length
-      codeLengths.add(symbol);
-    } else if (symbol == 16) {
+      codeLengths[filled++] = symbol;
+      continue;
+    }
+    final int value;
+    final int repeat;
+    if (symbol == 16) {
       // Repeat previous code length 3-6 times
-      if (codeLengths.isEmpty) {
+      if (filled == 0) {
         throw DeflateFormatException('Invalid repeat code at start');
       }
-      final prev = codeLengths.last;
-      final repeat = input.read(2) + 3;
-      if (repeat > totalLength - codeLengths.length) {
-        throw DeflateFormatException(
-          'Run-length code overruns code-length table',
-        );
-      }
-      for (var i = 0; i < repeat; i++) {
-        codeLengths.add(prev);
-      }
+      value = codeLengths[filled - 1];
+      repeat = input.read(2) + 3;
     } else if (symbol == 17) {
       // Repeat zero 3-10 times
-      final repeat = input.read(3) + 3;
-      if (repeat > totalLength - codeLengths.length) {
-        throw DeflateFormatException(
-          'Run-length code overruns code-length table',
-        );
-      }
-      for (var i = 0; i < repeat; i++) {
-        codeLengths.add(0);
-      }
+      value = 0;
+      repeat = input.read(3) + 3;
     } else if (symbol == 18) {
       // Repeat zero 11-138 times
-      final repeat = input.read(7) + 11;
-      if (repeat > totalLength - codeLengths.length) {
-        throw DeflateFormatException(
-          'Run-length code overruns code-length table',
-        );
-      }
-      for (var i = 0; i < repeat; i++) {
-        codeLengths.add(0);
-      }
+      value = 0;
+      repeat = input.read(7) + 11;
     } else {
       throw DeflateFormatException('Invalid code length symbol: $symbol');
     }
+    if (repeat > totalLength - filled) {
+      throw DeflateFormatException(
+        'Run-length code overruns code-length table',
+      );
+    }
+    codeLengths.fillRange(filled, filled + repeat, value);
+    filled += repeat;
   }
 
   // Split into literal/length and distance code lengths and build decoders
   return (
-    buildDecoder(codeLengths.sublist(0, hlit)),
-    buildDecoder(codeLengths.sublist(hlit, hlit + hdist)),
+    buildDecoder(Uint8List.sublistView(codeLengths, 0, hlit)),
+    buildDecoder(Uint8List.sublistView(codeLengths, hlit, totalLength)),
   );
 }

@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../exceptions.dart';
 import '../util/byte_utils.dart';
 import '../util/crc32c.dart';
 import 'snappy_decoder.dart';
@@ -69,6 +70,13 @@ class SnappyStreamDecoder {
 
   /// Process a single chunk and return decompressed data
   Uint8List _processChunk(final _Chunk chunk, final int offset) {
+    // The stream identifier is always the first chunk.
+    if (!_seenIdentifier && chunk.type != chunkTypeStreamIdentifier) {
+      throw SnappyFormatException(
+        'Chunk type 0x${chunk.type.toRadixString(16)} at offset $offset '
+        'before stream identifier',
+      );
+    }
     switch (chunk.type) {
       case chunkTypeStreamIdentifier:
         _validateStreamIdentifier(chunk.data);
@@ -76,19 +84,9 @@ class SnappyStreamDecoder {
         return Uint8List(0); // Identifier produces no output
 
       case chunkTypeCompressed:
-        if (!_seenIdentifier) {
-          throw SnappyFormatException(
-            'Compressed chunk at offset $offset before stream identifier',
-          );
-        }
         return _decompressChunkData(chunk);
 
       case chunkTypeUncompressed:
-        if (!_seenIdentifier) {
-          throw SnappyFormatException(
-            'Uncompressed chunk at offset $offset before stream identifier',
-          );
-        }
         return _processUncompressedChunkData(chunk);
 
       case chunkTypePadding:
@@ -131,10 +129,20 @@ class SnappyStreamDecoder {
             maxUncompressedSize! < _maxChunkUncompressed)
         ? maxUncompressedSize!
         : _maxChunkUncompressed;
-    final decompressed = SnappyDecoder.decompress(
-      compressed,
-      maxUncompressedSize: chunkLimit,
-    );
+    final Uint8List decompressed;
+    try {
+      decompressed = SnappyDecoder.decompress(
+        compressed,
+        maxUncompressedSize: chunkLimit,
+      );
+    } on LimitException {
+      // Past the format's own 64 KB per chunk, the data is corrupt; only the
+      // configured cap is a size limit.
+      if (chunkLimit != _maxChunkUncompressed) rethrow;
+      throw SnappyFormatException(
+        'Compressed chunk decodes to more than $_maxChunkUncompressed bytes',
+      );
+    }
 
     // Validate checksum against uncompressed data
     final actualChecksum = Crc32c.mask(Crc32c.hash(decompressed));
@@ -162,16 +170,17 @@ class SnappyStreamDecoder {
     // Get uncompressed data (after checksum)
     final uncompressed = Uint8List.sublistView(chunk.data, 4);
 
-    // Validate maximum size (the 64 KB per-chunk spec limit and any smaller cap)
-    final chunkLimit =
-        (maxUncompressedSize != null &&
-            maxUncompressedSize! < _maxChunkUncompressed)
-        ? maxUncompressedSize!
-        : _maxChunkUncompressed;
-    if (uncompressed.length > chunkLimit) {
+    // Past the format's own 64 KB per chunk the data is corrupt; past the
+    // configured cap it is a size limit.
+    if (uncompressed.length > _maxChunkUncompressed) {
       throw SnappyFormatException(
-        'Uncompressed chunk size ${uncompressed.length} exceeds maximum $chunkLimit',
+        'Uncompressed chunk size ${uncompressed.length} exceeds maximum '
+        '$_maxChunkUncompressed',
       );
+    }
+    final cap = maxUncompressedSize;
+    if (cap != null && uncompressed.length > cap) {
+      throw LimitException(cap);
     }
 
     // Validate checksum
@@ -212,9 +221,7 @@ class SnappyStreamDecoder {
       // Cumulative cap across all chunks (each chunk alone is bounded by
       // maxUncompressedSize, but an unbounded number of chunks is not).
       if (maxUncompressedSize != null && total > maxUncompressedSize!) {
-        throw SnappyFormatException(
-          'Decompressed size $total exceeds maximum allowed size $maxUncompressedSize',
-        );
+        throw LimitException(maxUncompressedSize!);
       }
       output.add(decompressed);
       cursor += chunk.totalSize;

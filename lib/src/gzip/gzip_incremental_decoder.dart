@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import '../exceptions.dart';
 import '../util/byte_pending.dart';
 import '../util/crc32.dart';
-import '../util/incremental_decompress_transformer.dart';
+import '../util/incremental_decoder.dart';
 import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
 import 'deflate_common.dart';
@@ -13,6 +13,10 @@ import 'huffman_tables.dart';
 
 /// DEFLATE back-reference window (RFC 1951): 32 KB.
 const int _deflateWindow = 1 << 15;
+
+/// Output produced since the last drain that triggers another drain while
+/// decoding, so one large input chunk is emitted in bounded pieces.
+const int _drainInterval = 1 << 16;
 
 enum _Phase { header, deflate, trailer }
 
@@ -48,12 +52,11 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
   late final OutputLimit _limit = OutputLimit(maxSize);
 
   final BytePending _pending = BytePending();
-  int _cursor = 0; // fully-consumed byte boundary in _pending
 
   _Phase _phase = _Phase.header;
 
   // DEFLATE state (persists across chunk arrivals within a member).
-  int _bitOffset = 0; // bit offset within _pending[_cursor]
+  int _bitOffset = 0; // bit offset within _pending[_pending.cursor]
   bool _blockReady = false; // current Huffman block decoders are built
   bool _blockFinal = false;
   bool _blockStored = false;
@@ -67,26 +70,27 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
   int _crc = 0xFFFFFFFF;
   int _isize = 0; // total bytes mod 2^32
 
-  int get _avail => _pending.length - _cursor;
+  // How far the FNAME/FCOMMENT search got, so a long field split across
+  // chunks is scanned once.
+  var _scan = GzipHeaderScan();
+
+  // True until a non-empty chunk arrives: empty input is an error.
+  bool _empty = true;
 
   @override
   void add(final Uint8List input, final void Function(Uint8List) emit) {
-    // Reject before appending so an oversized chunk can't force the
-    // allocation/copy in _pending.add ahead of the limit check.
-    if (_avail + input.length > maxBufferSize) {
-      throw GzipFormatException(
-        'Stream buffer would exceed $maxBufferSize bytes - '
-        'frame too large or malformed',
-      );
-    }
-    _pending.add(input);
-    gzipBoundary(() => _drive(emit));
+    if (input.isNotEmpty) _empty = false;
+    _pending.append(input, maxBufferSize);
+    guardFormat(() => _drive(emit), GzipFormatException.new, limit: maxSize);
   }
 
   @override
   void close(final void Function(Uint8List) emit) {
-    gzipBoundary(() => _drive(emit));
-    if (_phase != _Phase.header || _avail != 0) {
+    guardFormat(() => _drive(emit), GzipFormatException.new, limit: maxSize);
+    if (_empty) {
+      throw GzipFormatException('Empty GZIP stream');
+    }
+    if (_phase != _Phase.header || _pending.available != 0) {
       throw GzipFormatException('Incomplete GZIP member at end of stream');
     }
   }
@@ -96,7 +100,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     while (progressed) {
       switch (_phase) {
         case _Phase.header:
-          progressed = _avail > 0 && _parseHeader();
+          progressed = _pending.available > 0 && _parseHeader();
           break;
         case _Phase.deflate:
           progressed = _runDeflate(emit);
@@ -106,63 +110,22 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           break;
       }
     }
-    _compact();
+    _pending.compact();
   }
 
   bool _parseHeader() {
-    if (_avail < 10) return false;
-    final memberStart = _cursor;
-    var p = _cursor;
-    if (_pending[p] != GzipFrame.id1 || _pending[p + 1] != GzipFrame.id2) {
-      throw GzipFormatException('Invalid GZIP magic number at offset $p');
-    }
-    if (_pending[p + 2] != GzipFrame.cmDeflate) {
-      throw GzipFormatException(
-        'Unsupported compression method: ${_pending[p + 2]}',
-      );
-    }
-    final flags = _pending[p + 3];
-    if ((flags & 0xE0) != 0) {
-      throw GzipFormatException(
-        'Reserved GZIP FLG bits set: 0x${flags.toRadixString(16)}',
-      );
-    }
-    p += 10; // magic(2) + cm(1) + flg(1) + mtime(4) + xfl(1) + os(1)
-
-    if ((flags & GzipFrame.fextra) != 0) {
-      if (_pending.length < p + 2) return false;
-      final xlen = _pending[p] | (_pending[p + 1] << 8);
-      p += 2;
-      if (_pending.length < p + xlen) return false;
-      p += xlen;
-    }
-    if ((flags & GzipFrame.fname) != 0) {
-      final end = _findZero(p);
-      if (end < 0) return false;
-      p = end + 1;
-    }
-    if ((flags & GzipFrame.fcomment) != 0) {
-      final end = _findZero(p);
-      if (end < 0) return false;
-      p = end + 1;
-    }
-    if ((flags & GzipFrame.fhcrc) != 0) {
-      if (_pending.length < p + 2) return false;
-      // Validate the header CRC16 (low 16 bits of CRC32 over the header bytes),
-      // matching the block decoder rather than silently skipping it.
-      final expected = Crc32.hash(_pending.slice(memberStart, p)) & 0xFFFF;
-      final actual = _pending[p] | (_pending[p + 1] << 8);
-      if (actual != expected) {
-        throw GzipFormatException(
-          'Header CRC mismatch: expected 0x${expected.toRadixString(16)}, '
-          'got 0x${actual.toRadixString(16)}',
-        );
-      }
-      p += 2;
-    }
+    final length = GzipFrame.header(
+      _pending.bytes,
+      _pending.cursor,
+      _pending.length,
+      _scan,
+    );
+    if (length == null) return false;
+    final p = _pending.cursor + length;
 
     // Begin the member's DEFLATE stream.
-    _cursor = p;
+    _scan = GzipHeaderScan();
+    _pending.cursor = p;
     _bitOffset = 0;
     _phase = _Phase.deflate;
     _blockReady = false;
@@ -180,26 +143,25 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     return true;
   }
 
-  /// Returns the index of the next zero byte at/after [from], or -1 if the
-  /// terminator hasn't arrived yet.
-  int _findZero(final int from) {
-    for (var i = from; i < _pending.length; i++) {
-      if (_pending[i] == 0) return i;
-    }
-    return -1;
-  }
-
   bool _runDeflate(final void Function(Uint8List) emit) {
     final output = _output!;
     final input = DeflateReader(
       _pending.bytes,
-      start: _cursor,
+      start: _pending.cursor,
       end: _pending.length,
       bit: _bitOffset,
       partial: true,
     );
 
     var madeProgress = false;
+    var drained = output.length;
+    void drain() {
+      if (output.length - drained >= _drainInterval) {
+        _emit(output.drain(), emit);
+        drained = output.length;
+      }
+    }
+
     while (!_deflateDone) {
       if (_blockStored) {
         // Copy the stored bytes that have arrived; each copied byte is
@@ -212,6 +174,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           output.addBytes(input.take(count));
           _storedRemaining -= count;
           madeProgress = true;
+          drain();
         }
         if (_storedRemaining > 0) {
           _commit(input, output, emit);
@@ -231,13 +194,13 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           switch (type) {
             case 0:
               input.align();
-              final len = input.read(16);
-              final nlen = input.read(16);
-              if ((len ^ nlen) != 0xFFFF) {
+              final stored = input.read(16);
+              final complement = input.read(16);
+              if ((stored ^ complement) != 0xFFFF) {
                 throw DeflateFormatException('Stored block length mismatch');
               }
               _blockStored = true;
-              _storedRemaining = len;
+              _storedRemaining = stored;
               break;
             case 1:
               _litDecoder = fixedLiteralDecoder;
@@ -271,6 +234,9 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
           final done = _decodeOneSymbol(input, output);
           mark = input.consumed;
           madeProgress = true;
+          // Safe mid-loop: output holds only complete symbols, and a rewind
+          // to [mark] discards nothing already written.
+          drain();
           if (done) {
             _blockReady = false;
             if (_blockFinal) _deflateDone = true;
@@ -326,7 +292,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     return false;
   }
 
-  /// Persists the reader's position (whole bytes into [_cursor], the residual
+  /// Persists the reader's position (whole bytes into [_pending.cursor], the residual
   /// bit offset into [_bitOffset]) and emits any drained output, updating
   /// CRC/ISIZE.
   void _commit(
@@ -335,17 +301,17 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
     final void Function(Uint8List) emit,
   ) {
     final consumed = input.consumed;
-    _cursor += consumed >> 3;
+    _pending.cursor += consumed >> 3;
     _bitOffset = consumed & 7;
     _emit(output.drain(), emit);
   }
 
   bool _parseTrailer(final void Function(Uint8List) emit) {
-    if (_avail < 8) return false;
+    if (_pending.available < 8) return false;
     // Drain the window tail (held until validation in verified mode).
     _emit(_output!.finish(), emit);
 
-    final p = _cursor;
+    final p = _pending.cursor;
     final expectedCrc =
         _pending[p] |
         (_pending[p + 1] << 8) |
@@ -377,7 +343,7 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       _hold = null;
     }
 
-    _cursor += 8;
+    _pending.cursor += 8;
     _phase = _Phase.header; // next concatenated member, if any
     _output = null;
     return true;
@@ -395,13 +361,6 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
       ); // verified mode: release only after the trailer validates
     } else {
       emit(bytes);
-    }
-  }
-
-  void _compact() {
-    if (_cursor > 0 && (_cursor >= _pending.length || _cursor >= 8192)) {
-      _pending.discard(_cursor);
-      _cursor = 0;
     }
   }
 }

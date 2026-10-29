@@ -20,7 +20,7 @@ class BitStreamWriter {
   }
 
   /// Writes a value with a specific number of bits to the stream.
-  void writeBits(int value, int bitCount) {
+  void writeBits(final int value, final int bitCount) {
     if (bitCount < 0 || bitCount > 32) {
       throw ArgumentError('bitCount must be between 0 and 32');
     }

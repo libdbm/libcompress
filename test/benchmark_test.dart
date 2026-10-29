@@ -29,14 +29,14 @@ void main() {
       // A green benchmark must mean every round-trip actually verified
       // (excludes CLI tools that weren't available, marked error 'N/A').
       final failed = report.results
-          .where((r) => !r.valid && r.error != 'N/A')
+          .where((final r) => !r.valid && r.error != 'N/A')
           .toList();
       expect(
         failed,
         isEmpty,
         reason:
             'codec round-trip failures: '
-            '${failed.map((f) => '${f.implementation} ${f.codec}/${f.dataset}: ${f.error ?? 'invalid'}').join('; ')}',
+            '${failed.map((final f) => '${f.implementation} ${f.codec}/${f.dataset}: ${f.error ?? 'invalid'}').join('; ')}',
       );
     }, skip: !_benchmarks ? 'set RUN_BENCHMARKS=1 to run benchmarks' : null);
   });
@@ -77,7 +77,7 @@ class BenchmarkReport {
         name: '1KB Random',
         category: 'Small',
         data: Uint8List.fromList(
-          List.generate(1024, (i) => (i * 7 + 13) % 256),
+          List.generate(1024, (final i) => (i * 7 + 13) % 256),
         ),
       ),
     );
@@ -111,7 +111,7 @@ class BenchmarkReport {
         name: '64KB Random',
         category: 'Medium',
         data: Uint8List.fromList(
-          List.generate(65536, (i) => (i * 7 + 13) % 256),
+          List.generate(65536, (final i) => (i * 7 + 13) % 256),
         ),
       ),
     );
@@ -120,7 +120,7 @@ class BenchmarkReport {
       Dataset(
         name: '64KB Pattern',
         category: 'Medium',
-        data: Uint8List.fromList(List.generate(65536, (i) => (i % 256))),
+        data: Uint8List.fromList(List.generate(65536, (final i) => (i % 256))),
       ),
     );
 
@@ -154,7 +154,7 @@ class BenchmarkReport {
         name: '1MB Random',
         category: 'Large',
         data: Uint8List.fromList(
-          List.generate(1024 * 1024, (i) => (i * 7 + 13) % 256),
+          List.generate(1024 * 1024, (final i) => (i * 7 + 13) % 256),
         ),
       ),
     );
@@ -186,11 +186,15 @@ class BenchmarkReport {
       _benchmarkDartCodec(dataset, 'LZ4-HC', Lz4Codec(level: 9));
 
       // Snappy
-      _benchmarkDartCodec(dataset, 'Snappy-Raw', SnappyCodec(framing: false));
+      _benchmarkDartCodec(
+        dataset,
+        'Snappy-Raw',
+        SnappyCodec(format: SnappyFormat.raw),
+      );
       _benchmarkDartCodec(
         dataset,
         'Snappy-Framing',
-        SnappyCodec(framing: true),
+        SnappyCodec(format: SnappyFormat.framed),
       );
 
       // Gzip
@@ -542,9 +546,11 @@ class BenchmarkReport {
   }
 
   void print() {
-    final valid = results.where((r) => r.valid).length;
+    final valid = results.where((final r) => r.valid).length;
     final total = results.length;
-    final failed = results.where((r) => !r.valid && r.error != 'N/A').toList();
+    final failed = results
+        .where((final r) => !r.valid && r.error != 'N/A')
+        .toList();
 
     if (!verbose) {
       // Summary mode (default)
@@ -569,7 +575,7 @@ class BenchmarkReport {
     stdout.writeln('DATASETS:');
     for (final category in ['Small', 'Medium', 'Large']) {
       final datasets = testDatasets
-          .where((d) => d.category == category)
+          .where((final d) => d.category == category)
           .toList();
       if (datasets.isNotEmpty) {
         stdout.writeln('  $category:');
@@ -583,8 +589,9 @@ class BenchmarkReport {
     stdout.writeln('');
 
     // Group results by dataset and codec
-    final codecNames = results.map((r) => r.codec).toSet().toList()..sort();
-    final datasetNames = results.map((r) => r.dataset).toSet().toList();
+    final codecNames = results.map((final r) => r.codec).toSet().toList()
+      ..sort();
+    final datasetNames = results.map((final r) => r.dataset).toSet().toList();
 
     for (final dataset in datasetNames) {
       stdout.writeln('-' * 120);
@@ -604,7 +611,7 @@ class BenchmarkReport {
       for (final codec in codecNames) {
         final dartResult = results
             .where(
-              (r) =>
+              (final r) =>
                   r.dataset == dataset &&
                   r.codec == codec &&
                   r.implementation == 'Dart',
@@ -612,7 +619,7 @@ class BenchmarkReport {
             .firstOrNull;
         final cliResult = results
             .where(
-              (r) =>
+              (final r) =>
                   r.dataset == dataset &&
                   r.codec == codec &&
                   r.implementation == 'CLI',

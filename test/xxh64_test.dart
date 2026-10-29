@@ -1,8 +1,52 @@
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:libcompress/src/util/xxh64.dart';
+import 'package:libcompress/src/util/xxh64_web.dart' as web;
 
 void main() {
+  group('XXH64 web implementation', () {
+    // The web version uses 32-bit halves; its masked arithmetic is exact on
+    // the VM too, so it can be checked here against the native version.
+    final data = Uint8List.fromList(
+      List.generate(1100, (final i) => (i * 2654435761) >> 11 & 0xFF),
+    );
+    final seeds = [0, 1, 0x9E3779B1, 0x123456789AB, -1, -0x7FFFFFFFFFFF];
+
+    test('matches the native hash at every length and seed', () {
+      for (final seed in seeds) {
+        for (final length in [
+          ...List.generate(100, (final i) => i),
+          1000,
+          1100,
+        ]) {
+          final slice = Uint8List.sublistView(data, 0, length);
+          expect(
+            web.XXH64.hash(slice, seed),
+            XXH64.hash(slice, seed),
+            reason: 'length $length, seed $seed',
+          );
+          expect(
+            web.XXH64.hashLow32(slice, seed),
+            XXH64.hashLow32(slice, seed),
+            reason: 'low 32, length $length, seed $seed',
+          );
+        }
+      }
+    });
+
+    test('the sink matches the native hash for every chunking', () {
+      for (final step in [1, 3, 7, 31, 32, 33, 100]) {
+        final sink = web.Xxh64Sink(7);
+        for (var start = 0; start < data.length; start += step) {
+          final end = start + step < data.length ? start + step : data.length;
+          sink.add(data, start, end - start);
+        }
+        expect(sink.digest(), XXH64.hash(data, 7), reason: 'step $step');
+        expect(sink.digestLow32(), XXH64.hashLow32(data, 7));
+      }
+    });
+  });
+
   group('XXH64 Tests', () {
     test('should hash empty data correctly', () {
       final result = XXH64.hash(Uint8List(0), 0);
@@ -30,7 +74,9 @@ void main() {
 
     test('should hash long data correctly', () {
       // Create data longer than 32 bytes to test the main processing loop
-      final data = Uint8List.fromList(List.generate(100, (i) => i & 0xFF));
+      final data = Uint8List.fromList(
+        List.generate(100, (final i) => i & 0xFF),
+      );
       final result = XXH64.hash(data, 0);
       expect(result, isA<int>());
     });
@@ -67,7 +113,9 @@ void main() {
       ];
 
       for (final length in testCases) {
-        final data = Uint8List.fromList(List.generate(length, (i) => i & 0xFF));
+        final data = Uint8List.fromList(
+          List.generate(length, (final i) => i & 0xFF),
+        );
         final result = XXH64.hash(data, 0);
         expect(result, isA<int>(), reason: 'Failed for length $length');
       }
@@ -117,7 +165,7 @@ void main() {
     test('should handle very large inputs', () {
       // Test with a large input to ensure no integer overflow issues
       final largeData = Uint8List.fromList(
-        List.generate(10000, (i) => i & 0xFF),
+        List.generate(10000, (final i) => i & 0xFF),
       );
       final result = XXH64.hash(largeData, 0);
       expect(result, isA<int>());
@@ -129,7 +177,7 @@ void main() {
     // algorithm branches on: tail bytes, 4- and 8-byte tails, and 32-byte
     // stripes.
     final data = Uint8List.fromList(
-      List.generate(1000, (i) => (i * 31 + 7) & 0xFF),
+      List.generate(1000, (final i) => (i * 31 + 7) & 0xFF),
     );
     const vectors = <int, int>{
       0: 0xef46db3751d8e999,
