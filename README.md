@@ -1,7 +1,7 @@
 # libcompress
 
-A pure Dart compression library with native implementations of LZ4, Snappy, GZIP, and Zstd algorithms. No native
-dependencies - works on all Dart platforms (VM and web).
+A pure Dart compression library with native implementations of LZ4, Snappy, GZIP, raw DEFLATE, and Zstd algorithms.
+No native dependencies - works on all Dart platforms (VM and web).
 
 ## Features
 
@@ -24,6 +24,10 @@ dependencies - works on all Dart platforms (VM and web).
   - Optional filename/comment metadata; `mtime` defaults to 0 so output depends only on the input
   - CRC32 verification
   - Compatible with `gzip` command-line tool
+
+- **Raw DEFLATE**: `DeflateCodec`, DEFLATE blocks (RFC 1951) with no header or trailer, as ZIP entries hold them
+  - Compression levels 1-9, `maxSize`, and `decompress(data, size: n)` for an entry whose size is known
+  - Block use only: no stream codec and no `CodecType`
 
 - **Zstd Compression**: Zstandard implementation (RFC 8878)
   - Compressed blocks with Huffman/FSE entropy coding

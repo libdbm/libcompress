@@ -1,8 +1,8 @@
 /// Pure Dart implementations of common compression algorithms
 ///
-/// This library provides pure Dart implementations of LZ4, Snappy, GZIP, and Zstd
-/// compression, with no native dependencies. It supports both in-memory (block)
-/// compression and stream-based processing.
+/// This library provides pure Dart implementations of LZ4, Snappy, GZIP, raw
+/// DEFLATE, and Zstd compression, with no native dependencies. It supports both
+/// in-memory (block) compression and stream-based processing.
 ///
 /// ## Basic Usage
 ///
@@ -29,6 +29,7 @@
 ///   (Parquet `LZ4_RAW`) and Hadoop (Parquet `LZ4`) formats.
 /// - **Snappy**: Very fast compression. Raw block and framing formats.
 /// - **GZIP**: Full DEFLATE implementation with GZIP framing (RFC 1952).
+/// - **DEFLATE**: Raw DEFLATE blocks (RFC 1951), as ZIP entries hold them.
 /// - **Zstd**: Zstandard (RFC 8878) without dictionaries, including compressed
 ///   blocks with Huffman/FSE encoding and sequence encoding.
 ///
@@ -69,6 +70,7 @@ export 'src/snappy/snappy_codec.dart';
 export 'src/snappy/snappy_stream_codec.dart' show SnappyStreamCodec;
 
 // GZIP codec
+export 'src/gzip/deflate_codec.dart' show DeflateCodec, DeflateOptions;
 export 'src/gzip/gzip_codec.dart' show GzipCodec, GzipOptions;
 export 'src/gzip/gzip_stream_codec.dart' show GzipStreamCodec;
 

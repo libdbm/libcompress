@@ -1,3 +1,11 @@
+## 2.1.0
+
+### Added
+
+- **`DeflateCodec`**: raw DEFLATE (RFC 1951), with no GZIP header or trailer, as ZIP entries hold it. Levels 1-9,
+  `maxSize`, and `decompress(data, size: n)` as the other codecs have them, and `DeflateOptions` for `fromOptions`.
+  Bytes after the final block are rejected. It is a block codec only, so it has no `CodecType`.
+
 ## 2.0.0
 
 A breaking release: one consistent public API, Parquet's legacy LZ4 codec, and correctness fixes found by
