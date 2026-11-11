@@ -70,10 +70,11 @@ class StreamingDeflateEncoder {
     _lz77
       ..reset()
       ..insert(data, math.max(0, _start - maxDistance), _start);
-    final (tokens, end) = _lz77.tokenize(data, _start, limit);
+    final (tokens, count, end) = _lz77.tokenize(data, _start, limit);
     _blocks.writeBlock(
       _out,
       tokens,
+      count,
       Uint8List.sublistView(data, _start, end),
       isFinal: isFinal,
     );

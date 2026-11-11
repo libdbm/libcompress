@@ -11,11 +11,12 @@ import '../util/byte_utils.dart';
 ///
 /// Emits one window-descriptor frame (no baked-in content size) whose blocks
 /// share up to [blockSize] of history, so matches reference prior chunks across
-/// block boundaries — better ratio than an independent frame per chunk. Each
-/// chunk is split into <=[blockSize] blocks; each block is matched against
-/// `history + block` (combined <= the declared window, ~2x [blockSize]), so
-/// absolute offsets stay within the window. The content checksum (XXH64 low 32
-/// bits) is streamed.
+/// block boundaries — better ratio than an independent frame per chunk. Input
+/// is buffered into blocks of [blockSize] bytes, so the output does not depend
+/// on how the input is split into chunks; the last, partial block is written by
+/// [finish]. Each block is matched against `history + block` (combined <= the
+/// declared window, ~2x [blockSize]), so absolute offsets stay within the
+/// window. The content checksum (XXH64 low 32 bits) is streamed.
 class StreamingZstdEncoder implements StreamCompressor {
   StreamingZstdEncoder({
     this.level = 3,
@@ -59,13 +60,15 @@ class StreamingZstdEncoder implements StreamCompressor {
   int get fallbacks => _encoder.fallbacks;
 
   // Two reused, ping-ponged window buffers. The active buffer holds
-  // `history (<=blockSize) at [0.._hist)` followed by the appended piece, and is
-  // matched in place (native element access, bounded by `end`). After each block
-  // the next history is copied into the *other* buffer (non-overlapping) and the
-  // buffers swap — no per-block concat/tail allocation.
+  // `history (<=blockSize) at [0.._hist)` followed by the buffered input up to
+  // `_length`, and is matched in place (native element access, bounded by
+  // `end`). After each block the next history is copied into the *other*
+  // buffer (non-overlapping) and the buffers swap — no per-block concat/tail
+  // allocation.
   late Uint8List _cur = Uint8List(2 * blockSize);
   late Uint8List _alt = Uint8List(2 * blockSize);
   int _hist = 0; // bytes of history at the front of _cur (<= blockSize)
+  int _length = 0; // end of the buffered input in _cur (<= _hist + blockSize)
 
   final Xxh64Sink _sink = Xxh64Sink(); // content checksum over all input
 
@@ -80,60 +83,65 @@ class StreamingZstdEncoder implements StreamCompressor {
     ]);
   }
 
-  /// Compresses [data] (split into <=[blockSize] linked blocks) and returns the
-  /// frame block bytes produced.
+  /// Buffers [data] and returns the bytes of each block it completes (empty
+  /// until [blockSize] bytes have arrived).
   @override
   Uint8List addChunk(final Uint8List data) {
+    _sink.add(data);
     final out = BytesBuilder(copy: false);
-    var off = 0;
-    while (off < data.length) {
-      final n = math.min(blockSize, data.length - off);
-      out.add(_emitBlock(Uint8List.sublistView(data, off, off + n)));
-      off += n;
+    var offset = 0;
+    while (offset < data.length) {
+      final count = math.min(_hist + blockSize - _length, data.length - offset);
+      _cur.setRange(_length, _length + count, data, offset);
+      _length += count;
+      offset += count;
+      if (_length - _hist == blockSize) out.add(_emitBlock(last: false));
     }
     return out.takeBytes();
   }
 
-  /// Writes the final (empty) block and the optional content checksum.
+  /// Writes the buffered input as the last block (an empty raw block when
+  /// nothing is buffered) and the optional content checksum.
   @override
   Uint8List finish() {
     final out = BytesBuilder(copy: false);
-    out.add(_blockHeader(last: true, type: 0, size: 0)); // empty raw, last
+    if (_length > _hist) {
+      out.add(_emitBlock(last: true));
+    } else {
+      out.add(_blockHeader(last: true, type: 0, size: 0)); // empty raw, last
+    }
     if (checksum) out.add(ByteUtils.uint32LE(_sink.digestLow32()));
     return out.takeBytes();
   }
 
-  Uint8List _emitBlock(final Uint8List piece) {
-    _sink.add(piece);
-    final pieceLen = piece.length;
-
-    // Append the piece after the front-anchored history in the active buffer.
-    // _hist + pieceLen <= 2*blockSize == buffer length.
-    _cur.setRange(_hist, _hist + pieceLen, piece);
-    final total = _hist + pieceLen;
+  /// Encodes the buffered input `_cur[_hist.._length)` as one block.
+  Uint8List _emitBlock({required final bool last}) {
+    final total = _length;
+    final size = total - _hist;
 
     // Match over the native buffer directly (fast element access), bounded to
-    // the live region via `end` — no view/copy. Identical bytes/layout to the
-    // old concatenated buffer, so the output is unchanged.
+    // the live region via `end` — no view/copy.
     final compressed = _encoder.encodeBlock(_cur, from: _hist, end: total);
 
     final out = BytesBuilder(copy: false);
-    if (compressed.isNotEmpty && compressed.length < pieceLen) {
-      out.add(_blockHeader(last: false, type: 2, size: compressed.length));
+    if (compressed.isNotEmpty && compressed.length < size) {
+      out.add(_blockHeader(last: last, type: 2, size: compressed.length));
       out.add(compressed);
     } else {
-      out.add(_blockHeader(last: false, type: 0, size: pieceLen));
-      out.add(piece);
+      out.add(_blockHeader(last: last, type: 0, size: size));
+      // A copy: _cur is overwritten by later blocks.
+      out.add(_cur.sublist(_hist, total));
     }
 
     // Copy the last <=blockSize bytes as the next block's history into the
     // alternate buffer (non-overlapping) and swap. No allocation.
-    final newHist = math.min(blockSize, total);
-    _alt.setRange(0, newHist, _cur, total - newHist);
+    final history = math.min(blockSize, total);
+    _alt.setRange(0, history, _cur, total - history);
     final swap = _cur;
     _cur = _alt;
     _alt = swap;
-    _hist = newHist;
+    _hist = history;
+    _length = history;
     return out.takeBytes();
   }
 

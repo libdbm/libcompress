@@ -1,7 +1,5 @@
 import 'dart:typed_data';
 
-import '../exceptions.dart';
-
 // Re-export exception from centralized location
 export '../exceptions.dart' show DeflateFormatException;
 
@@ -142,38 +140,25 @@ int hash(final Uint8List data, final int pos) {
       (hashSize - 1);
 }
 
-/// Encodes a length value into length code and extra bits.
+/// The length code (257..285) of a match [length] in minMatch..maxMatch.
 ///
-/// O(1) via a precomputed code table (built once with the canonical scan); the
-/// extra-bits/value decomposition is uniform across all codes.
-///
-/// Throws [ArgumentError] if length is not between [minMatch] and [maxMatch].
-LengthCode encodeLength(final int length) {
-  if (length < minMatch || length > maxMatch) {
-    throw ArgumentError.value(
-      length,
-      'length',
-      'Must be between $minMatch and $maxMatch',
-    );
-  }
-  final code = _lengthCodeFor[length];
-  final index = code - 257;
-  return LengthCode(code, lengthExtraBits[index], length - lengthBase[index]);
+/// O(1) via a precomputed table. The extra bits and extra value are
+/// `lengthExtraBits[code - 257]` and `length - lengthBase[code - 257]`.
+int lengthCode(final int length) {
+  assert(length >= minMatch && length <= maxMatch, 'Invalid length $length');
+  return _lengthCodeFor[length];
 }
 
-/// Encodes a distance value into distance code and extra bits (O(1) lookup).
-DistanceCode encodeDistance(final int distance) {
-  if (distance < 1 || distance > maxDistance) {
-    throw DeflateFormatException(
-      'Invalid distance: $distance (must be 1-$maxDistance)',
-    );
-  }
-  final code = _distanceCodeFor[distance];
-  return DistanceCode(
-    code,
-    distanceExtraBits[code],
-    distance - distanceBase[code],
+/// The distance code (0..29) of a match [distance] in 1..maxDistance.
+///
+/// O(1) via a precomputed table. The extra bits and extra value are
+/// `distanceExtraBits[code]` and `distance - distanceBase[code]`.
+int distanceCode(final int distance) {
+  assert(
+    distance >= 1 && distance <= maxDistance,
+    'Invalid distance $distance',
   );
+  return _distanceCodeFor[distance];
 }
 
 /// `length (minMatch..maxMatch) -> length code (257..285)`, built once.
@@ -218,36 +203,8 @@ Uint8List _buildDistanceCodeTable() {
   return table;
 }
 
-/// Represents an encoded length with code and extra bits
-class LengthCode {
-  final int code;
-  final int extraBits;
-  final int extraValue;
-
-  const LengthCode(this.code, this.extraBits, this.extraValue);
-}
-
-/// Represents an encoded distance with code and extra bits
-class DistanceCode {
-  final int code;
-  final int extraBits;
-  final int extraValue;
-
-  const DistanceCode(this.code, this.extraBits, this.extraValue);
-}
-
-/// Represents a literal or length/distance pair in LZ77
-sealed class Token {}
-
-/// A literal byte token
-class LiteralToken extends Token {
-  final int value;
-  LiteralToken(this.value);
-}
-
-/// A length/distance match token
-class MatchToken extends Token {
-  final int length;
-  final int distance;
-  MatchToken(this.length, this.distance);
-}
+/// LZ77 tokens are packed one per `Uint32List` element. A literal is its
+/// byte value (0..255); a match is [matchToken]. `token >> 9` is zero for a
+/// literal and the match distance otherwise, and `token & 0x1FF` is then the
+/// match length. Every token is below 2^25, so it is exact on the web.
+int matchToken(final int length, final int distance) => distance << 9 | length;

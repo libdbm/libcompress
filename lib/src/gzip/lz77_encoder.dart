@@ -68,6 +68,10 @@ class Lz77Encoder {
   int _length = 0;
   int _distance = 0;
 
+  /// Packed tokens (see [matchToken]) from the last [tokenize], reused across
+  /// calls.
+  Uint32List _tokens = Uint32List(0);
+
   /// Clears the hash chains, for a new buffer.
   void reset() {
     _head.fillRange(0, hashSize, -1);
@@ -83,45 +87,48 @@ class Lz77Encoder {
 
   /// Tokenizes `data[start..limit)`; a match may run past [limit] up to the
   /// end of [data]. Positions before [start] must already be inserted.
-  /// Returns the tokens and the position reached.
-  (List<Token>, int) tokenize(
-    final Uint8List data,
-    final int start,
-    final int limit,
-  ) => _config.fast ? _greedy(data, start, limit) : _lazy(data, start, limit);
-
-  /// Takes the first match found at each position (zlib `deflate_fast`).
-  (List<Token>, int) _greedy(
+  /// Returns the packed tokens (see [matchToken]), their count and the
+  /// position reached. The token list is reused: its contents are valid only
+  /// until the next call, and only its first `count` entries are tokens.
+  (Uint32List, int, int) tokenize(
     final Uint8List data,
     final int start,
     final int limit,
   ) {
-    final tokens = <Token>[];
+    // Each token covers at least one byte, so this many always fit.
+    if (_tokens.length < limit - start) _tokens = Uint32List(limit - start);
+    final (count, end) = _config.fast
+        ? _greedy(data, start, limit)
+        : _lazy(data, start, limit);
+    return (_tokens, count, end);
+  }
+
+  /// Takes the first match found at each position (zlib `deflate_fast`).
+  (int, int) _greedy(final Uint8List data, final int start, final int limit) {
+    final tokens = _tokens;
+    var count = 0;
     var pos = start;
     while (pos < limit) {
       final candidate = _insert(data, pos);
       if (candidate >= 0 &&
           _find(data, pos, candidate, minMatch - 1, _config.chain)) {
-        tokens.add(MatchToken(_length, _distance));
+        tokens[count++] = matchToken(_length, _distance);
         final end = pos + _length;
         if (_length <= _config.lazy) insert(data, pos + 1, end);
         pos = end;
       } else {
-        tokens.add(LiteralToken(data[pos]));
+        tokens[count++] = data[pos];
         pos++;
       }
     }
-    return (tokens, pos);
+    return (count, pos);
   }
 
   /// Defers each match by one position, taking the next one instead when it
   /// is longer (zlib `deflate_slow`).
-  (List<Token>, int) _lazy(
-    final Uint8List data,
-    final int start,
-    final int limit,
-  ) {
-    final tokens = <Token>[];
+  (int, int) _lazy(final Uint8List data, final int start, final int limit) {
+    final tokens = _tokens;
+    var count = 0;
     var pos = start;
     // Whether the byte at pos - 1 is still to be emitted; [length] and
     // [distance] are then the match found there.
@@ -146,14 +153,14 @@ class Lz77Encoder {
       }
 
       if (previous >= minMatch && length <= previous) {
-        tokens.add(MatchToken(previous, back));
+        tokens[count++] = matchToken(previous, back);
         final end = pos - 1 + previous;
         insert(data, pos + 1, end);
         pos = end;
         pending = false;
         length = minMatch - 1;
       } else {
-        if (pending) tokens.add(LiteralToken(data[pos - 1]));
+        if (pending) tokens[count++] = data[pos - 1];
         pending = true;
         pos++;
       }
@@ -161,15 +168,15 @@ class Lz77Encoder {
 
     if (pending) {
       if (length >= minMatch) {
-        tokens.add(MatchToken(length, distance));
+        tokens[count++] = matchToken(length, distance);
         final end = pos - 1 + length;
         insert(data, pos, end);
         pos = end;
       } else {
-        tokens.add(LiteralToken(data[pos - 1]));
+        tokens[count++] = data[pos - 1];
       }
     }
-    return (tokens, pos);
+    return (count, pos);
   }
 
   /// Searches up to [chain] entries from [candidate] for a match at [pos]

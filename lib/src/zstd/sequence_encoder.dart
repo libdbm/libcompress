@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import 'sequence_constants.dart' as seq;
-import 'match_finder.dart';
+import 'sequences.dart';
 import '../util/bit_stream.dart';
 
 // Predefined (mode 0) FSE tables are built from compile-time constants and are
@@ -122,50 +122,48 @@ class SequenceEncoder {
 
   /// Encode sequences using tANS/FSE with configured tables
   ///
+  /// [codes] must hold the codes of [sequences] (see [SequenceCodes]).
   /// Returns the encoded bitstream (excluding sequence count header)
-  Uint8List encodeSequences(final List<ZstdMatch> matches) {
-    if (matches.isEmpty) {
+  Uint8List encodeSequences(
+    final Sequences sequences,
+    final SequenceCodes codes,
+  ) {
+    final count = sequences.count;
+    if (count == 0) {
       return Uint8List(0);
     }
 
-    final tokens = _buildTokens(matches);
+    final literalCodes = codes.literals;
+    final offsetCodes = codes.offsets;
+    final matchCodes = codes.matches;
     final stream = BitStreamWriter();
-    final count = tokens.length;
 
     // Initialize states from last sequence's symbols (no bits written yet)
     // RLE mode (mode 1) doesn't need state tracking
-    var mlState = _mlTable?.begin(tokens[count - 1].matchSymbol) ?? 0;
-    var ofState = _ofTable?.begin(tokens[count - 1].offsetSymbol) ?? 0;
-    var llState = _llTable?.begin(tokens[count - 1].literalSymbol) ?? 0;
+    final last = count - 1;
+    var mlState = _mlTable?.begin(matchCodes[last]) ?? 0;
+    var ofState = _ofTable?.begin(offsetCodes[last]) ?? 0;
+    var llState = _llTable?.begin(literalCodes[last]) ?? 0;
 
     // Write first sequence's extra bits (literal length, match length, offset)
-    final first = tokens[count - 1];
-    stream.writeBits(first.literalExtraValue, first.literalExtraBits);
-    stream.writeBits(first.matchExtraValue, first.matchExtraBits);
-    stream.writeBits(first.offsetAdditional, first.offsetExtraBits);
+    _writeExtras(stream, sequences, codes, last);
 
     // Encode remaining sequences in reverse order
-    if (count >= 2) {
-      for (var i = count - 2; i >= 0; i--) {
-        final token = tokens[i];
-
-        // Write state transition bits (offset, match, literal order)
-        // RLE mode doesn't write state bits - symbol is constant
-        if (_ofTable != null) {
-          ofState = _ofTable.encode(stream, ofState, token.offsetSymbol);
-        }
-        if (_mlTable != null) {
-          mlState = _mlTable.encode(stream, mlState, token.matchSymbol);
-        }
-        if (_llTable != null) {
-          llState = _llTable.encode(stream, llState, token.literalSymbol);
-        }
-
-        // Write extra bits (the writer emits whole bytes as it goes)
-        stream.writeBits(token.literalExtraValue, token.literalExtraBits);
-        stream.writeBits(token.matchExtraValue, token.matchExtraBits);
-        stream.writeBits(token.offsetAdditional, token.offsetExtraBits);
+    for (var i = count - 2; i >= 0; i--) {
+      // Write state transition bits (offset, match, literal order)
+      // RLE mode doesn't write state bits - symbol is constant
+      if (_ofTable != null) {
+        ofState = _ofTable.encode(stream, ofState, offsetCodes[i]);
       }
+      if (_mlTable != null) {
+        mlState = _mlTable.encode(stream, mlState, matchCodes[i]);
+      }
+      if (_llTable != null) {
+        llState = _llTable.encode(stream, llState, literalCodes[i]);
+      }
+
+      // Write extra bits (the writer emits whole bytes as it goes)
+      _writeExtras(stream, sequences, codes, i);
     }
 
     // Write final states (skip for RLE mode)
@@ -184,33 +182,30 @@ class SequenceEncoder {
     return stream.toBytes();
   }
 
-  List<_SequenceToken> _buildTokens(final List<ZstdMatch> matches) {
-    final tokens = <_SequenceToken>[];
-
-    for (final match in matches) {
-      final llSymbol = _literalSymbol(match.literalLength);
-      final mlSymbol = _matchSymbol(match.length);
-      final offsetEncoding = _encodeOffsetSymbol(match.offset);
-
-      final llBase = seq.literalLengthBase[llSymbol];
-      final mlBase = seq.matchLengthBase[mlSymbol];
-
-      tokens.add(
-        _SequenceToken(
-          literalSymbol: llSymbol,
-          literalExtraBits: _literalExtraBits(llSymbol),
-          literalExtraValue: match.literalLength - llBase,
-          matchSymbol: mlSymbol,
-          matchExtraBits: _matchExtraBits(mlSymbol),
-          matchExtraValue: match.length - mlBase,
-          offsetSymbol: offsetEncoding.symbol,
-          offsetExtraBits: offsetEncoding.bits,
-          offsetAdditional: offsetEncoding.value,
-        ),
-      );
-    }
-
-    return tokens;
+  /// Writes the extra bits of sequence [index]: literal length, match length,
+  /// then offset (absolute offsets only; repeat-offset codes are frame
+  /// stateful across blocks, and this encoder builds each block on its own).
+  void _writeExtras(
+    final BitStreamWriter stream,
+    final Sequences sequences,
+    final SequenceCodes codes,
+    final int index,
+  ) {
+    final literal = codes.literals[index];
+    stream.writeBits(
+      sequences.literals[index] - seq.literalLengthBase[literal],
+      _literalExtraBits(literal),
+    );
+    final match = codes.matches[index];
+    stream.writeBits(
+      sequences.lengths[index] - seq.matchLengthBase[match],
+      _matchExtraBits(match),
+    );
+    final offset = codes.offsets[index];
+    stream.writeBits(
+      sequences.offsets[index] - seq.offsetBase[offset],
+      seq.offsetBits[offset],
+    );
   }
 
   int _literalExtraBits(final int symbol) =>
@@ -218,88 +213,44 @@ class SequenceEncoder {
 
   int _matchExtraBits(final int symbol) =>
       symbol < seq.matchLengthBits.length ? seq.matchLengthBits[symbol] : 0;
-
-  _OffsetEncoding _encodeOffsetSymbol(final int offset) {
-    // Encode absolute offsets only. Repeat-offset symbols are frame stateful
-    // across blocks; this encoder builds each block independently.
-    final symbol = _offsetSymbol(offset);
-    final base = seq.offsetBase[symbol];
-    final bits = seq.offsetBits[symbol];
-    final value = offset - base;
-
-    return _OffsetEncoding(symbol: symbol, bits: bits, value: value);
-  }
 }
 
-class _OffsetEncoding {
-  final int symbol;
-  final int bits;
-  final int value;
+/// The literal-length, offset and match-length codes of a block's
+/// [Sequences], computed once for both the FSE statistics and the encoder.
+///
+/// The lists are reused from block to block, so only the first
+/// `sequences.count` entries are codes, and only until the next [compute].
+final class SequenceCodes {
+  Uint8List _literals = Uint8List(0);
+  Uint8List _offsets = Uint8List(0);
+  Uint8List _matches = Uint8List(0);
 
-  const _OffsetEncoding({
-    required this.symbol,
-    required this.bits,
-    required this.value,
-  });
-}
+  /// Literal-length codes (0..35).
+  Uint8List get literals => _literals;
 
-/// Extracted sequence symbols for FSE table building
-class SequenceSymbols {
-  final List<int> literalLengths;
-  final List<int> offsets;
-  final List<int> matchLengths;
+  /// Offset codes (0..31), from absolute offsets.
+  Uint8List get offsets => _offsets;
 
-  const SequenceSymbols({
-    required this.literalLengths,
-    required this.offsets,
-    required this.matchLengths,
-  });
+  /// Match-length codes (0..52).
+  Uint8List get matches => _matches;
 
-  /// Extract actual symbols from matches including repeat offset handling.
-  ///
-  /// This must be used to compute FSE statistics to ensure they match
-  /// what SequenceEncoder will actually encode.
-  factory SequenceSymbols.from(final List<ZstdMatch> matches) {
-    final llSymbols = <int>[];
-    final ofSymbols = <int>[];
-    final mlSymbols = <int>[];
-    // Absolute offsets only, as SequenceEncoder writes them.
-    for (final match in matches) {
-      llSymbols.add(_literalSymbol(match.literalLength));
-      mlSymbols.add(_matchSymbol(match.length));
-      ofSymbols.add(_offsetSymbol(match.offset));
+  /// Computes the codes of [sequences].
+  void compute(final Sequences sequences) {
+    final count = sequences.count;
+    if (_literals.length < count) {
+      _literals = Uint8List(count);
+      _offsets = Uint8List(count);
+      _matches = Uint8List(count);
     }
-
-    return SequenceSymbols(
-      literalLengths: llSymbols,
-      offsets: ofSymbols,
-      matchLengths: mlSymbols,
-    );
+    final literals = sequences.literals;
+    final offsets = sequences.offsets;
+    final lengths = sequences.lengths;
+    for (var i = 0; i < count; i++) {
+      _literals[i] = _literalSymbol(literals[i]);
+      _offsets[i] = _offsetSymbol(offsets[i]);
+      _matches[i] = _matchSymbol(lengths[i]);
+    }
   }
-}
-
-class _SequenceToken {
-  final int literalSymbol;
-  final int literalExtraBits;
-  final int literalExtraValue;
-  final int matchSymbol;
-  final int matchExtraBits;
-  final int matchExtraValue;
-  final int offsetSymbol;
-  final int offsetExtraBits;
-  final int offsetAdditional;
-
-  const _SequenceToken({
-    required this.literalSymbol,
-    required this.literalExtraBits,
-    required this.literalExtraValue,
-    required this.matchSymbol,
-    required this.matchExtraBits,
-    required this.matchExtraValue,
-    required this.offsetSymbol,
-    required this.offsetExtraBits,
-    required this.offsetAdditional,
-  });
 }
 
 /// FSE compression table following Java aircompressor implementation

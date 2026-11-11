@@ -6,6 +6,7 @@ import 'huffman_encoder.dart';
 import 'match_finder.dart';
 import 'sequence_constants.dart' as seq;
 import 'sequence_encoder.dart';
+import 'sequences.dart';
 
 /// Compressed block encoder for Zstd
 ///
@@ -57,6 +58,9 @@ class CompressedBlockEncoder {
     minMatch: minMatch,
   );
 
+  // Sequence codes, reused across blocks.
+  final SequenceCodes _codes = SequenceCodes();
+
   /// Encode a block using compressed format
   ///
   /// Returns the encoded block data (without block header).
@@ -77,27 +81,17 @@ class CompressedBlockEncoder {
 
     try {
       final matchFinder = _matchFinder;
-      final matchResult = matchFinder.findMatches(
-        input,
-        from: from,
-        end: limit,
-      );
-      final matches = matchResult.$1;
-      final trailingLiterals = matchResult.$2;
+      final trailing = matchFinder.findMatches(input, from: from, end: limit);
+      final sequences = matchFinder.sequences;
 
-      if (matches.isEmpty) {
+      if (sequences.count == 0) {
         return Uint8List(0);
       }
 
-      final literals = matchFinder.extractLiterals(
-        input,
-        matches,
-        trailingLiterals,
-        from: from,
-      );
+      final literals = matchFinder.extractLiterals(input, trailing, from: from);
 
       final literalSection = _encodeLiteralSection(literals);
-      final sequencesSection = _encodeSequencesSectionFse(matches);
+      final sequencesSection = _encodeSequencesSectionFse(sequences);
 
       final output = Uint8List(literalSection.length + sequencesSection.length);
       output.setRange(0, literalSection.length, literalSection);
@@ -164,16 +158,9 @@ class CompressedBlockEncoder {
       return null;
     }
 
-    // The current Huffman weights encoder only supports the direct 4-bit
-    // representation, whose header can encode at most 128 weights. Symbols
-    // 0..maxSym-1 are written; the last symbol's weight is implicit
-    // (RFC 8878 Section 4.2.1.1).
-    if (maxSym > 128) {
-      return null;
-    }
-
-    // Encode weights header
+    // Encode weights header (null: the weights cannot be described)
     final header = encoder.encodeWeightsHeader(maxSym);
+    if (header == null) return null;
 
     // Encode literals (use 4 streams for larger inputs)
     Uint8List? encoded;
@@ -297,11 +284,11 @@ class CompressedBlockEncoder {
   }
 
   /// Encode sequences section using FSE with optimal table selection
-  Uint8List _encodeSequencesSectionFse(final List<ZstdMatch> matches) {
+  Uint8List _encodeSequencesSectionFse(final Sequences sequences) {
     final output = BytesBuilder(copy: false);
 
     // Write sequence count per RFC 8878 Section 3.1.1.3.2.1.1
-    final count = matches.length;
+    final count = sequences.count;
     if (count < 128) {
       output.addByte(count);
     } else if (count < 0x7F00) {
@@ -314,13 +301,22 @@ class CompressedBlockEncoder {
       output.addByte((adjusted >> 8) & 0xFF);
     }
 
-    // Gather symbol statistics using SequenceSymbols to ensure correct
-    // offset symbols including repeat offset handling (symbols 0, 1)
-    final symbols = SequenceSymbols.from(matches);
+    // Codes are computed once, so the statistics describe exactly the symbols
+    // the encoder writes.
+    final codes = _codes..compute(sequences);
 
-    final llStats = FseEncoder.stats(symbols.literalLengths, 35);
-    final ofStats = FseEncoder.stats(symbols.offsets, 31);
-    final mlStats = FseEncoder.stats(symbols.matchLengths, 52);
+    final llStats = FseEncoder.stats(
+      Uint8List.sublistView(codes.literals, 0, count),
+      35,
+    );
+    final ofStats = FseEncoder.stats(
+      Uint8List.sublistView(codes.offsets, 0, count),
+      31,
+    );
+    final mlStats = FseEncoder.stats(
+      Uint8List.sublistView(codes.matches, 0, count),
+      52,
+    );
 
     // Select optimal encoding mode for each component
     final selector = EncodingModeSelector(
@@ -378,7 +374,7 @@ class CompressedBlockEncoder {
       mlLog: mlEnc?.tableLog,
     );
 
-    final bits = encoder.encodeSequences(matches);
+    final bits = encoder.encodeSequences(sequences, codes);
     output.add(bits);
 
     return output.takeBytes();

@@ -3,7 +3,6 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:libcompress/libcompress.dart';
-import 'package:libcompress/src/gzip/deflate_common.dart';
 import 'package:libcompress/src/gzip/deflate_decoder.dart';
 import 'package:libcompress/src/gzip/deflate_encoder.dart';
 import 'package:libcompress/src/util/bit_stream.dart';
@@ -283,6 +282,27 @@ void main() {
   });
 
   group('GZIP streaming', () {
+    test('token buffer reuse across blocks', () async {
+      // As the DEFLATE block test: a full token buffer, then a block of few
+      // tokens, with the input split into stream chunks.
+      final data = bytes([
+        ...pseudoRandom(70000),
+        ...Uint8List(70000),
+        ...readDataFixture('lorem.txt'),
+      ]);
+      for (final level in [1, 6]) {
+        final compressed = await collect(
+          GzipStreamCodec(level: level).compress(
+            Stream.fromIterable([
+              for (var i = 0; i < data.length; i += 4096)
+                Uint8List.sublistView(data, i, min(i + 4096, data.length)),
+            ]),
+          ),
+        );
+        expect(gzip.decode(compressed), equals(data), reason: 'level $level');
+      }
+    });
+
     test('a large input chunk is decoded in bounded output chunks', () async {
       final data = readDataFixture('large/bible.txt');
       final compressed = GzipCodec().compress(data);
@@ -1369,16 +1389,21 @@ void main() {
               frequencies[frequencies.length - 2],
         );
       }
-      final tokens = <Token>[];
+      // A packed literal token is its byte value.
       final literals = <int>[];
       for (var symbol = 0; symbol < frequencies.length; symbol++) {
         for (var i = 0; i < frequencies[symbol]; i++) {
-          tokens.add(LiteralToken(symbol));
           literals.add(symbol);
         }
       }
+      final tokens = Uint32List.fromList(literals);
       final writer = BitStreamWriter();
-      DeflateEncoder().writeDynamicBlock(writer, tokens, isFinal: true);
+      DeflateEncoder().writeDynamicBlock(
+        writer,
+        tokens,
+        tokens.length,
+        isFinal: true,
+      );
       final deflate = writer.toBytes();
       expect(DeflateDecoder().decompress(deflate), equals(literals));
 

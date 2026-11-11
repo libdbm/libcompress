@@ -1,3 +1,20 @@
+## 2.2.0
+
+### Changed
+
+- **Faster GZIP, DEFLATE and Zstd compression**: the encoders keep LZ77 tokens and Zstd sequences in reused typed
+  lists in place of one object per literal, match and code. Compressed output is byte-identical to 2.1.0. GZIP
+  compression of incompressible data is about 50% faster, text at level 1 about 20%, and Zstd level 3 about 10%.
+- **Zstd**: literals containing bytes above 128 (binary data, non-ASCII UTF-8) are Huffman-compressed, using
+  FSE-compressed Huffman weights (RFC 8878 section 4.2.1.2). They previously fell back to raw literals: binary
+  files in the test corpus compress 3% to 20% smaller (`kennedy.xls` savings go from 76.9% to 78.8%, `geo` from
+  14.5% to 28.2%).
+- **`ZstdStreamCodec`**: input is buffered into full blocks of `blockSize` bytes, as `Lz4StreamCodec` and
+  `GzipStreamCodec` already do, so the output no longer depends on how the input stream is chunked. A stream of small
+  chunks previously wrote one block per chunk (256 KB of text sent as 64-byte chunks took 40,982 bytes instead of 51).
+  Compressed output is now held until `blockSize` bytes have arrived or the stream ends, and the last block carries
+  the data rather than an extra empty block. Pass a smaller `blockSize` for lower latency.
+
 ## 2.1.0
 
 ### Added

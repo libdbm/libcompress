@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import '../util/huffman.dart';
 import '../util/bit_stream.dart';
+import 'fse_encoder.dart';
+import 'sequence_encoder.dart';
 
 /// Huffman encoder for Zstd literal compression
 ///
@@ -15,12 +17,17 @@ import '../util/bit_stream.dart';
 class HuffmanEncoder {
   static const int maxTableLog = 12;
 
+  /// Largest Huffman weight, and the most accuracy log the FSE table that
+  /// compresses weights may use (RFC 8878 section 4.2.1.2).
+  static const int _maxWeight = 12;
+  static const int _weightLog = 6;
+
   /// Longest permitted literal code (RFC 8878 Section 4.2.1).
   static const int maxCodeLength = 11;
   static const int maxSymbol = 255;
 
-  late List<int> _codes;
-  late List<int> _bits;
+  late Uint16List _codes;
+  late Uint8List _bits;
   late int _maxBits;
   late int _tableLog;
 
@@ -45,8 +52,8 @@ class HuffmanEncoder {
 
     if (nonZero == 1) {
       // Single symbol: 1-bit code
-      _codes = List.filled(maxSym + 1, 0);
-      _bits = List.filled(maxSym + 1, 0);
+      _codes = Uint16List(maxSym + 1);
+      _bits = Uint8List(maxSym + 1);
       for (var i = 0; i <= maxSym; i++) {
         if (counts[i] > 0) {
           _codes[i] = 0;
@@ -92,8 +99,8 @@ class HuffmanEncoder {
   /// in order, within each weight class. The code to write is the MSB portion
   /// of the table index.
   void _generateCodesFromWeights(final List<int> weights, final int maxSym) {
-    _codes = List.filled(maxSym + 1, 0);
-    _bits = List.filled(maxSym + 1, 0);
+    _codes = Uint16List(maxSym + 1);
+    _bits = Uint8List(maxSym + 1);
 
     // Count entries per weight (rank)
     final ranks = List.filled(maxTableLog + 2, 0);
@@ -133,99 +140,81 @@ class HuffmanEncoder {
 
   /// Encode literals to a bitstream
   ///
-  /// Returns encoded data or null if compression failed
+  /// Returns encoded data or null if a literal has no code
   Uint8List? encodeSingle(final Uint8List literals) {
     if (literals.isEmpty) return Uint8List(0);
-
-    final writer = BitStreamWriter();
-
-    // Encode in reverse order (last symbol first) per Zstd spec
-    // This allows the decoder to read symbols in forward order
-    final n = literals.length & ~3; // Align to 4
-
-    // Handle remainder first (like Java: switch on inputSize & 3)
-    switch (literals.length & 3) {
-      case 3:
-        writer.writeBits(_codes[literals[n + 2]], _bits[literals[n + 2]]);
-        continue case2;
-      case2:
-      case 2:
-        writer.writeBits(_codes[literals[n + 1]], _bits[literals[n + 1]]);
-        continue case1;
-      case1:
-      case 1:
-        writer.writeBits(_codes[literals[n]], _bits[literals[n]]);
-    }
-
-    // Process 4 symbols at a time, in reverse
-    for (var i = n; i > 0; i -= 4) {
-      final s3 = literals[i - 1];
-      final s2 = literals[i - 2];
-      final s1 = literals[i - 3];
-      final s0 = literals[i - 4];
-
-      if (_bits[s3] == 0 ||
-          _bits[s2] == 0 ||
-          _bits[s1] == 0 ||
-          _bits[s0] == 0) {
-        return null;
-      }
-
-      writer.writeBits(_codes[s3], _bits[s3]);
-      writer.writeBits(_codes[s2], _bits[s2]);
-      writer.writeBits(_codes[s1], _bits[s1]);
-      writer.writeBits(_codes[s0], _bits[s0]);
-    }
-
-    // Sentinel bit marking the end of the stream, then pad to a byte.
-    writer.writeBits(1, 1);
-    return writer.toBytes();
+    final output = Uint8List(_bound(literals.length) + 1);
+    final end = _encodeStream(literals, 0, literals.length, output, 0);
+    return end < 0 ? null : Uint8List.sublistView(output, 0, end);
   }
 
   /// Encode literals using 4 interleaved streams
   ///
-  /// Returns encoded data with 6-byte jump table prefix, or null on failure
+  /// Returns encoded data with 6-byte jump table prefix, or null if a literal
+  /// has no code
   Uint8List? encode4Streams(final Uint8List literals) {
     if (literals.length < 16) {
       return encodeSingle(literals);
     }
 
-    final seg = (literals.length + 3) ~/ 4;
-    final end1 = seg;
-    final end2 = seg * 2;
-    final end3 = seg * 3;
-
-    final s1 = encodeSingle(Uint8List.sublistView(literals, 0, end1));
-    final s2 = encodeSingle(Uint8List.sublistView(literals, end1, end2));
-    final s3 = encodeSingle(Uint8List.sublistView(literals, end2, end3));
-    final s4 = encodeSingle(Uint8List.sublistView(literals, end3));
-
-    if (s1 == null || s2 == null || s3 == null || s4 == null) {
-      return null;
+    // Segments of `seg` literals, the last taking the rest; each stream is
+    // written straight after the 6-byte jump table of the first three sizes
+    // (uint16 LE).
+    final length = literals.length;
+    final seg = (length + 3) ~/ 4;
+    final output = Uint8List(6 + _bound(length) + 4);
+    var offset = 6;
+    for (var stream = 0; stream < 4; stream++) {
+      final start = stream * seg;
+      final end = stream == 3 ? length : start + seg;
+      final next = _encodeStream(literals, start, end, output, offset);
+      if (next < 0) return null;
+      if (stream < 3) {
+        final size = next - offset;
+        output[stream * 2] = size & 0xFF;
+        output[stream * 2 + 1] = (size >> 8) & 0xFF;
+      }
+      offset = next;
     }
+    return Uint8List.sublistView(output, 0, offset);
+  }
 
-    // Build output with jump table
-    final total = 6 + s1.length + s2.length + s3.length + s4.length;
-    final output = Uint8List(total);
+  /// Bytes enough for [count] literals at the longest code length, without
+  /// the end mark.
+  int _bound(final int count) => (count * _maxBits + 7) >> 3;
 
-    // Jump table: 3 x uint16 LE sizes
-    output[0] = s1.length & 0xFF;
-    output[1] = (s1.length >> 8) & 0xFF;
-    output[2] = s2.length & 0xFF;
-    output[3] = (s2.length >> 8) & 0xFF;
-    output[4] = s3.length & 0xFF;
-    output[5] = (s3.length >> 8) & 0xFF;
-
-    var pos = 6;
-    output.setRange(pos, pos + s1.length, s1);
-    pos += s1.length;
-    output.setRange(pos, pos + s2.length, s2);
-    pos += s2.length;
-    output.setRange(pos, pos + s3.length, s3);
-    pos += s3.length;
-    output.setRange(pos, pos + s4.length, s4);
-
-    return output;
+  /// Writes `literals[start..end)` as one backward stream at [offset] in
+  /// [output]: last literal first, bits packed LSB-first, then an end-mark bit
+  /// and padding to a byte. Returns the offset after it, or -1 if a literal
+  /// has no code.
+  int _encodeStream(
+    final Uint8List literals,
+    final int start,
+    final int end,
+    final Uint8List output,
+    final int offset,
+  ) {
+    final codes = _codes;
+    final bits = _bits;
+    var position = offset;
+    // Below 8 + 11 bits, so exact on the web.
+    var container = 0;
+    var count = 0;
+    for (var i = end - 1; i >= start; i--) {
+      final symbol = literals[i];
+      final length = bits[symbol];
+      if (length == 0) return -1;
+      container |= codes[symbol] << count;
+      count += length;
+      while (count >= 8) {
+        output[position++] = container & 0xFF;
+        container >>= 8;
+        count -= 8;
+      }
+    }
+    container |= 1 << count; // end mark
+    output[position++] = container & 0xFF;
+    return position;
   }
 
   /// Get weights for encoding the Huffman table
@@ -241,27 +230,84 @@ class HuffmanEncoder {
     return weights;
   }
 
-  /// Encode weights header using direct encoding (4 bits per weight)
+  /// Encodes the Huffman tree description: the weights of symbols
+  /// `0..maxSym-1`, the last symbol's weight being implied (RFC 8878 section
+  /// 4.2.1). Up to 128 weights use the direct 4-bit representation; more are
+  /// FSE-compressed (section 4.2.1.2).
   ///
-  /// Returns the encoded header bytes
-  Uint8List encodeWeightsHeader(final int maxSym) {
+  /// Returns null when the weights cannot be FSE-compressed: all of them are
+  /// equal (no table of two or more symbols), or the result exceeds the
+  /// 127 bytes its header byte can describe.
+  Uint8List? encodeWeightsHeader(final int maxSym) {
     final weights = getWeights(maxSym);
     final count = maxSym; // Last symbol is implicit
+    return count <= 128 ? _direct(weights, count) : _compressed(weights, count);
+  }
 
-    // Direct encoding: header byte + packed weights
-    final size = 1 + (count + 1) ~/ 2;
-    final output = Uint8List(size);
-
-    // Header: count + 127
+  /// Header byte `127 + count`, then the weights packed two per byte, high
+  /// nibble first.
+  Uint8List _direct(final List<int> weights, final int count) {
+    final output = Uint8List(1 + (count + 1) ~/ 2);
     output[0] = 127 + count;
-
-    // Pack weights 2 per byte (high nibble first)
     for (var i = 0; i < count; i += 2) {
       final w1 = weights[i];
       final w2 = i + 1 < count ? weights[i + 1] : 0;
       output[1 + i ~/ 2] = (w1 << 4) | w2;
     }
-
     return output;
+  }
+
+  /// Header byte giving the size that follows, then an FSE table description
+  /// and a backward bitstream of the weights, coded with two states that share
+  /// the table.
+  Uint8List? _compressed(final List<int> weights, final int count) {
+    final counts = List<int>.filled(_maxWeight + 1, 0);
+    for (var i = 0; i < count; i++) {
+      counts[weights[i]]++;
+    }
+    if (counts.where((final c) => c > 0).length < 2) return null;
+
+    final fse = FseEncoder()..build(counts, _weightLog, _maxWeight);
+    final table = FseCompressionTable.create(
+      fse.normalized,
+      fse.tableLog,
+      _maxWeight,
+    );
+
+    // The decoder reads the first state, then the second, and decodes
+    // weights[0] with the first, weights[1] with the second, and so on. So
+    // even indices use the first state and odd ones the second. As the
+    // reference FSE_compress_usingCTable does, the last two weights set the
+    // initial states, the rest are encoded from the end, and the second state
+    // is flushed before the first.
+    final stream = BitStreamWriter();
+    var first = 0;
+    var second = 0;
+    for (var i = count - 1; i >= count - 2; i--) {
+      if (i.isEven) {
+        first = table.begin(weights[i]);
+      } else {
+        second = table.begin(weights[i]);
+      }
+    }
+    for (var i = count - 3; i >= 0; i--) {
+      if (i.isEven) {
+        first = table.encode(stream, first, weights[i]);
+      } else {
+        second = table.encode(stream, second, weights[i]);
+      }
+    }
+    table.finish(stream, second);
+    table.finish(stream, first);
+    stream.writeBits(1, 1); // end mark
+    final body = stream.toBytes();
+
+    final header = fse.encodeHeader();
+    final size = header.length + body.length;
+    if (size >= 128) return null;
+    return Uint8List(1 + size)
+      ..[0] = size
+      ..setRange(1, 1 + header.length, header)
+      ..setRange(1 + header.length, 1 + size, body);
   }
 }

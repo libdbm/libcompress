@@ -2,19 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import '../util/byte_utils.dart';
 import '../util/platform.dart';
-
-/// Represents a match with literal context for Zstd
-class ZstdMatch {
-  final int offset; // Distance back to the match
-  final int length; // Length of the match
-  final int literalLength; // Number of literals before this match
-
-  const ZstdMatch({
-    required this.offset,
-    required this.length,
-    required this.literalLength,
-  });
-}
+import 'sequences.dart';
 
 /// LZ77-style match finder for Zstd compression with hash chains
 ///
@@ -37,6 +25,9 @@ class MatchFinder {
     this.maxMatch = 65536,
     this.minMatch = 3,
   });
+
+  /// The sequences found by the last [findMatches], reused across calls.
+  final Sequences sequences = Sequences();
 
   // Reused across blocks, grown on demand, and reset per findMatches. Both are
   // sized to the data matched, so a small page does not allocate and clear
@@ -66,23 +57,25 @@ class MatchFinder {
     return (product >> (32 - _hashLog)) & _hashMask;
   }
 
-  /// Finds matches in `input[from..end)` using hash chains, and returns them
-  /// with the trailing literals. Positions in `[0, from)` are a history
-  /// prefix: they seed the hash so matches can reach back into them, but no
-  /// tokens are emitted for them. [end] defaults to `input.length`; pass a
-  /// smaller bound to match only a prefix of a larger (reused) buffer.
-  (List<ZstdMatch>, Uint8List) findMatches(
+  /// Finds matches in `input[from..end)` using hash chains, writes them to
+  /// [sequences], and returns the trailing literals. Positions in `[0, from)`
+  /// are a history prefix: they seed the hash so matches can reach back into
+  /// them, but no sequences are emitted for them. [end] defaults to
+  /// `input.length`; pass a smaller bound to match only a prefix of a larger
+  /// (reused) buffer.
+  Uint8List findMatches(
     final Uint8List input, {
     final int from = 0,
     final int? end,
   }) {
     _end = end ?? input.length;
     _view = ByteData.sublistView(input);
+    // Each match covers at least minMatch bytes of `[from, _end)`.
+    final sequences = this.sequences..clear((_end - from) ~/ minMatch);
     if (_end - from < minMatch) {
-      return (<ZstdMatch>[], Uint8List.sublistView(input, from, _end));
+      return Uint8List.sublistView(input, from, _end);
     }
 
-    final matches = <ZstdMatch>[];
     // Positions are below _end, so a chain of that many slots never aliases.
     final bits = math.max(8, (_end - 1).bitLength);
     _hashLog = math.min(_hashLimit, bits);
@@ -143,10 +136,7 @@ class MatchFinder {
 
       if (bestLen >= minMatch) {
         // Emit match
-        final litLen = pos - anchor;
-        matches.add(
-          ZstdMatch(offset: bestOffset, length: bestLen, literalLength: litLen),
-        );
+        sequences.add(bestOffset, bestLen, pos - anchor);
 
         // Update hash table for positions we're skipping
         for (var i = 1; i < bestLen && pos + i <= limit; i++) {
@@ -161,8 +151,7 @@ class MatchFinder {
     }
 
     // Trailing literals
-    final trailing = Uint8List.sublistView(input, anchor, _end);
-    return (matches, trailing);
+    return Uint8List.sublistView(input, anchor, _end);
   }
 
   void _update(
@@ -215,13 +204,15 @@ class MatchFinder {
   /// Extract literals for all matches from the input
   Uint8List extractLiterals(
     final Uint8List input,
-    final List<ZstdMatch> matches,
     final Uint8List trailing, {
     final int from = 0,
   }) {
+    final count = sequences.count;
+    final lengths = sequences.lengths;
+    final runs = sequences.literals;
     var total = trailing.length;
-    for (final match in matches) {
-      total += match.literalLength;
+    for (var i = 0; i < count; i++) {
+      total += runs[i];
     }
 
     // Single typed allocation with bulk copies, rather than per-match
@@ -229,13 +220,13 @@ class MatchFinder {
     final literals = Uint8List(total);
     var source = from; // read cursor into input (history prefix is skipped)
     var target = 0; // write cursor into literals
-    for (final match in matches) {
-      final count = match.literalLength;
-      if (count > 0) {
-        literals.setRange(target, target + count, input, source);
-        target += count;
+    for (var i = 0; i < count; i++) {
+      final run = runs[i];
+      if (run > 0) {
+        literals.setRange(target, target + run, input, source);
+        target += run;
       }
-      source += count + match.length;
+      source += run + lengths[i];
     }
     literals.setRange(target, target + trailing.length, trailing);
     return literals;

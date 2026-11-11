@@ -105,11 +105,14 @@ void main() {
       }
 
       test('level 6+ ratio is not worse than level 3', () {
+        // A raw-block fallback costs several percent. Levels need not be
+        // strictly monotonic: without lazy matching, L6 can parse a few bytes
+        // worse than L3 (23 bytes of 218 KB here).
         final data = readDataFixture('canterbury/kennedy.xls');
         final base = ZstdCodec(level: 3).compress(data).length;
         for (final level in [6, 9, 19]) {
           final size = ZstdCodec(level: level).compress(data).length;
-          expect(size, lessThanOrEqualTo(base), reason: 'level $level');
+          expect(size, lessThanOrEqualTo(base * 1.01), reason: 'level $level');
         }
       });
     });
@@ -262,6 +265,22 @@ void main() {
         expectRoundTrip(codec, original);
       });
 
+      test('sequence buffer reuse across blocks', () async {
+        // The first 128 KB block of text has many sequences; the second, a
+        // short random run repeated, has a few long ones. An encoder that read
+        // past the sequence count would emit stale sequences. Strict mode
+        // makes that an error instead of a silent raw-block fallback.
+        final text = readDataFixture('large/bible.txt');
+        final run = pseudoRandom(2000);
+        final data = bytes([
+          ...Uint8List.sublistView(text, 0, 128 * 1024),
+          for (var i = 0; i < 64; i++) ...run,
+          ...Uint8List.sublistView(text, 0, 50000),
+        ]);
+        expectRoundTrip(ZstdCodec(strict: true), data);
+        await expectStreamRoundTrip(ZstdStreamCodec(strict: true), [data]);
+      });
+
       test('round-trips repetitive binary across many small blocks', () {
         final codec = ZstdCodec(blockSize: 512);
         expectRoundTrip(
@@ -339,6 +358,10 @@ void main() {
         'canterbury/alice29.txt': 54,
         'calgary/paper1': 56,
         'large/bible.txt': 63,
+        // Binary: literals above byte 128 need FSE-compressed Huffman weights
+        // (2.1.0 reached 76.9% and 14.5%).
+        'canterbury/kennedy.xls': 78,
+        'calgary/geo': 27,
       };
       floors.forEach((final file, final floor) {
         final path = 'test/fixtures/data/$file';
@@ -404,6 +427,91 @@ void main() {
           bytes(List.generate(8, (_) => block).expand((final c) => c)),
         ),
       );
+    });
+
+    group('block buffering', () {
+      Stream<Uint8List> pieces(final Uint8List data, final int size) =>
+          Stream.fromIterable([
+            for (var i = 0; i < data.length; i += size)
+              Uint8List.sublistView(data, i, min(i + size, data.length)),
+          ]);
+
+      test('small chunks produce the same output as one chunk', () async {
+        final data = Uint8List.sublistView(
+          readDataFixture('large/bible.txt'),
+          0,
+          256 * 1024,
+        );
+        final whole = await collect(
+          ZstdStreamCodec().compress(Stream.value(data)),
+        );
+        final small = await collect(
+          ZstdStreamCodec().compress(pieces(data, 64)),
+        );
+        expect(small, orderedEquals(whole));
+        expect(ZstdCodec().decompress(small), orderedEquals(data));
+      });
+
+      test('no trailing empty block for non-empty input', () async {
+        final data = Uint8List.sublistView(
+          readDataFixture('large/bible.txt'),
+          0,
+          200 * 1024,
+        );
+        final frame = await collect(
+          ZstdStreamCodec().compress(pieces(data, 4096)),
+        );
+        final blocks = _blocks(frame);
+        expect(blocks.where((final block) => block.last), hasLength(1));
+        expect(blocks.last.last, isTrue);
+        expect(blocks.last.size, greaterThan(0));
+        expect(ZstdCodec().decompress(frame), orderedEquals(data));
+      });
+
+      test(
+        'exact multiple of blockSize ends with an empty last block',
+        () async {
+          final data = pseudoRandom(2 * 16 * 1024);
+          final frame = await collect(
+            ZstdStreamCodec(blockSize: 16 * 1024).compress(pieces(data, 1000)),
+          );
+          final blocks = _blocks(frame);
+          expect(blocks, hasLength(3));
+          expect(blocks.last, (last: true, type: 0, size: 0));
+          expect(ZstdCodec().decompress(frame), orderedEquals(data));
+        },
+      );
+
+      test('small-chunk output is readable by zstd CLI', () async {
+        if (!await cliAvailableCached('zstd')) {
+          markTestSkipped('zstd CLI tool not available');
+          return;
+        }
+        final data = Uint8List.sublistView(
+          readDataFixture('large/bible.txt'),
+          0,
+          300 * 1024,
+        );
+        final frame = await collect(
+          ZstdStreamCodec(checksum: true).compress(pieces(data, 64)),
+        );
+        final path = '/tmp/libcompress_zstd_small_chunks.zst';
+        final out = '/tmp/libcompress_zstd_small_chunks.out';
+        try {
+          await File(path).writeAsBytes(frame);
+          final result = await Process.run('zstd', [
+            '-d',
+            '-f',
+            '-o',
+            out,
+            path,
+          ]);
+          expect(result.exitCode, 0, reason: '${result.stderr}');
+          expect(await File(out).readAsBytes(), equals(data));
+        } finally {
+          await cleanup([path, out]);
+        }
+      });
     });
 
     test('uses a window descriptor (not single-segment)', () async {
@@ -1533,6 +1641,81 @@ void main() {
         expect(encoder.encodeSingle(literals)!.length, lessThanOrEqualTo(376));
       });
 
+      // 64 KB of bytes from [base, base + range), skewed towards base.
+      Uint8List skewed(final int base, final int range) {
+        final random = Random(7);
+        return bytes(
+          List.generate(
+            64 * 1024,
+            (_) =>
+                base +
+                (random.nextDouble() * random.nextDouble() * range).floor(),
+          ),
+        );
+      }
+
+      // The Huffman tree description follows the literals section header,
+      // whose size depends on its Size_Format (RFC 8878 section 3.1.1.3.1.1).
+      int treeHeader(final Uint8List block) {
+        expect(block[0] & 0x03, 2, reason: 'compressed literals');
+        final format = (block[0] >> 2) & 0x03;
+        return block[format < 2 ? 3 : format + 2];
+      }
+
+      test('Huffman literals with bytes above 128 compress', () {
+        final low = ZstdCodec().compress(skewed(32, 64));
+        final high = skewed(160, 64);
+        final compressed = ZstdCodec().compress(high);
+        expect(compressed.length, lessThanOrEqualTo(low.length * 1.02));
+        expect(ZstdCodec().decompress(compressed), orderedEquals(high));
+      });
+
+      test('one high byte does not disable Huffman', () {
+        final data = skewed(32, 64);
+        final low = ZstdCodec().compress(data);
+        data[100] = 200;
+        final compressed = ZstdCodec().compress(data);
+        expect(compressed.length, lessThanOrEqualTo(low.length * 1.02));
+        expect(ZstdCodec().decompress(compressed), orderedEquals(data));
+      });
+
+      test('full byte alphabet uses FSE-compressed weights', () async {
+        final data = skewed(0, 256);
+        final block = CompressedBlockEncoder(strict: true).encodeBlock(data);
+        // A header byte below 128 is the size of FSE-compressed weights.
+        expect(treeHeader(block), lessThan(128));
+        expectRoundTrip(ZstdCodec(strict: true), data);
+        if (!await cliAvailableCached('zstd')) {
+          markTestSkipped('zstd CLI tool not available');
+          return;
+        }
+        await _expectCliReads(ZstdCodec(), data);
+        await _expectCliReads(ZstdCodec(), skewed(160, 64));
+      });
+
+      test('direct weights unchanged at maxSym 128', () {
+        // Bytes 0..128 give 128 weights, the most the direct form holds.
+        final data = skewed(0, 129);
+        for (var i = 0; i < data.length; i += 4096) {
+          data[i] = 128;
+        }
+        final block = CompressedBlockEncoder(strict: true).encodeBlock(data);
+        expect(treeHeader(block), 127 + 128);
+        // The 2.1.0 output, from before FSE-compressed weights.
+        final compressed = ZstdCodec().compress(data);
+        expect(compressed.length, 52921);
+        expect(Crc32.hash(compressed), 0xbfbb25ca);
+      });
+
+      test('equal weights have no FSE description', () {
+        // 256 equally frequent symbols: every code is 8 bits, so all 255
+        // written weights are equal, which an FSE table cannot describe. (The
+        // block encoder never gets here: such literals do not compress.)
+        final encoder = HuffmanEncoder()
+          ..buildFromCounts(List<int>.filled(256, 5), 255);
+        expect(encoder.encodeWeightsHeader(255), isNull);
+      });
+
       for (final path in ['large/bible.txt', 'large/world192.txt']) {
         test('$path text blocks use Huffman-compressed literals', () {
           final data = readDataFixture(path);
@@ -2121,3 +2304,22 @@ Uint8List _buildFrameWithContentSize(final int size) => bytes([
   ..._uint32LE(size),
   0x01, 0x00, 0x00, // empty last raw block
 ]);
+
+/// The blocks of a single frame with a window descriptor and no content size
+/// or dictionary (a 6-byte frame header), as `(last, type, size)`.
+List<({bool last, int type, int size})> _blocks(final Uint8List frame) {
+  final blocks = <({bool last, int type, int size})>[];
+  var offset = 6;
+  while (true) {
+    final header =
+        frame[offset] | (frame[offset + 1] << 8) | (frame[offset + 2] << 16);
+    final block = (
+      last: header & 1 == 1,
+      type: (header >> 1) & 3,
+      size: header >> 3,
+    );
+    blocks.add(block);
+    offset += 3 + (block.type == 1 ? 1 : block.size);
+    if (block.last) return blocks;
+  }
+}

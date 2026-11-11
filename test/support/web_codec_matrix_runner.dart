@@ -120,7 +120,21 @@ Map<String, Uint8List> _dataCases() {
       List<int>.generate(1024, (final index) => (index * 37 + 11) & 0xff),
     ),
     'large': _large(),
+    'skewed': _skewed(),
   };
+}
+
+/// 64 KB over the whole byte range, skewed towards low values (the product of
+/// two pseudo-random bytes), so Zstd Huffman literals need FSE-compressed
+/// weights. Products stay below 2^53, as in [_large].
+Uint8List _skewed() {
+  final data = Uint8List(64 * 1024);
+  var seed = 11;
+  int next() => seed = (seed * 48271) % 2147483647;
+  for (var index = 0; index < data.length; index++) {
+    data[index] = (((next() >> 8) & 0xff) * ((next() >> 8) & 0xff)) >> 8;
+  }
+  return data;
 }
 
 /// 600 KB alternating 1500-byte pseudo-random runs with repeats of them, so

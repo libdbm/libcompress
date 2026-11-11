@@ -44,12 +44,13 @@ class DeflateEncoder {
     var offset = 0;
     while (offset < data.length) {
       final limit = math.min(offset + blockSize, data.length);
-      final (tokens, end) = _lz77.tokenize(data, offset, limit);
+      final (tokens, count, end) = _lz77.tokenize(data, offset, limit);
       final isFinal = end >= data.length;
 
       writeBlock(
         output,
         tokens,
+        count,
         Uint8List.sublistView(data, offset, end),
         isFinal: isFinal,
       );
@@ -95,10 +96,12 @@ class DeflateEncoder {
     }
   }
 
-  /// Writes a block using fixed Huffman codes from precomputed [tokens].
+  /// Writes a block using fixed Huffman codes from the first [count] packed
+  /// [tokens] (see [matchToken]).
   void writeFixedBlock(
     final BitStreamWriter output,
-    final List<Token> tokens, {
+    final Uint32List tokens,
+    final int count, {
     required final bool isFinal,
   }) {
     // Block header: BFINAL (1 bit) + BTYPE (2 bits = 01 for fixed)
@@ -109,47 +112,41 @@ class DeflateEncoder {
     final literalCodes = _fixedLiteralCodes;
     final distanceCodes = _fixedDistanceCodes;
 
-    for (final token in tokens) {
-      if (token is LiteralToken) {
-        _emit(output, literalCodes, token.value);
-      } else if (token is MatchToken) {
-        final lengthCode = encodeLength(token.length);
-        _emit(output, literalCodes, lengthCode.code);
-        if (lengthCode.extraBits > 0) {
-          output.writeBits(lengthCode.extraValue, lengthCode.extraBits);
-        }
-
-        final distanceCode = encodeDistance(token.distance);
-        _emit(output, distanceCodes, distanceCode.code);
-        if (distanceCode.extraBits > 0) {
-          output.writeBits(distanceCode.extraValue, distanceCode.extraBits);
-        }
-      }
-    }
+    _writeTokens(output, tokens, count, literalCodes, distanceCodes);
 
     // End-of-block symbol
     _emit(output, literalCodes, endBlock);
   }
 
-  /// Writes a block using dynamic Huffman codes from precomputed [tokens].
+  /// Writes a block using dynamic Huffman codes from the first [count] packed
+  /// [tokens] (see [matchToken]).
   void writeDynamicBlock(
     final BitStreamWriter output,
-    final List<Token> tokens, {
+    final Uint32List tokens,
+    final int count, {
     required final bool isFinal,
   }) {
-    _writeDynamic(output, tokens, _Tables(_Counts(tokens)), isFinal: isFinal);
+    _writeDynamic(
+      output,
+      tokens,
+      count,
+      _Tables(_Counts(tokens, count)),
+      isFinal: isFinal,
+    );
   }
 
-  /// Writes [tokens], which encode the bytes [raw], as whichever of a stored,
+  /// Writes the first [count] packed [tokens] (see [matchToken]), which
+  /// encode the bytes [raw], as whichever of a stored,
   /// fixed or dynamic Huffman block is smallest, as zlib's `_tr_flush_block`
   /// does. Stored data over 65535 bytes goes in several stored blocks.
   void writeBlock(
     final BitStreamWriter output,
-    final List<Token> tokens,
+    final Uint32List tokens,
+    final int count,
     final Uint8List raw, {
     required final bool isFinal,
   }) {
-    final counts = _Counts(tokens);
+    final counts = _Counts(tokens, count);
     final tables = _Tables(counts);
     // Sizes in bytes, each with the 3-bit block header.
     final custom =
@@ -179,16 +176,18 @@ class DeflateEncoder {
         offset = end;
       } while (offset < raw.length);
     } else if (fixed <= custom) {
-      writeFixedBlock(output, tokens, isFinal: isFinal);
+      writeFixedBlock(output, tokens, count, isFinal: isFinal);
     } else {
-      _writeDynamic(output, tokens, tables, isFinal: isFinal);
+      _writeDynamic(output, tokens, count, tables, isFinal: isFinal);
     }
   }
 
-  /// Writes [tokens] as a dynamic Huffman block with code lengths [tables].
+  /// Writes the first [count] packed [tokens] as a dynamic Huffman block with
+  /// code lengths [tables].
   void _writeDynamic(
     final BitStreamWriter output,
-    final List<Token> tokens,
+    final Uint32List tokens,
+    final int count,
     final _Tables tables, {
     required final bool isFinal,
   }) {
@@ -200,27 +199,44 @@ class DeflateEncoder {
     final distanceCodes = _buildCodes(tables.distances);
     _writeDescription(output, tables.description);
 
-    // Encode tokens using dynamic Huffman codes
-    for (final token in tokens) {
-      if (token is LiteralToken) {
-        _emit(output, literalCodes, token.value);
-      } else if (token is MatchToken) {
-        final lengthCode = encodeLength(token.length);
-        _emit(output, literalCodes, lengthCode.code);
-        if (lengthCode.extraBits > 0) {
-          output.writeBits(lengthCode.extraValue, lengthCode.extraBits);
-        }
-
-        final distanceCode = encodeDistance(token.distance);
-        _emit(output, distanceCodes, distanceCode.code);
-        if (distanceCode.extraBits > 0) {
-          output.writeBits(distanceCode.extraValue, distanceCode.extraBits);
-        }
-      }
-    }
+    _writeTokens(output, tokens, count, literalCodes, distanceCodes);
 
     // End-of-block symbol
     _emit(output, literalCodes, endBlock);
+  }
+
+  /// Writes the first [count] packed [tokens]: each literal as its code, each
+  /// match as its length code and extra bits, then its distance code and
+  /// extra bits.
+  void _writeTokens(
+    final BitStreamWriter output,
+    final Uint32List tokens,
+    final int count,
+    final _HuffmanCodes literalCodes,
+    final _HuffmanCodes distanceCodes,
+  ) {
+    for (var i = 0; i < count; i++) {
+      final token = tokens[i];
+      final distance = token >> 9;
+      if (distance == 0) {
+        _emit(output, literalCodes, token);
+        continue;
+      }
+      final length = token & 0x1FF;
+      final lengthSymbol = lengthCode(length);
+      _emit(output, literalCodes, lengthSymbol);
+      final lengthBits = lengthExtraBits[lengthSymbol - 257];
+      if (lengthBits > 0) {
+        output.writeBits(length - lengthBase[lengthSymbol - 257], lengthBits);
+      }
+
+      final distanceSymbol = distanceCode(distance);
+      _emit(output, distanceCodes, distanceSymbol);
+      final distanceBits = distanceExtraBits[distanceSymbol];
+      if (distanceBits > 0) {
+        output.writeBits(distance - distanceBase[distanceSymbol], distanceBits);
+      }
+    }
   }
 
   /// Writes Huffman tree descriptions to the output stream
@@ -461,17 +477,18 @@ class _CodeLengthSymbol {
 /// Symbol frequencies of a block's tokens, with the end-of-block symbol, and
 /// the number of extra bits their lengths and distances take.
 class _Counts {
-  _Counts(final List<Token> tokens) {
-    for (final token in tokens) {
-      if (token is LiteralToken) {
-        literals[token.value]++;
-      } else if (token is MatchToken) {
-        final length = encodeLength(token.length);
-        literals[length.code]++;
-        final distance = encodeDistance(token.distance);
-        distances[distance.code]++;
-        extra += length.extraBits + distance.extraBits;
+  _Counts(final Uint32List tokens, final int count) {
+    for (var i = 0; i < count; i++) {
+      final token = tokens[i];
+      if (token >> 9 == 0) {
+        literals[token]++;
+        continue;
       }
+      final length = lengthCode(token & 0x1FF);
+      literals[length]++;
+      final distance = distanceCode(token >> 9);
+      distances[distance]++;
+      extra += lengthExtraBits[length - 257] + distanceExtraBits[distance];
     }
     literals[endBlock]++;
   }

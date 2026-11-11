@@ -33,6 +33,24 @@ void main() {
       });
     }
 
+    test('token buffer reuse across blocks', () {
+      // A block of noise fills the token buffer (one literal per byte); the
+      // zeros after it need only a few tokens, so a writer that read past the
+      // token count would emit stale literals.
+      final data = bytes([
+        ...pseudoRandom(70000),
+        ...Uint8List(70000),
+        ...text,
+      ]);
+      for (final level in [1, 6]) {
+        expect(
+          raw.decode(DeflateCodec(level: level).compress(data)),
+          equals(data),
+          reason: 'level $level',
+        );
+      }
+    });
+
     test('reads what zlib writes', () {
       for (final data in [text, noise]) {
         expect(
