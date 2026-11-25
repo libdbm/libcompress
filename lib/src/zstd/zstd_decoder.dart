@@ -114,11 +114,15 @@ class ZstdDecoder {
   /// Set to null for unlimited (not recommended for untrusted input)
   final int? maxSize;
 
+  /// Largest declared frame window accepted, in bytes.
+  final int window;
+
   /// Creates a decoder with optional size limit
   ///
   /// [maxSize] defaults to [defaultMaxSize] (256MB).
   /// Set to null to allow unlimited output (use with trusted input only).
-  ZstdDecoder({this.maxSize = defaultMaxSize});
+  /// [window] defaults to [zstdDefaultWindow] (128MB).
+  ZstdDecoder({this.maxSize = defaultMaxSize, this.window = zstdDefaultWindow});
 
   Uint8List decompress(final Uint8List data) => guardFormat(
     () => _decompress(data),
@@ -194,6 +198,8 @@ class ZstdDecoder {
     final ZstdFrameHeader header,
     final int? remaining,
   ) {
+    checkWindow(header.windowSize, window);
+
     // The frame's share of maxSize (never more than maxSize itself).
     final limit = remaining;
 
@@ -357,10 +363,14 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     this.maxSize,
     required this.maxBufferSize,
     this.verified = false,
+    this.window = zstdDefaultWindow,
   });
 
   final int? maxSize;
   final int maxBufferSize;
+
+  /// Largest declared frame window accepted, in bytes.
+  final int window;
 
   /// When true, a frame's output is withheld until its content checksum and
   /// size validate, then released (memory rises to one frame's output, bounded
@@ -442,6 +452,7 @@ class ZstdIncrementalDecoder implements IncrementalDecoder {
     }
     final header = start.frame!;
     final windowSize = header.windowSize;
+    checkWindow(windowSize, this.window);
     final contentSize = header.contentSize;
 
     final frameLimit = maxSize != null ? maxSize! - _total : null;

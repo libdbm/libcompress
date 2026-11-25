@@ -32,8 +32,8 @@ No native dependencies - works on all Dart platforms (VM and web).
 - **Zstd Compression**: Zstandard implementation (RFC 8878)
   - Compressed blocks with Huffman/FSE entropy coding
   - Sequence encoding (literal lengths, offsets, match lengths)
-  - Repeat offsets decoded (the encoder emits absolute offsets)
-  - Hash chain match finding, with the search depth set by the level
+  - Repeat offsets, decoded and encoded
+  - Double-fast match finding at levels 1-3, lazy hash chain matching above, with the search depth set by the level
   - Compression levels 1-22
   - Optional XXH64 content checksums
   - Content above 8MB is written with an 8MB window rather than as a single segment
@@ -173,9 +173,10 @@ dart run :libcompress --lz4 -9 --block-size 1M input.txt output.lz4
 
 ### Zstd
 - FSE (Finite State Entropy) encoding
-- Huffman-compressed literals
-- Hash chain match finding (depth 4-1024 based on level)
-- Repeat offsets are decoded; the encoder emits absolute offsets only
+- Huffman-compressed literals; RLE literals, and literals that reuse the previous block's Huffman tree
+- Double-fast match finding at levels 1-3 (8- and 5-byte hashes); hash chains (depth 48-1024) with lazy matching
+  scored as zstd does at levels 4-22
+- Repeat offsets are encoded as well as decoded, and matches reach back across the blocks of a frame
 - 128KB maximum block size per spec
 - Huffman and sequence bitstreams must be consumed exactly (RFC 8878), so corrupt frames are rejected rather than
   decoded to wrong bytes

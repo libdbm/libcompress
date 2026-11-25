@@ -32,39 +32,21 @@ class SymbolStats {
   /// Check if RLE mode is beneficial (single dominant symbol)
   bool get isRle => distinct == 1;
 
-  /// Check if distribution is suitable for predefined tables
-  bool shouldUsePredefined(
-    final List<int> predefined,
-    final int predefinedLog,
-  ) {
-    if (total < 16) return true; // Too few samples
-
-    // Compare entropy of custom vs predefined
-    final custom = _entropy(counts, total);
-    final predefinedEntropy = _estimatePredefinedEntropy(
-      predefined,
-      predefinedLog,
-    );
-
-    // Use predefined if custom isn't significantly better (>5% improvement)
-    return custom >= predefinedEntropy * 0.95;
-  }
-
-  double _entropy(final List<int> freq, final int t) {
-    if (t == 0) return 0;
-    var h = 0.0;
-    for (final f in freq) {
-      if (f > 0) {
-        final p = f / t;
-        h -= p * (math.log(p) / math.ln2);
-      }
+  /// The estimated bits to code the counted symbols with the normalized
+  /// [table] of accuracy log [accuracy]: each symbol costs `accuracy -
+  /// log2(weight)` bits, a `-1` weight counting as 1. A counted symbol absent
+  /// from the table makes the cost infinite.
+  double cost(final List<int> table, final int accuracy) {
+    var bits = 0.0;
+    for (var symbol = 0; symbol < counts.length; symbol++) {
+      if (counts[symbol] == 0) continue;
+      final weight = symbol < table.length ? table[symbol] : 0;
+      if (weight == 0) return double.infinity;
+      bits +=
+          counts[symbol] *
+          (accuracy - math.log(weight < 0 ? 1 : weight) / math.ln2);
     }
-    return h;
-  }
-
-  double _estimatePredefinedEntropy(final List<int> norm, final int log) {
-    final size = 1 << log;
-    return _entropy(norm, size);
+    return bits;
   }
 }
 
@@ -105,74 +87,62 @@ class FseEncoder {
     );
   }
 
-  /// Build FSE encoding table from symbol frequencies
+  /// Normalizes `freq[0..maxSym]` to a table: the log follows the number of
+  /// samples, as zstd's `FSE_optimalTableLog` does, capped at [maxLog]; counts
+  /// are rounded to the nearest value (at least 1) and the remainder goes to
+  /// the most frequent symbol.
   void build(final List<int> freq, final int maxLog, final int maxSym) {
     maxSymbol = maxSym;
-
-    // Calculate total frequency
+    _header = null;
     var total = 0;
     var distinct = 0;
+    var largest = 0;
     for (var i = 0; i <= maxSym; i++) {
       if (i < freq.length && freq[i] > 0) {
         total += freq[i];
         distinct++;
+        if (freq[i] > freq[largest]) largest = i;
       }
     }
-
     if (total == 0) {
       throw ArgumentError('No symbols to encode');
     }
-
-    // Calculate optimal table log (minimum of maxLog and log2(total))
-    tableLog = _optimalLog(total, distinct, maxLog);
-    final size = 1 << tableLog;
-
-    // Normalize frequencies to sum to tableSize
-    normalized = _normalize(freq, total, size, maxSym);
-  }
-
-  int _optimalLog(final int total, final int distinct, final int maxLog) {
-    var log = 5; // FSE_MIN_TABLELOG
-    while (log < maxLog && (1 << log) < distinct * 2) {
+    var log = math.min(
+      maxLog,
+      math.max(5, math.max(1, total - 1).bitLength - 2),
+    );
+    while ((1 << log) < distinct && log < maxLog) {
       log++;
     }
-    return math.min(log, maxLog);
-  }
-
-  List<int> _normalize(
-    final List<int> freq,
-    final int total,
-    final int size,
-    final int maxSym,
-  ) {
+    tableLog = log;
+    final size = 1 << log;
     final norm = List<int>.filled(maxSym + 1, 0);
     var assigned = 0;
-
-    // Proportional counts, rounded up, so every used symbol gets at least 1
-    // and together they cover at least the table.
     for (var i = 0; i <= maxSym; i++) {
       final f = i < freq.length ? freq[i] : 0;
       if (f > 0) {
-        final count = (f * size + total - 1) ~/ total;
+        final count = math.max(1, (f * size + total ~/ 2) ~/ total);
         assigned += count;
         norm[i] = count;
       }
     }
-
-    // Take back the excess from rounding up.
-    var diff = size - assigned;
-    if (diff < 0) {
-      // Remove from least important (but keep at least 1)
-      for (var i = maxSym; i >= 0 && diff < 0; i--) {
-        if (norm[i] > 1) {
-          final reduce = math.min(-diff, norm[i] - 1);
-          norm[i] -= reduce;
-          diff += reduce;
+    var difference = size - assigned;
+    if (norm[largest] + difference >= 1) {
+      norm[largest] += difference;
+    } else {
+      while (difference < 0) {
+        var biggest = -1;
+        for (var i = 0; i <= maxSym; i++) {
+          if (norm[i] > 1 && (biggest < 0 || norm[i] > norm[biggest])) {
+            biggest = i;
+          }
         }
+        final reduce = math.min(-difference, norm[biggest] - 1);
+        norm[biggest] -= reduce;
+        difference += reduce;
       }
     }
-
-    return norm;
+    normalized = norm;
   }
 
   /// Encode normalized counters to bitstream per RFC 8878 Section 4.1.1
@@ -305,51 +275,53 @@ class EncodingModeSelector {
       llStats,
       llPredefined,
       llPredefinedLog,
+      _literalLog,
       35,
     );
     final (ofMode, ofEnc) = _selectOne(
       ofStats,
       ofPredefined,
       ofPredefinedLog,
+      _offsetLog,
       31,
     );
     final (mlMode, mlEnc) = _selectOne(
       mlStats,
       mlPredefined,
       mlPredefinedLog,
+      _matchLog,
       52,
     );
 
     return (llMode, ofMode, mlMode, llEnc, ofEnc, mlEnc);
   }
 
+  /// Largest accuracy logs of custom literal-length, offset and match-length
+  /// tables, as zstd.
+  static const int _literalLog = 9;
+  static const int _offsetLog = 8;
+  static const int _matchLog = 9;
+
+  /// Mode 1 (RLE) for a single symbol; otherwise whichever of 0 (predefined)
+  /// and 2 (custom, its description included) costs fewer estimated bits.
   (int, FseEncoder?) _selectOne(
     final SymbolStats stats,
     final List<int> predefined,
     final int predefinedLog,
+    final int most,
     final int maxSym,
   ) {
-    // Mode 1: RLE if single symbol
     if (stats.isRle) {
       return (1, null);
     }
-
-    // Check if predefined is good enough
-    if (stats.shouldUsePredefined(predefined, predefinedLog)) {
+    final fixed = stats.cost(predefined, predefinedLog);
+    if (stats.total < 16) {
       return (0, null);
     }
-
-    // Mode 2: Build custom FSE table
-    final enc = FseEncoder();
-    enc.build(stats.counts, predefinedLog, maxSym);
-
-    // Verify custom table overhead isn't too high
-    final header = enc.encodeHeader();
-    if (header.length > 12) {
-      // Custom table overhead too high, use predefined
-      return (0, null);
-    }
-
-    return (2, enc);
+    final enc = FseEncoder()..build(stats.counts, most, maxSym);
+    final custom =
+        stats.cost(enc.normalized, enc.tableLog) +
+        enc.encodeHeader().length * 8;
+    return custom < fixed ? (2, enc) : (0, null);
   }
 }

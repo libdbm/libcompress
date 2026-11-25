@@ -1,3 +1,62 @@
+## 2.3.0
+
+### Added
+
+- **Zstd `window` option** on `ZstdCodec`, `ZstdStreamCodec` and `ZstdOptions`: the largest frame window a decoder
+  accepts, default `zstdDefaultWindow` (128 MB, the reference zstd's default `windowLogMax` of 27). A frame that
+  declares a larger window throws `LimitException` with `limit` set to the window cap. Before, the stream decoder kept
+  up to `maxSize` of history, or without limit when `maxSize` was null. Single-segment frames, which declare no window,
+  are bounded by `maxSize` as before. Frames written with `zstd --long=28` or more need a larger `window`.
+
+### Changed
+
+Compressed output changes for Zstd, Snappy and LZ4 level 1. It stays valid in every format, and 2.2.0 and the
+reference tools decode it, but code that compares compressed bytes with stored output will see differences. GZIP,
+DEFLATE and LZ4 levels 2-9 output is unchanged.
+
+- **Zstd output** is 14-18% smaller on the test corpus (level 1 17.4%, level 3 14.0%, level 6 16.9%, level 9 17.2%,
+  level 19 18.2%; `kennedy.xls` about 50%; `html` at level 3 is 5.5% larger). The encoder now works as zstd's does:
+  - repeat offsets are tracked as the decoder updates them, tried at every position and coded as repeats;
+  - one-shot frames keep the match tables across blocks, so matches reach up to 4 MB back into earlier blocks;
+  - levels 1-3 use zstd's double-fast search (8- and 5-byte hashes, skipping ahead after misses); levels 4 and up
+    use hash chains with lazy matching scored by zstd's gain, a per-level length that ends a search, and 3-byte
+    matches from level 6;
+  - literals are written as an RLE section when they are one byte, and reuse the previous block's Huffman tree
+    (treeless section) when that is cheaper; a block with no matches still codes its literals;
+  - custom FSE tables use accuracy logs up to 9, 8 and 9, normalized by rounding, and are chosen over the predefined
+    ones by estimated cost.
+
+  A block written raw or RLE leaves the encoder's repeat offsets and Huffman tree as they were, as it leaves the
+  decoder's. Compression at level 3 is 85-180% faster on text and binary data, up to 10x faster on incompressible
+  data, and 2.3x faster on input that is all RLE blocks; 1 KB pages are unchanged. The new output uses custom FSE
+  tables more often. With the faster table construction (next entry), it decompresses 14-43% faster than 2.2.0
+  output on text and 1 KB pages, and 6-13% slower on 8 KB and 64 KB pages and `geo.protodata`.
+- **Faster Zstd decoding of custom FSE tables**: sequence decoding tables are built straight into typed arrays, with
+  zstd's spread, instead of through one object per state. Frames with custom tables (as the zstd CLI and this encoder
+  write them) decode 14-20% faster on text, 21-29% faster on 1 KB and 64 KB pages, 39% faster on `geo.protodata` and
+  71% faster on 8 KB pages.
+- **LZ4 level 1 output** (raw, frame, Hadoop and streams): the encoder is the reference LZ4 fast loop, as
+  aircompressor implements it: a 5-byte hash into 4,096 entries (65,536 for streams), a search step that grows after
+  every 64 misses, matches extended backwards, and a match tried at once after each match. Streams keep one table
+  across blocks instead of re-hashing the 64 KB window for every block. Incompressible input compresses 10-40x faster
+  and 8-64 KB pages 34-91% faster; text is about 20% slower. Corpus output is 3.3% smaller in total, from 18% smaller
+  (`E.coli`) to 15% larger (`urls.10K`; `world192.txt` 14%).
+- **Snappy output**: the match hash keeps the top bits of the product, as the reference Snappy and aircompressor do,
+  instead of the low bits. Output is within 1% per corpus file and 0.1% smaller in total.
+- **Faster DEFLATE/GZIP decoding**: each Huffman table entry now holds the code length, the extra-bit count and the
+  literal or the length/distance base, so a match needs no second table lookup (libdeflate's layout). Decoding text is
+  8-20% faster, and 8 KB and 64 KB pages 11-20% faster; 1 KB pages and incompressible data are unchanged.
+- **DEFLATE/GZIP encoder**: the distance-code table is zlib's two-part 512-entry table instead of 32,769 entries.
+  Output is byte-identical; no measurable speed change.
+
+### Fixed
+
+- **Zstd**: FSE-compressed Huffman weights whose bitstream is too short for the two initial states are rejected as
+  corrupt, as the reference decoder does. Before, the weights were decoded from zero bits and the block failed later
+  with an unrelated error, or not at all.
+- **Zstd**: a Huffman weight description that runs past the end of its literals section is rejected while the weights
+  are parsed.
+
 ## 2.2.0
 
 ### Changed

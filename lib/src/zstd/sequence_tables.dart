@@ -7,29 +7,11 @@ import 'zstd_common.dart';
 
 enum SequenceComponent { literalLength, offset, matchLength }
 
-class SequenceSymbol {
-  final int symbol;
-  final int baseValue;
-  final int additionalBits;
-  final int numberOfBits;
-  final int nextState;
-
-  const SequenceSymbol({
-    required this.symbol,
-    required this.baseValue,
-    required this.additionalBits,
-    required this.numberOfBits,
-    required this.nextState,
-  });
-}
-
-/// Represents an FSE decoding table for sequence components (LL/Off/ML).
-///
-/// Besides [entries], the table is held as one typed array per field, indexed
-/// by state, so the sequence loop reads plain integers instead of objects.
+/// An FSE decoding table for one sequence component (LL/Off/ML), held as one
+/// typed array per field, indexed by state, so the sequence loop reads plain
+/// integers.
 class SequenceCodingTable {
   final int tableLog;
-  final List<SequenceSymbol> entries;
   final bool isPredefined;
 
   /// Symbol per state.
@@ -47,56 +29,95 @@ class SequenceCodingTable {
   /// Baseline of the next state, per state.
   final Uint16List nexts;
 
-  SequenceCodingTable._({
-    required this.tableLog,
-    required this.entries,
-    required this.isPredefined,
-  }) : symbols = Uint8List.fromList([for (final e in entries) e.symbol]),
-       bases = Uint32List.fromList([for (final e in entries) e.baseValue]),
-       extras = Uint8List.fromList([for (final e in entries) e.additionalBits]),
-       widths = Uint8List.fromList([for (final e in entries) e.numberOfBits]),
-       nexts = Uint16List.fromList([for (final e in entries) e.nextState]);
+  SequenceCodingTable._(
+    this.tableLog,
+    this.isPredefined,
+    this.symbols,
+    this.bases,
+    this.extras,
+    this.widths,
+    this.nexts,
+  );
 
+  /// A table of one state that always decodes [symbol] (RLE mode).
   factory SequenceCodingTable.rleSymbol(
     final SequenceComponent component,
-    final int symbolIndex,
+    final int symbol,
   ) {
+    final (baseTable, bitTable) = _tablesFor(component);
     return SequenceCodingTable._(
-      tableLog: 0,
-      entries: [
-        _symbolForComponent(
-          component,
-          symbolIndex,
-          numberOfBits: 0,
-          nextState: 0,
-        ),
-      ],
-      isPredefined: false,
+      0,
+      false,
+      Uint8List(1)..[0] = symbol,
+      Uint32List(1)..[0] = baseTable[symbol],
+      Uint8List(1)..[0] = bitTable[symbol],
+      Uint8List(1),
+      Uint16List(1),
     );
   }
 
-  factory SequenceCodingTable.fromFse(
-    final int tableLog,
-    final List<FseStateEntry> entries,
+  /// The decoding table of the normalized [counts] at accuracy log [log]
+  /// (RFC 8878 section 4.1.1), built straight into the typed arrays: symbols
+  /// with a count of -1 take the last states, the rest are spread with the
+  /// standard step over the states below them, and each state gets the bits
+  /// and baseline of its next state.
+  ///
+  /// [readNormalizedCounts] only returns counts that fill the table exactly,
+  /// and the step is odd, so the spread visits each free state once.
+  factory SequenceCodingTable.fromCounts(
+    final List<int> counts,
+    final int log,
     final SequenceComponent component, {
     final bool isPredefined = false,
   }) {
-    final symbols = List<SequenceSymbol>.generate(entries.length, (
-      final index,
-    ) {
-      final entry = entries[index];
-      return _symbolForComponent(
-        component,
-        entry.symbol,
-        numberOfBits: entry.numberOfBits,
-        nextState: entry.baseline,
-      );
-    }, growable: false);
+    final (baseTable, bitTable) = _tablesFor(component);
+    final size = 1 << log;
+    final mask = size - 1;
+    final step = (size >> 1) + (size >> 3) + 3;
+    final symbols = Uint8List(size);
+    final next = Int32List(counts.length);
 
+    var high = size - 1;
+    for (var symbol = 0; symbol < counts.length; symbol++) {
+      if (counts[symbol] == -1) {
+        symbols[high--] = symbol;
+        next[symbol] = 1;
+      }
+    }
+    var position = 0;
+    for (var symbol = 0; symbol < counts.length; symbol++) {
+      final frequency = counts[symbol];
+      if (frequency <= 0) continue;
+      next[symbol] = frequency;
+      for (var i = 0; i < frequency; i++) {
+        symbols[position] = symbol;
+        do {
+          position = (position + step) & mask;
+        } while (position > high);
+      }
+    }
+
+    final bases = Uint32List(size);
+    final extras = Uint8List(size);
+    final widths = Uint8List(size);
+    final nexts = Uint16List(size);
+    for (var state = 0; state < size; state++) {
+      final symbol = symbols[state];
+      final following = next[symbol]++;
+      final bits = log - (following.bitLength - 1);
+      bases[state] = baseTable[symbol];
+      extras[state] = bitTable[symbol];
+      widths[state] = bits;
+      nexts[state] = (following << bits) - size;
+    }
     return SequenceCodingTable._(
-      tableLog: tableLog,
-      entries: List<SequenceSymbol>.unmodifiable(symbols),
-      isPredefined: isPredefined,
+      log,
+      isPredefined,
+      symbols,
+      bases,
+      extras,
+      widths,
+      nexts,
     );
   }
 
@@ -117,72 +138,19 @@ class _SequenceTableResult {
   _SequenceTableResult(this.table, this.nextOffset);
 }
 
-SequenceSymbol _symbolForComponent(
-  final SequenceComponent component,
-  final int symbolIndex, {
-  required final int numberOfBits,
-  required final int nextState,
-}) {
-  final base = _baseValueFor(component, symbolIndex);
-  final extraBits = _extraBitsFor(component, symbolIndex);
-  return SequenceSymbol(
-    symbol: symbolIndex,
-    baseValue: base,
-    additionalBits: extraBits,
-    numberOfBits: numberOfBits,
-    nextState: nextState,
-  );
-}
-
-int _baseValueFor(final SequenceComponent component, final int symbolIndex) {
-  switch (component) {
-    case SequenceComponent.literalLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.literalLengthBase.length) {
-        throw ZstdFormatException(
-          'Literal length symbol out of range: $symbolIndex',
-        );
-      }
-      return seq.literalLengthBase[symbolIndex];
-    case SequenceComponent.offset:
-      if (symbolIndex < 0 || symbolIndex >= seq.offsetBase.length) {
-        throw ZstdFormatException('Offset symbol out of range: $symbolIndex');
-      }
-      return seq.offsetBase[symbolIndex];
-    case SequenceComponent.matchLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.matchLengthBase.length) {
-        throw ZstdFormatException(
-          'Match length symbol out of range: $symbolIndex',
-        );
-      }
-      return seq.matchLengthBase[symbolIndex];
-  }
-}
-
-int _extraBitsFor(final SequenceComponent component, final int symbolIndex) {
-  switch (component) {
-    case SequenceComponent.literalLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.literalLengthBits.length) {
-        throw ZstdFormatException(
-          'Literal length bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.literalLengthBits[symbolIndex];
-    case SequenceComponent.offset:
-      if (symbolIndex < 0 || symbolIndex >= seq.offsetBits.length) {
-        throw ZstdFormatException(
-          'Offset bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.offsetBits[symbolIndex];
-    case SequenceComponent.matchLength:
-      if (symbolIndex < 0 || symbolIndex >= seq.matchLengthBits.length) {
-        throw ZstdFormatException(
-          'Match length bits index out of range: $symbolIndex',
-        );
-      }
-      return seq.matchLengthBits[symbolIndex];
-  }
-}
+/// The base values and extra bits of [component]'s codes.
+(List<int>, List<int>) _tablesFor(final SequenceComponent component) =>
+    switch (component) {
+      SequenceComponent.literalLength => (
+        seq.literalLengthBase,
+        seq.literalLengthBits,
+      ),
+      SequenceComponent.offset => (seq.offsetBase, seq.offsetBits),
+      SequenceComponent.matchLength => (
+        seq.matchLengthBase,
+        seq.matchLengthBits,
+      ),
+    };
 
 /// The literal length, offset and match length decoding tables of a
 /// sequences section (RFC 8878 §3.1.1.3.2.1), keeping the last of each for
@@ -292,11 +260,9 @@ class SequenceTables {
     final SequenceComponent component, {
     required final bool isPredefined,
   }) {
-    final decoder = FseDecoder();
-    decoder.buildTable(List<int>.from(normalizedCounters), tableLog);
-    return SequenceCodingTable.fromFse(
+    return SequenceCodingTable.fromCounts(
+      normalizedCounters,
       tableLog,
-      decoder.tableEntries,
       component,
       isPredefined: isPredefined,
     );
@@ -372,13 +338,7 @@ class SequenceTables {
       maxSymbolValue,
       maxTableLog,
     );
-    final decoder = FseDecoder();
-    decoder.buildTable(counts, tableLog);
-    final table = SequenceCodingTable.fromFse(
-      tableLog,
-      decoder.tableEntries,
-      component,
-    );
+    final table = SequenceCodingTable.fromCounts(counts, tableLog, component);
     return _SequenceTableResult(table, nextOffset);
   }
 }

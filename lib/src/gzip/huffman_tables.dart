@@ -1,16 +1,55 @@
 import 'dart:typed_data';
 
-import '../exceptions.dart';
+import 'deflate_common.dart';
 
-/// Huffman decoder using two-level lookup tables
+/// The alphabet a [HuffmanDecoder] decodes, which sets its root width and
+/// what its entries hold.
+enum Alphabet {
+  /// Code lengths (RFC 1951 section 3.2.7): entries hold the symbol.
+  plain,
+
+  /// Literal/length codes: entries hold a literal byte, the end of the block,
+  /// or a match length base and its extra-bit count.
+  literals,
+
+  /// Distance codes: entries hold a distance base and its extra-bit count.
+  distances,
+}
+
+/// Bits 0-3 of an entry: the code length.
+const int entryLength = 0xF;
+
+/// Set in a link to a subtable. The link's value is the subtable offset and
+/// its extra-bit count is the subtable's index width.
+const int entrySubtable = 1 << 8;
+
+/// Set for the end of a block, an invalid symbol (its value is the symbol),
+/// and an index no code maps to (code length 0).
+const int entryException = 1 << 9;
+
+/// Set, with [entryException], for the end of a block.
+const int entryEnd = 1 << 10;
+
+/// Set for a literal: its value is the byte.
+const int entryLiteral = 1 << 11;
+
+/// The count of extra bits after the code (bits 4-7 of [entry]).
+int entryExtra(final int entry) => (entry >> 4) & 0xF;
+
+/// The value of [entry] (bits 16 and up): a literal byte, a length or
+/// distance base, a symbol, or a subtable offset.
+int entryValue(final int entry) => entry >> 16;
+
+/// Huffman decoder using two-level lookup tables, with libdeflate's packed
+/// entries: one lookup gives the code length, the extra-bit count and the
+/// value (a literal, or the base a length or distance adds its extra bits to).
 ///
 /// [table] starts with a root table indexed by the next [root] input bits in
-/// DEFLATE's LSB-first order (that is, by bit-reversed codes). A root entry is
-/// either `symbol << 5 | length` for a code of at most [root] bits, or a link
-/// `offset << 5 | 16 | extra` to a subtable at `offset`, indexed by the next
-/// `extra` bits, whose entries are `symbol << 5 | length`. 0 marks an index no
-/// code maps to. A root of at most 9 bits keeps building a table cheap even
-/// when codes reach 15 bits.
+/// DEFLATE's LSB-first order (that is, by bit-reversed codes), followed by
+/// subtables for codes longer than [root]. Entries are described by
+/// [entryLength], [entryExtra], [entryValue] and the `entry*` flags. Values
+/// stay below 2^15 (subtable offsets of a 286-symbol alphabet included), so
+/// entries are exact on dart2js.
 class HuffmanDecoder {
   /// Root table followed by the subtables.
   final Uint32List table;
@@ -24,8 +63,28 @@ class HuffmanDecoder {
   HuffmanDecoder(this.table, this.bits, this.root);
 }
 
-/// Root table index bits, at most (as zlib uses for literal/length codes).
-const int _rootBits = 9;
+/// Root table index bits, at most, per [Alphabet]. libdeflate (and the Java
+/// port) use 10 for literal/length codes; 9 measured as fast on large inputs
+/// and avoids a 5-10% loss on 1 KB pages, where building the table dominates.
+const List<int> _roots = [7, 9, 8];
+
+/// The entry for [symbol] of [alphabet], without its code length.
+int _entry(final Alphabet alphabet, final int symbol) {
+  switch (alphabet) {
+    case Alphabet.plain:
+      return symbol << 16;
+    case Alphabet.distances:
+      return symbol < 30
+          ? distanceBase[symbol] << 16 | distanceExtraBits[symbol] << 4
+          : entryException | symbol << 16;
+    case Alphabet.literals:
+      if (symbol < 256) return entryLiteral | symbol << 16;
+      if (symbol == endBlock) return entryException | entryEnd;
+      return symbol <= 285
+          ? lengthBase[symbol - 257] << 16 | lengthExtraBits[symbol - 257] << 4
+          : entryException | symbol << 16;
+  }
+}
 
 /// Builds a Huffman decoder from code lengths.
 ///
@@ -37,6 +96,7 @@ const int _rootBits = 9;
 /// itself incomplete (30 codes of length 5).
 HuffmanDecoder buildDecoder(
   final List<int> lengths, {
+  final Alphabet alphabet = Alphabet.plain,
   final bool allowIncomplete = false,
 }) {
   final counts = Int32List(16);
@@ -70,7 +130,8 @@ HuffmanDecoder buildDecoder(
     reversed[symbol] = result;
   }
 
-  final root = bits < _rootBits ? bits : _rootBits;
+  final limit = _roots[alphabet.index];
+  final root = bits < limit ? bits : limit;
   final rootSize = 1 << root;
   final rootMask = rootSize - 1;
   final extra = bits - root;
@@ -88,15 +149,15 @@ HuffmanDecoder buildDecoder(
     }
   }
 
-  final table = Uint32List(size);
+  final table = Uint32List(size)..fillRange(0, size, entryException);
   for (var prefix = 0; prefix < rootSize; prefix++) {
     final offset = offsets[prefix];
-    if (offset != 0) table[prefix] = offset << 5 | 16 | extra;
+    if (offset != 0) table[prefix] = offset << 16 | entrySubtable | extra << 4;
   }
   for (var symbol = 0; symbol < lengths.length; symbol++) {
     final length = lengths[symbol];
     if (length == 0) continue;
-    final entry = symbol << 5 | length;
+    final entry = _entry(alphabet, symbol) | length;
     final value = reversed[symbol];
     if (length <= root) {
       for (var index = value; index < rootSize; index += 1 << length) {
@@ -176,7 +237,7 @@ HuffmanDecoder buildFixedLiteralDecoder() {
     lengths[i] = 8;
   }
 
-  return buildDecoder(lengths);
+  return buildDecoder(lengths, alphabet: Alphabet.literals);
 }
 
 /// Builds the fixed distance Huffman decoder.
@@ -185,5 +246,9 @@ HuffmanDecoder buildFixedLiteralDecoder() {
 /// design (codes 30-31 are unused), so [allowIncomplete] is required.
 HuffmanDecoder buildFixedDistanceDecoder() {
   final lengths = List<int>.filled(30, 5);
-  return buildDecoder(lengths, allowIncomplete: true);
+  return buildDecoder(
+    lengths,
+    alphabet: Alphabet.distances,
+    allowIncomplete: true,
+  );
 }

@@ -43,6 +43,18 @@ class LimitException extends CompressionFormatException {
   String toString() => 'LimitException: $message';
 }
 
+/// A [LimitException] for a Zstd frame whose declared window exceeds the
+/// decoder's `window` option. [guardFormat] passes it through unchanged, so
+/// [limit] stays the window cap rather than becoming `maxSize`.
+class WindowLimitException extends LimitException {
+  /// Creates an exception for a frame window of [size] bytes above [limit].
+  WindowLimitException(final int limit, final int size)
+    : super(
+        limit,
+        'Frame window of $size bytes exceeds the limit of $limit bytes',
+      );
+}
+
 /// Runs [body], converting the *input-validation* errors a decoder throws on
 /// malformed data into a codec-specific [CompressionFormatException] via [wrap]:
 /// `StateError` (e.g. exhausted bit reader), `ArgumentError` other than
@@ -65,6 +77,8 @@ T guardFormat<T>(
 }) {
   try {
     return body();
+  } on WindowLimitException {
+    rethrow;
   } on LimitException {
     if (limit == null) rethrow;
     throw LimitException(limit);

@@ -151,19 +151,29 @@ int lengthCode(final int length) {
 
 /// The distance code (0..29) of a match [distance] in 1..maxDistance.
 ///
-/// O(1) via a precomputed table. The extra bits and extra value are
+/// O(1) via zlib's two-part table: distances up to 256 directly, larger ones
+/// by `(distance - 1) >> 7`, since every code from 16 up starts on a multiple
+/// of 128 (plus 1). The extra bits and extra value are
 /// `distanceExtraBits[code]` and `distance - distanceBase[code]`.
 int distanceCode(final int distance) {
   assert(
     distance >= 1 && distance <= maxDistance,
     'Invalid distance $distance',
   );
-  return _distanceCodeFor[distance];
+  return distance <= 256
+      ? _distanceSmall[distance - 1]
+      : _distanceLarge[(distance - 1) >> 7];
 }
 
 /// `length (minMatch..maxMatch) -> length code (257..285)`, built once.
 final Uint16List _lengthCodeFor = _buildLengthCodeTable();
-final Uint8List _distanceCodeFor = _buildDistanceCodeTable();
+final Uint8List _distanceSmall = Uint8List.fromList([
+  for (var distance = 1; distance <= 256; distance++) _distanceCodeOf(distance),
+]);
+final Uint8List _distanceLarge = Uint8List.fromList([
+  for (var index = 0; index < 256; index++)
+    index < 2 ? 0 : _distanceCodeOf((index << 7) + 1),
+]);
 
 Uint16List _buildLengthCodeTable() {
   final table = Uint16List(maxMatch + 1);
@@ -184,23 +194,13 @@ Uint16List _buildLengthCodeTable() {
   return table;
 }
 
-Uint8List _buildDistanceCodeTable() {
-  final table = Uint8List(maxDistance + 1);
-  for (var distance = 1; distance <= maxDistance; distance++) {
-    var code = 29; // distances 24577..32768
-    if (distance <= 4) {
-      code = distance - 1;
-    } else {
-      for (var c = 4; c < 29; c++) {
-        if (distance < distanceBase[c + 1]) {
-          code = c;
-          break;
-        }
-      }
-    }
-    table[distance] = code;
+/// The distance code of [distance], by search: builds the tables above.
+int _distanceCodeOf(final int distance) {
+  if (distance <= 4) return distance - 1;
+  for (var c = 4; c < 29; c++) {
+    if (distance < distanceBase[c + 1]) return c;
   }
-  return table;
+  return 29; // distances 24577..32768
 }
 
 /// LZ77 tokens are packed one per `Uint32List` element. A literal is its

@@ -46,6 +46,11 @@ final class ZstdCodec extends CompressionCodec {
   /// Set to null for unlimited (not recommended for untrusted input)
   final int? maxSize;
 
+  /// Largest declared frame window accepted when decoding, in bytes. A frame
+  /// that declares a larger window throws [LimitException]. Defaults to
+  /// [zstdDefaultWindow] (128MB).
+  final int window;
+
   /// Whether to validate compressed blocks by decompressing them
   ///
   /// When enabled, each block is decompressed immediately after compression
@@ -69,6 +74,7 @@ final class ZstdCodec extends CompressionCodec {
     this.blockSize = 128 * 1024,
     this.checksum = false,
     this.maxSize = defaultMaxSize,
+    this.window = zstdDefaultWindow,
     this.validate = false,
     this.strict = false,
     this.onFallback,
@@ -76,6 +82,7 @@ final class ZstdCodec extends CompressionCodec {
     validateLevel(level, 1, 22);
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
     validateOptionalPositive(maxSize, 'maxSize');
+    validatePositive(window, 'window');
   }
 
   /// Creates a Zstd codec from compression options
@@ -87,6 +94,7 @@ final class ZstdCodec extends CompressionCodec {
       validate: options.validate,
       strict: options.strict,
       maxSize: options.maxSize,
+      window: options.window,
       onFallback: options.onFallback,
     );
   }
@@ -107,7 +115,10 @@ final class ZstdCodec extends CompressionCodec {
   @override
   Uint8List decompress(final Uint8List data, {final int? size}) {
     return checkSize(
-      ZstdDecoder(maxSize: capFor(maxSize, size)).decompress(data),
+      ZstdDecoder(
+        maxSize: capFor(maxSize, size),
+        window: window,
+      ).decompress(data),
       size,
       ZstdFormatException.new,
     );
@@ -137,6 +148,10 @@ class ZstdOptions extends CompressionOptions {
   /// unexpected error (see [ZstdCodec.onFallback]).
   final void Function(Object error, StackTrace stackTrace)? onFallback;
 
+  /// Largest declared frame window accepted when decoding (see
+  /// [ZstdCodec.window]).
+  final int window;
+
   /// Creates Zstd options with specified parameters
   ///
   /// [level] must be between 1 and 22 (Zstd supports higher levels than other codecs).
@@ -149,8 +164,10 @@ class ZstdOptions extends CompressionOptions {
     this.validate = false,
     this.strict = false,
     this.onFallback,
+    this.window = zstdDefaultWindow,
   }) {
     validateLevel(level, 1, 22);
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
+    validatePositive(window, 'window');
   }
 }

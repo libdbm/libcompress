@@ -86,8 +86,8 @@ class SnappyEncoder {
     // As the reference, every entry starts at the block start, so a
     // candidate is always a position in the block.
     final table = hashTable!..fillRange(0, hashTable.length, inputOffset);
-    // The hash spans the full table; smaller tables keep its low bits.
-    final mask = table.length - 1;
+    // The hash keeps the top bits of the product, one per table index bit.
+    final shift = 33 - table.length.bitLength;
     // No match starts in the last bytes (the reference kInputMarginBytes).
     final limit = inputEnd - _margin;
 
@@ -105,7 +105,7 @@ class SnappyEncoder {
         skip += step;
         next = ip + step;
         if (next > limit) break search;
-        final hash = LZ77Hash.snappyHash(input, ip) & mask;
+        final hash = LZ77Hash.snappyHash(input, ip, shift);
         candidate = table[hash];
         table[hash] = ip;
       } while (!ByteUtils.equals4Bytes(input, ip, candidate));
@@ -123,8 +123,8 @@ class SnappyEncoder {
         ip += length;
         literalStart = ip;
         if (ip >= limit) break search;
-        table[LZ77Hash.snappyHash(input, ip - 1) & mask] = ip - 1;
-        final hash = LZ77Hash.snappyHash(input, ip) & mask;
+        table[LZ77Hash.snappyHash(input, ip - 1, shift)] = ip - 1;
+        final hash = LZ77Hash.snappyHash(input, ip, shift);
         candidate = table[hash];
         table[hash] = ip;
       } while (ByteUtils.equals4Bytes(input, ip, candidate));

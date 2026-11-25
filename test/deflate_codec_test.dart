@@ -2,6 +2,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:libcompress/libcompress.dart';
+import 'package:libcompress/src/gzip/deflate_common.dart'
+    show distanceBase, distanceCode, lengthBase, lengthExtraBits, maxDistance;
+import 'package:libcompress/src/gzip/deflate_reader.dart';
+import 'package:libcompress/src/gzip/huffman_tables.dart';
 import 'package:test/test.dart';
 
 import 'test_utils.dart';
@@ -85,6 +89,77 @@ void main() {
       expect(codec.level, 9);
       expect(codec.maxSize, 1024);
     });
+
+    test('decode entries hold codes longer than the root table', () {
+      // Symbol i has a code of i + 1 bits (a complete code up to 15 bits), so
+      // codes from 8 bits (code lengths) or 11 bits (literals) need subtables.
+      final lengths = [for (var i = 0; i < 15; i++) i + 1, 15];
+      for (final alphabet in [Alphabet.plain, Alphabet.literals]) {
+        final decoder = buildDecoder(lengths, alphabet: alphabet);
+        final (bytes, codes) = canonical(lengths);
+        final reader = DeflateReader(bytes);
+        for (var symbol = 0; symbol < lengths.length; symbol++) {
+          final entry = reader.decode(decoder);
+          expect(entryValue(entry), symbol, reason: '$alphabet $symbol');
+          expect(entry & entryLength, lengths[symbol]);
+          expect(
+            entry & entryLiteral != 0,
+            alphabet == Alphabet.literals,
+            reason: '$alphabet $symbol',
+          );
+        }
+        expect(codes, lengths.length);
+      }
+    });
+
+    test('decode entries carry length and distance bases', () {
+      final literals = buildDecoder(
+        List.filled(288, 9), // incomplete: 288 codes of 9 bits
+        alphabet: Alphabet.literals,
+        allowIncomplete: true,
+      );
+      final (bytes, _) = canonical(List.filled(288, 9));
+      final reader = DeflateReader(bytes);
+      for (var symbol = 0; symbol < 288; symbol++) {
+        final entry = reader.decode(literals);
+        final exception = entry & entryException != 0;
+        if (symbol < 256) {
+          expect(entry & entryLiteral, entryLiteral);
+          expect(entryValue(entry), symbol);
+        } else if (symbol == 256) {
+          expect(entry & entryEnd, entryEnd, reason: 'end of block');
+        } else if (symbol <= 285) {
+          expect(exception, isFalse);
+          expect(entryValue(entry), lengthBase[symbol - 257]);
+          expect(entryExtra(entry), lengthExtraBits[symbol - 257]);
+        } else {
+          expect(exception, isTrue, reason: 'symbol $symbol');
+          expect(entryValue(entry), symbol);
+        }
+      }
+    });
+
+    test('a single 1-bit distance code decodes, its unused code does not', () {
+      final distances = buildDecoder([1], alphabet: Alphabet.distances);
+      final entry = DeflateReader(Uint8List.fromList([0])).decode(distances);
+      expect(entryValue(entry), 1);
+      expect(entryExtra(entry), 0);
+      expect(
+        () => DeflateReader(Uint8List.fromList([1])).decode(distances),
+        throwsA(isA<DeflateFormatException>()),
+      );
+    });
+
+    test('distance codes match the RFC 1951 table for every distance', () {
+      // The code is the last one whose base is at most the distance.
+      var code = 0;
+      for (var distance = 1; distance <= maxDistance; distance++) {
+        while (code < 29 && distanceBase[code + 1] <= distance) {
+          code++;
+        }
+        expect(distanceCode(distance), code, reason: 'distance $distance');
+      }
+    });
   });
 
   group('DEFLATE limits & validation', () {
@@ -155,4 +230,42 @@ void main() {
       expect(() => DeflateCodec(maxSize: 0), throwsArgumentError);
     });
   });
+}
+
+/// Every symbol of the canonical code for [lengths] (RFC 1951 section
+/// 3.2.2), in symbol order, written LSB-first as DEFLATE stores codes, and
+/// the number of codes written.
+(Uint8List, int) canonical(final List<int> lengths) {
+  final counts = List.filled(16, 0);
+  for (final length in lengths) {
+    counts[length]++;
+  }
+  counts[0] = 0;
+  final starts = List.filled(16, 0);
+  var code = 0;
+  for (var length = 1; length <= 15; length++) {
+    code = (code + counts[length - 1]) << 1;
+    starts[length] = code;
+  }
+  final out = <int>[];
+  var hold = 0;
+  var count = 0;
+  var written = 0;
+  for (final length in lengths) {
+    if (length == 0) continue;
+    final value = starts[length]++;
+    for (var bit = length - 1; bit >= 0; bit--) {
+      hold |= ((value >> bit) & 1) << count;
+      if (++count == 8) {
+        out.add(hold);
+        hold = 0;
+        count = 0;
+      }
+    }
+    written++;
+  }
+  out
+    ..add(hold)
+    ..addAll([0, 0, 0]);
+  return (Uint8List.fromList(out), written);
 }

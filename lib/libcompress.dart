@@ -51,7 +51,7 @@ export 'src/compression_stream_codec.dart';
 export 'src/codec_factory.dart';
 
 // Compression exceptions
-export 'src/exceptions.dart' hide guardFormat;
+export 'src/exceptions.dart' hide guardFormat, WindowLimitException;
 
 // LZ4 codec
 export 'src/lz4/lz4_codec.dart';
@@ -77,6 +77,7 @@ export 'src/gzip/gzip_stream_codec.dart' show GzipStreamCodec;
 // Zstd codec
 export 'src/zstd/zstd_codec.dart';
 export 'src/zstd/zstd_stream_codec.dart' show ZstdStreamCodec;
+export 'src/zstd/zstd_common.dart' show zstdDefaultWindow;
 
 // Noop codec (pass-through, for testing)
 export 'src/noop/noop_codec.dart';

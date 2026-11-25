@@ -1383,6 +1383,69 @@ void main() {
 
   // Raw LZ4 blocks (no frame), `Lz4Format.raw`: the form used by Parquet
   // `LZ4_RAW`.
+  group('LZ4 level 1 encoder', () {
+    test(
+      'stream table keeps matches across blocks and window slides',
+      () async {
+        // A 16 KB random piece repeated, in 4 KB blocks: no block holds a
+        // repeat of itself, so every block after the first four matches only
+        // through table entries from earlier blocks, across many window
+        // slides.
+        final piece = pseudoRandom(16 * 1024, 0x5EED);
+        final data = bytes([for (var i = 0; i < 24; i++) ...piece]);
+        final codec = Lz4StreamCodec(blockSize: 4096);
+        final compressed = await streamCompress(codec, [data]);
+        expect(compressed.length, lessThan(20 * 1024));
+        expect(
+          await streamDecompress(codec, compressed, chunkSize: 4096),
+          data,
+        );
+      },
+    );
+
+    test(
+      'round-trips every format at and around the minimum lengths',
+      () async {
+        final formats = [
+          Lz4Codec(),
+          Lz4Codec(format: Lz4Format.raw),
+          Lz4Codec(format: Lz4Format.hadoop),
+        ];
+        final stream = Lz4StreamCodec(blockSize: lz4BlockSize64K);
+        for (final length in [
+          for (var i = 0; i <= 40; i++) i,
+          65535,
+          65536,
+          65537,
+          200000,
+        ]) {
+          for (final data in [
+            pseudoRandom(length, length),
+            bytes(
+              List.generate(length, (final i) => 'abcab'.codeUnitAt(i % 5)),
+            ),
+            Uint8List(length),
+          ]) {
+            for (final codec in formats) {
+              expectRoundTrip(codec, data);
+            }
+            await expectStreamRoundTrip(stream, [data]);
+          }
+        }
+      },
+    );
+
+    test('incompressible input is stored and repetitive input shrinks', () {
+      final codec = Lz4Codec();
+      final random = pseudoRandom(1 << 20, 0xC0FFEE);
+      expect(codec.compress(random).length, lessThan(random.length + 64));
+      final zeros = Uint8List(1 << 20);
+      expect(codec.compress(zeros).length, lessThan(zeros.length ~/ 200));
+      expectRoundTrip(codec, random);
+      expectRoundTrip(codec, zeros);
+    });
+  });
+
   group('LZ4 raw block', () {
     final raw = Lz4Codec(format: Lz4Format.raw);
 

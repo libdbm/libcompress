@@ -47,9 +47,8 @@ class StreamingZstdEncoder implements StreamCompressor {
   // match offsets stay below it.
   late final int _windowByte = _windowByteFor(blockSize);
 
-  late final CompressedBlockEncoder _encoder = CompressedBlockEncoder(
-    searchDepth: _searchDepth(level),
-    minMatch: level >= 6 ? 3 : 4,
+  late final CompressedBlockEncoder _encoder = CompressedBlockEncoder.level(
+    level,
     validate: validate,
     strict: strict,
     onFallback: onFallback,
@@ -76,6 +75,7 @@ class StreamingZstdEncoder implements StreamCompressor {
   @override
   Uint8List header() {
     final descriptor = checksum ? 0x04 : 0x00; // FCS=0, not single-segment
+    _encoder.start();
     return Uint8List.fromList([
       ...ByteUtils.uint32LE(zstdMagicNumber),
       descriptor,
@@ -128,6 +128,8 @@ class StreamingZstdEncoder implements StreamCompressor {
       out.add(_blockHeader(last: last, type: 2, size: compressed.length));
       out.add(compressed);
     } else {
+      // The decoder keeps neither this block's repeat offsets nor its tree.
+      _encoder.discard();
       out.add(_blockHeader(last: last, type: 0, size: size));
       // A copy: _cur is overwritten by later blocks.
       out.add(_cur.sublist(_hist, total));
@@ -165,18 +167,5 @@ class StreamingZstdEncoder implements StreamCompressor {
   }) {
     final h = (last ? 1 : 0) | (type << 1) | (size << 3);
     return Uint8List.fromList([h & 0xFF, (h >> 8) & 0xFF, (h >> 16) & 0xFF]);
-  }
-
-  static int _searchDepth(final int level) {
-    if (level <= 1) return 4;
-    if (level <= 2) return 8;
-    if (level <= 3) return 32;
-    if (level <= 4) return 48;
-    if (level <= 5) return 64;
-    if (level <= 6) return 96;
-    if (level <= 9) return 128;
-    if (level <= 12) return 256;
-    if (level <= 16) return 512;
-    return 1024;
   }
 }

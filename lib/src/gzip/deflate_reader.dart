@@ -91,23 +91,25 @@ class DeflateReader {
     return value;
   }
 
-  /// Decodes one symbol with [decoder]'s lookup table.
+  /// Decodes one code with [decoder]'s lookup table and returns its entry
+  /// (see [HuffmanDecoder]). Its extra bits, if any, are not read.
   int decode(final HuffmanDecoder decoder) {
     _fill(decoder.bits);
     final table = decoder.table;
     var entry = table[_hold & ((1 << decoder.root) - 1)];
-    if (entry & 16 != 0) {
+    if (entry & entrySubtable != 0) {
       entry =
-          table[(entry >> 5) +
-              ((_hold >> decoder.root) & ((1 << (entry & 0xF)) - 1))];
+          table[entryValue(entry) +
+              ((_hold >> decoder.root) & ((1 << entryExtra(entry)) - 1))];
     }
-    if (entry == 0) {
+    final length = entry & entryLength;
+    if (length == 0) {
       // With padding in the peeked bits the code may simply be incomplete.
       if (partial && _padded) _exhausted();
       throw DeflateFormatException('Invalid Huffman code');
     }
-    _drop(entry & 0xF);
-    return entry >> 5;
+    _drop(length);
+    return entry;
   }
 
   /// Discards bits up to the next byte boundary.
@@ -168,7 +170,7 @@ class DeflateReader {
   final codeLengths = Uint8List(totalLength);
   var filled = 0;
   while (filled < totalLength) {
-    final symbol = input.decode(decoder);
+    final symbol = entryValue(input.decode(decoder));
 
     if (symbol < 16) {
       // Literal code length
@@ -206,7 +208,13 @@ class DeflateReader {
 
   // Split into literal/length and distance code lengths and build decoders
   return (
-    buildDecoder(Uint8List.sublistView(codeLengths, 0, hlit)),
-    buildDecoder(Uint8List.sublistView(codeLengths, hlit, totalLength)),
+    buildDecoder(
+      Uint8List.sublistView(codeLengths, 0, hlit),
+      alphabet: Alphabet.literals,
+    ),
+    buildDecoder(
+      Uint8List.sublistView(codeLengths, hlit, totalLength),
+      alphabet: Alphabet.distances,
+    ),
   );
 }

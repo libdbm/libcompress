@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:libcompress/libcompress.dart';
+import 'package:libcompress/src/util/lz77_common.dart';
 import 'package:libcompress/src/util/varint.dart';
 import 'package:libcompress/src/snappy/snappy_decoder.dart';
 import 'package:libcompress/src/snappy/snappy_stream_encoder.dart';
@@ -1157,6 +1158,13 @@ void main() {
   });
 
   group('Snappy regressions', () {
+    test('hash keeps the top bits of the product, as the reference', () {
+      // 0xFFFFFFFF * 0x1e35a7bd is 0xE1CA5843 modulo 2^32.
+      final word = bytes([0xFF, 0xFF, 0xFF, 0xFF]);
+      expect(LZ77Hash.snappyHash(word, 0, 18), 0xE1CA5843 >> 18);
+      expect(LZ77Hash.snappyHash(word, 0, 24), 0xE1CA5843 >> 24);
+    });
+
     test(
       'raw compressed result does not retain the input-sized allocation',
       () {

@@ -34,6 +34,22 @@ class HuffmanEncoder {
   int get maxBits => _maxBits;
   int get tableLog => _tableLog;
 
+  /// The estimated encoded size in bytes of `counts[0..highest]` with this
+  /// table, stream overhead included (a 10-byte jump table and padding for
+  /// [four] streams, 1 byte for one), or -1 when a counted symbol has no code.
+  int cost(final List<int> counts, final int highest, final bool four) {
+    var bits = 0;
+    for (var i = 0; i <= highest; i++) {
+      final count = counts[i];
+      if (count > 0) {
+        final width = i < _bits.length ? _bits[i] : 0;
+        if (width == 0) return -1;
+        bits += count * width;
+      }
+    }
+    return ((bits + 7) >> 3) + (four ? 10 : 1);
+  }
+
   /// Build Huffman table from symbol counts
   void buildFromCounts(final List<int> counts, final int maxSym) {
     if (maxSym > maxSymbol) {

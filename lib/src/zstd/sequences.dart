@@ -1,7 +1,8 @@
 import 'dart:typed_data';
 
-/// The sequences of one Zstd block: for each match, its absolute offset, its
-/// length, and the number of literals before it.
+/// The sequences of one Zstd block: for each match, its `Offset_Value` (1-3
+/// for a repeat offset, the distance plus 3 otherwise), its length, and the
+/// number of literals before it.
 ///
 /// The lists are reused from block to block, so only the first [count]
 /// entries are sequences, and only until the next [clear].
@@ -14,7 +15,7 @@ final class Sequences {
   /// The number of sequences.
   int get count => _count;
 
-  /// Match offsets (absolute distances back).
+  /// Offset values (RFC 8878 `Offset_Value`).
   Int32List get offsets => _offsets;
 
   /// Match lengths.
@@ -33,7 +34,8 @@ final class Sequences {
     _count = 0;
   }
 
-  /// Appends a match of [length] at [offset] after [literals] literals.
+  /// Appends a match of [length] with offset value [offset] after [literals]
+  /// literals.
   void add(final int offset, final int length, final int literals) {
     _offsets[_count] = offset;
     _lengths[_count] = length;

@@ -25,7 +25,9 @@ Future<void> main() async {
 
 /// Decodes frames whose Window_Descriptor exponent makes the window 2^31 bytes
 /// or more (exponent 22 is 2^32), which a 32-bit shift gets wrong on the web.
-/// Each frame holds one raw block, `abc`.
+/// Each frame holds one raw block, `abc`. Each is decoded with the default
+/// window cap (rejected) and with a cap above 2^41 (accepted), so a window
+/// size computed wrongly on the web shows up either way.
 Future<List<Object?>> _largeWindows() async {
   final results = <Object?>[];
   for (final exponent in [21, 22, 31]) {
@@ -33,13 +35,18 @@ Future<List<Object?>> _largeWindows() async {
       0x28, 0xB5, 0x2F, 0xFD, 0x00, exponent << 3, //
       (3 << 3) | 1, 0, 0, 0x61, 0x62, 0x63,
     ]);
-    results
-      ..add(_attempt(() => ZstdCodec().decompress(frame)))
-      ..add(
-        await _attemptAsync(
-          () => ZstdStreamCodec().decompress(Stream.value(frame)).toList(),
-        ),
-      );
+    // 2^42 as a literal: `1 << 42` is 0 on the web, where shifts are 32-bit.
+    for (final window in [zstdDefaultWindow, 4398046511104]) {
+      results
+        ..add(_attempt(() => ZstdCodec(window: window).decompress(frame)))
+        ..add(
+          await _attemptAsync(
+            () => ZstdStreamCodec(
+              window: window,
+            ).decompress(Stream.value(frame)).toList(),
+          ),
+        );
+    }
   }
   return results;
 }
@@ -47,7 +54,7 @@ Future<List<Object?>> _largeWindows() async {
 Object? _attempt(final Uint8List Function() decode) {
   try {
     return _encode(decode());
-  } on ZstdFormatException catch (error) {
+  } on CompressionFormatException catch (error) {
     return 'error: ${error.message}';
   }
 }
@@ -57,7 +64,7 @@ Future<Object?> _attemptAsync(
 ) async {
   try {
     return _encode(_concat(await decode()));
-  } on ZstdFormatException catch (error) {
+  } on CompressionFormatException catch (error) {
     return 'error: ${error.message}';
   }
 }

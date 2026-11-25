@@ -57,8 +57,9 @@ class LZ77Hash {
     return (ByteUtils.mul32(value, lz4Multiplier) >> shift) & 0xFFFF;
   }
 
-  /// Computes Snappy-style hash of 4 bytes
-  static int snappyHash(final Uint8List data, final int pos) {
+  /// Computes Snappy-style hash of 4 bytes: the top `32 - shift` bits of
+  /// the product, as the reference Snappy and aircompressor.
+  static int snappyHash(final Uint8List data, final int pos, final int shift) {
     if (pos + 3 >= data.length) {
       return 0;
     }
@@ -67,6 +68,6 @@ class LZ77Hash {
         (data[pos + 1] << 8) |
         (data[pos + 2] << 16) |
         (data[pos + 3] << 24);
-    return (ByteUtils.mul32(value, snappyMultiplier) >> 16) & 0x3FFF;
+    return ByteUtils.mul32(value, snappyMultiplier) >> shift;
   }
 }

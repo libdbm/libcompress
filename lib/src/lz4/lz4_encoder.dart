@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import '../util/byte_utils.dart';
 import '../util/growable_buffer.dart';
 import '../util/lz77_common.dart';
+import '../util/platform.dart';
 import '../util/stream_compressor.dart';
 import '../util/xxh32.dart';
 import 'lz4_common.dart';
@@ -117,90 +118,98 @@ class Lz4Encoder {
     return out;
   }
 
-  /// Compresses a block using standard mode (level 1)
-  /// Writes to [out] buffer and returns the number of bytes written.
+  /// Compresses a block using standard mode (level 1): the reference LZ4
+  /// fast loop, as the Java port. Writes to [out] and returns the number of
+  /// bytes written.
   int _compressBlock(final Uint8List input, final Uint8List out) {
-    if (input.isEmpty) {
-      out[0] = 0;
-      return 1;
-    }
-
-    final log = _hashLog(input.length);
-    final shift = 32 - log;
-    final hashTable = Int32List(1 << log)..fillRange(0, 1 << log, -1);
-    var op = 0;
     final end = input.length;
+    if (end <= lz4MFLimit) return _last(input, 0, end, out, 0);
+    final log = math.max(4, math.min(_fastLog, (end - 1).bitLength));
+    final mask = (1 << log) - 1;
+    // Positions in the block; an empty slot is 0, which the 4-byte
+    // comparison accepts or rejects on the data alone.
+    final table = Int32List(1 << log);
+    final view = ByteData.sublistView(input);
     final limit = end - lz4MFLimit;
-    final matchLimit = end - lz4LastLiterals;
+    final stop = end - lz4LastLiterals;
+    var op = 0;
     var anchor = 0;
-    var index = 0;
+    var index = 1;
+    var next = _hash(input, view, index, mask);
 
-    while (index <= limit) {
-      final hash = LZ77Hash.lz4Hash(input, index, shift);
-      final candidate = hashTable[hash];
-      hashTable[hash] = index;
+    while (true) {
+      var forward = index;
+      var attempts = 1 << _skipTrigger;
+      var step = 1;
+      var reference = 0;
+      do {
+        final hash = next;
+        index = forward;
+        forward += step;
+        step = attempts++ >> _skipTrigger;
+        if (forward > limit) return _last(input, anchor, end, out, op);
+        reference = table[hash];
+        next = _hash(input, view, forward, mask);
+        table[hash] = index;
+      } while (view.getUint32(reference, Endian.little) !=
+              view.getUint32(index, Endian.little) ||
+          index - reference > lz4MaxOffset);
 
-      var match = false;
-      if (index + lz4MinMatch <= matchLimit &&
-          candidate >= 0 &&
-          (index - candidate) <= lz4MaxOffset &&
-          ByteUtils.readUint32LE(input, candidate) ==
-              ByteUtils.readUint32LE(input, index)) {
-        match = true;
+      while (index > anchor &&
+          reference > 0 &&
+          input[index - 1] == input[reference - 1]) {
+        index--;
+        reference--;
       }
+      var token = op++;
+      final literals = index - anchor;
+      op = _encodeLiteralLength(out, op, token, literals);
+      out.setRange(op, op + literals, input, anchor);
+      op += literals;
 
-      if (!match) {
-        index++;
-        continue;
-      }
-
-      final matchIndex = index;
-
-      index += lz4MinMatch;
-      var refIndex = candidate + lz4MinMatch;
-
-      while (index < matchLimit && input[index] == input[refIndex]) {
-        index++;
-        refIndex++;
-      }
-
-      final literalLength = matchIndex - anchor;
-      final matchLength = index - matchIndex;
-
-      final tokenIndex = op++;
-
-      op = _encodeLiteralLength(out, op, tokenIndex, literalLength);
-
-      if (literalLength > 0) {
-        out.setRange(op, op + literalLength, input, anchor);
-        op += literalLength;
-      }
-
-      final offset = matchIndex - candidate;
-      ByteUtils.writeUint16LEAt(out, op, offset);
-      op += 2;
-
-      op = _encodeMatchLength(out, op, tokenIndex, matchLength);
-
-      anchor = index;
-
-      if (index - 2 >= 0 && index - 2 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(input, index - 2, shift)] = index - 2;
-      }
-      if (index - 1 >= 0 && index - 1 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(input, index - 1, shift)] = index - 1;
+      while (true) {
+        final size = _count(
+          input,
+          index + lz4MinMatch,
+          reference + lz4MinMatch,
+          stop,
+        );
+        ByteUtils.writeUint16LEAt(out, op, index - reference);
+        op += 2;
+        op = _encodeMatchLength(out, op, token, size + lz4MinMatch);
+        index += size + lz4MinMatch;
+        anchor = index;
+        if (index > limit) return _last(input, anchor, end, out, op);
+        table[_hash(input, view, index - 2, mask)] = index - 2;
+        final hash = _hash(input, view, index, mask);
+        reference = table[hash];
+        table[hash] = index;
+        if (index - reference > lz4MaxOffset ||
+            view.getUint32(reference, Endian.little) !=
+                view.getUint32(index, Endian.little)) {
+          index++;
+          next = _hash(input, view, index, mask);
+          break;
+        }
+        token = op++;
+        out[token] = 0;
       }
     }
+  }
 
+  /// Writes `input[anchor, end)` as the final literal run at [op] and returns
+  /// the position after it.
+  static int _last(
+    final Uint8List input,
+    final int anchor,
+    final int end,
+    final Uint8List out,
+    final int op,
+  ) {
     final remaining = end - anchor;
-    if (remaining > 0) {
-      final tokenIndex = op++;
-      op = _encodeLiteralLength(out, op, tokenIndex, remaining);
-      out.setRange(op, op + remaining, input, anchor);
-      op += remaining;
-    }
-
-    return op;
+    final at = _encodeLiteralLength(out, op + 1, op, remaining);
+    out.setRange(at, at + remaining, input, anchor);
+    return at + remaining;
   }
 
   /// Encodes literal length into buffer, returns new position after length bytes.
@@ -270,6 +279,11 @@ class StreamingLz4Encoder implements StreamCompressor {
   int _start = 0;
   int _length = 0;
   final Xxh32Sink _sink = Xxh32Sink(); // content checksum over all input
+
+  /// The level 1 match table, kept across blocks, and the stream position of
+  /// `_buffer[0]` modulo 2^32: an entry is a buffer index plus [_base].
+  final Uint32List _table = Uint32List(lz4HashTableSize);
+  int _base = 0;
 
   /// The 7-byte LZ4 frame header (magic + FLG/BD + header checksum), with the
   /// independent-blocks flag cleared (blocks are linked).
@@ -342,6 +356,7 @@ class StreamingLz4Encoder implements StreamCompressor {
       out = _frame(block, block.length, data, size);
     }
     final keep = math.min(_length, lz4MaxOffset);
+    _base = (_base + _length - keep) & 0xFFFFFFFF;
     _buffer.setRange(0, keep, _buffer, _length - keep);
     _start = keep;
     _length = keep;
@@ -368,81 +383,164 @@ class StreamingLz4Encoder implements StreamCompressor {
     return out;
   }
 
-  /// LZ4-compresses `data[start..]`, with matches allowed to reference back into
-  /// the preceding window (down to `start - 64 KB`). Returns the block bytes.
+  /// LZ4-compresses `data[start..]` with the level 1 loop of
+  /// [Lz4Encoder], with matches allowed to reference back into the preceding
+  /// window (down to `start - 64 KB`). Returns the block bytes.
+  ///
+  /// The table is kept from block to block and holds stream positions modulo
+  /// 2^32 (`index + _base`), which stay valid when the window slides down, so
+  /// nothing is cleared or seeded per block.
   Uint8List _compressLinked(final Uint8List data, final int start) {
-    final span = data.length - start;
-    final out = Uint8List(span + span ~/ 255 + 16);
-    final hashTable = Int32List(lz4HashTableSize)
-      ..fillRange(0, lz4HashTableSize, -1);
-    var op = 0;
     final end = data.length;
+    final length = end - start;
+    final out = Uint8List(length + length ~/ 255 + 16);
+    if (length <= lz4MFLimit) {
+      return Uint8List.sublistView(
+        out,
+        0,
+        Lz4Encoder._last(data, start, end, out, 0),
+      );
+    }
+    final table = _table;
+    final base = _base;
+    final view = ByteData.sublistView(data);
     final limit = end - lz4MFLimit;
-    final matchLimit = end - lz4LastLiterals;
+    final stop = end - lz4LastLiterals;
+    var op = 0;
     var anchor = start;
     var index = start;
+    var next = _hash(data, view, index, _linkedMask);
 
-    // Seed the hash with the window so matches can reach into prior blocks.
-    final windowStart = math.max(0, start - lz4MaxOffset);
-    for (var i = windowStart; i + 4 <= data.length && i < start; i++) {
-      hashTable[LZ77Hash.lz4Hash(data, i, 32 - lz4HashLog)] = i;
+    while (true) {
+      var forward = index;
+      var attempts = 1 << _skipTrigger;
+      var step = 1;
+      var distance = 0;
+      do {
+        final hash = next;
+        index = forward;
+        forward += step;
+        step = attempts++ >> _skipTrigger;
+        if (forward > limit) {
+          return Uint8List.sublistView(
+            out,
+            0,
+            Lz4Encoder._last(data, anchor, end, out, op),
+          );
+        }
+        distance = (index + base - table[hash]) & 0xFFFFFFFF;
+        next = _hash(data, view, forward, _linkedMask);
+        table[hash] = (index + base) & 0xFFFFFFFF;
+      } while (distance == 0 ||
+          distance > lz4MaxOffset ||
+          view.getUint32(index - distance, Endian.little) !=
+              view.getUint32(index, Endian.little));
+
+      var reference = index - distance;
+      while (index > anchor &&
+          reference > 0 &&
+          data[index - 1] == data[reference - 1]) {
+        index--;
+        reference--;
+      }
+      var token = op++;
+      final literals = index - anchor;
+      op = Lz4Encoder._encodeLiteralLength(out, op, token, literals);
+      out.setRange(op, op + literals, data, anchor);
+      op += literals;
+
+      while (true) {
+        final size = _count(
+          data,
+          index + lz4MinMatch,
+          reference + lz4MinMatch,
+          stop,
+        );
+        ByteUtils.writeUint16LEAt(out, op, index - reference);
+        op += 2;
+        op = Lz4Encoder._encodeMatchLength(out, op, token, size + lz4MinMatch);
+        index += size + lz4MinMatch;
+        anchor = index;
+        if (index > limit) {
+          return Uint8List.sublistView(
+            out,
+            0,
+            Lz4Encoder._last(data, anchor, end, out, op),
+          );
+        }
+        table[_hash(data, view, index - 2, _linkedMask)] =
+            (index - 2 + base) & 0xFFFFFFFF;
+        final hash = _hash(data, view, index, _linkedMask);
+        final gap = (index + base - table[hash]) & 0xFFFFFFFF;
+        table[hash] = (index + base) & 0xFFFFFFFF;
+        if (gap == 0 ||
+            gap > lz4MaxOffset ||
+            view.getUint32(index - gap, Endian.little) !=
+                view.getUint32(index, Endian.little)) {
+          index++;
+          next = _hash(data, view, index, _linkedMask);
+          break;
+        }
+        reference = index - gap;
+        token = op++;
+        out[token] = 0;
+      }
     }
-
-    while (index <= limit) {
-      final hash = LZ77Hash.lz4Hash(data, index, 32 - lz4HashLog);
-      final candidate = hashTable[hash];
-      hashTable[hash] = index;
-
-      if (index + lz4MinMatch > matchLimit ||
-          candidate < 0 ||
-          (index - candidate) > lz4MaxOffset ||
-          ByteUtils.readUint32LE(data, candidate) !=
-              ByteUtils.readUint32LE(data, index)) {
-        index++;
-        continue;
-      }
-
-      final matchIndex = index;
-      index += lz4MinMatch;
-      var refIndex = candidate + lz4MinMatch;
-      while (index < matchLimit && data[index] == data[refIndex]) {
-        index++;
-        refIndex++;
-      }
-
-      final literalLength = matchIndex - anchor;
-      final matchLength = index - matchIndex;
-      final tokenIndex = op++;
-      op = Lz4Encoder._encodeLiteralLength(out, op, tokenIndex, literalLength);
-      if (literalLength > 0) {
-        out.setRange(op, op + literalLength, data, anchor);
-        op += literalLength;
-      }
-      ByteUtils.writeUint16LEAt(out, op, matchIndex - candidate);
-      op += 2;
-      op = Lz4Encoder._encodeMatchLength(out, op, tokenIndex, matchLength);
-      anchor = index;
-
-      if (index - 2 >= start && index - 2 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(data, index - 2, 32 - lz4HashLog)] =
-            index - 2;
-      }
-      if (index - 1 >= start && index - 1 <= limit) {
-        hashTable[LZ77Hash.lz4Hash(data, index - 1, 32 - lz4HashLog)] =
-            index - 1;
-      }
-    }
-
-    final remaining = end - anchor;
-    if (remaining > 0) {
-      final tokenIndex = op++;
-      op = Lz4Encoder._encodeLiteralLength(out, op, tokenIndex, remaining);
-      out.setRange(op, op + remaining, data, anchor);
-      op += remaining;
-    }
-
-    return Uint8List.sublistView(out, 0, op);
   }
+}
+
+/// Table size (log2) of the level 1 block encoder, as the reference LZ4.
+const int _fastLog = 12;
+
+/// Index mask of the level 1 stream table, which holds 2^16 entries.
+const int _linkedMask = lz4HashTableSize - 1;
+
+/// Misses before the level 1 search step grows: every 2^6 misses.
+const int _skipTrigger = 6;
+
+/// The reference LZ4 5-byte hash multiplier, 889523592379, split at bit 24
+/// so the product is exact on dart2js.
+const int _primeLow = 12377275;
+const int _primeHigh = 53019;
+
+/// A hash of the bytes at [pos]: bits 28 and up of the 64-bit product of the
+/// little-endian word there and 889523592379, as Java and the reference LZ4.
+/// Only the low 44 bits of the word reach the masked bits, so 6 bytes are
+/// read; on dart2js the product is formed from 24-bit halves.
+int _hash(
+  final Uint8List data,
+  final ByteData view,
+  final int pos,
+  final int mask,
+) {
+  if (wide) {
+    // Every caller has 8 bytes at pos: pos is at most `end - lz4MFLimit + 1`.
+    return (view.getUint64(pos, Endian.little) *
+                (_primeHigh << 24 | _primeLow)) >>
+            28 &
+        mask;
+  }
+  final low = data[pos] | data[pos + 1] << 8 | data[pos + 2] << 16;
+  final high = data[pos + 3] | data[pos + 4] << 8 | data[pos + 5] << 16;
+  final middle = (low * _primeHigh + high * _primeLow) % 0x1000000;
+  return (low * _primeLow + middle * 0x1000000) ~/ 0x10000000 & mask;
+}
+
+/// The number of equal bytes at [index] and [reference], reading no further
+/// than [stop].
+int _count(
+  final Uint8List data,
+  final int index,
+  final int reference,
+  final int stop,
+) {
+  var at = index;
+  var from = reference;
+  while (at < stop && data[at] == data[from]) {
+    at++;
+    from++;
+  }
+  return at - index;
 }
 
 /// Compresses `input[start..]` as one block in high-compression mode (levels

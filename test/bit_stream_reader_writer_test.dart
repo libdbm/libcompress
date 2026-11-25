@@ -110,7 +110,7 @@ void main() {
       final reader = DeflateReader(Uint8List.fromList([0xFF]), partial: true);
       expect(() => reader.decode(fixedLiteralDecoder), throwsStateError);
       final whole = DeflateReader(Uint8List.fromList([0xFF, 0x01]));
-      expect(whole.decode(fixedLiteralDecoder), 0xFF);
+      expect(entryValue(whole.decode(fixedLiteralDecoder)), 0xFF);
     });
 
     test('take returns aligned bytes and rejects overruns', () {

@@ -19,6 +19,18 @@ const int zstdSkippableFrameMagicMask = 0xFFFFFFF0;
 /// Maximum block size (128 KB)
 const int zstdMaxBlockSize = 128 * 1024;
 
+/// Default cap on a frame's declared window when decoding: 128 MB, the
+/// reference zstd's default `windowLogMax` of 27.
+const int zstdDefaultWindow = 1 << 27;
+
+/// Throws [WindowLimitException] when a frame's [declared] window (null for a
+/// single-segment frame, which has none) exceeds [window].
+void checkWindow(final int? declared, final int window) {
+  if (declared != null && declared > window) {
+    throw WindowLimitException(window, declared);
+  }
+}
+
 /// Block types in Zstandard format
 enum ZstdBlockType {
   /// Uncompressed data block

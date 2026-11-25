@@ -1,17 +1,9 @@
 import 'dart:typed_data';
 import '../exceptions.dart';
 import '../util/growable_buffer.dart';
-import 'deflate_common.dart';
 import 'deflate_reader.dart';
 import 'huffman_tables.dart';
 import '../util/platform.dart';
-
-// The length and distance tables as typed arrays, for [DeflateDecoder]'s fast
-// loop: cheaper to index than constant lists.
-final _lengthBase = Uint16List.fromList(lengthBase);
-final _lengthExtraBits = Uint8List.fromList(lengthExtraBits);
-final _distanceBase = Uint16List.fromList(distanceBase);
-final _distanceExtraBits = Uint8List.fromList(distanceExtraBits);
 
 /// Room [DeflateDecoder]'s fast loop keeps past the output position: the
 /// longest match (258) plus 8 for word copies that run past its end.
@@ -152,59 +144,55 @@ class DeflateDecoder {
     final limit = maxSize;
 
     while (true) {
-      final symbol = input.decode(literalDecoder);
+      final entry = input.decode(literalDecoder);
 
-      if (symbol < 256) {
-        // Literal byte
+      if (entry & entryLiteral != 0) {
         if (limit != null && output.length >= limit) {
           throw LimitException(limit);
         }
-        output.addByte(symbol);
-      } else if (symbol == endBlock) {
-        // End of block
-        break;
-      } else if (symbol <= 285) {
-        // Length/distance pair
-        final code = symbol - 257;
-
-        // Decode length
-        var length = lengthBase[code];
-        final extra = lengthExtraBits[code];
-        if (extra > 0) {
-          length += input.read(extra);
-        }
-
-        // Check size limit before copy
-        final limit = maxSize;
-        if (limit != null && output.length + length > limit) {
-          throw LimitException(limit);
-        }
-
-        // Decode distance
-        final distanceCode = input.decode(distanceDecoder);
-        if (distanceCode >= 30) {
-          throw DeflateFormatException('Invalid distance code: $distanceCode');
-        }
-
-        var distance = distanceBase[distanceCode];
-        final distanceExtra = distanceExtraBits[distanceCode];
-        if (distanceExtra > 0) {
-          distance += input.read(distanceExtra);
-        }
-
-        // Copy from history
-        if (distance > output.length) {
-          throw DeflateFormatException(
-            'Distance exceeds output size: distance=$distance, '
-            'outputLength=${output.length}, length=$length, distanceCode=$distanceCode',
-          );
-        }
-
-        // Copy from history (handles overlapping copies internally).
-        output.copyFromHistory(distance, length);
-      } else {
-        throw DeflateFormatException('Invalid literal/length symbol: $symbol');
+        output.addByte(entryValue(entry));
+        continue;
       }
+      if (entry & entryException != 0) {
+        if (entry & entryEnd != 0) break;
+        throw DeflateFormatException(
+          'Invalid literal/length symbol: ${entryValue(entry)}',
+        );
+      }
+
+      // Length/distance pair: the entries hold each base and extra-bit count.
+      var length = entryValue(entry);
+      final extra = entryExtra(entry);
+      if (extra > 0) {
+        length += input.read(extra);
+      }
+
+      // Check size limit before copy
+      if (limit != null && output.length + length > limit) {
+        throw LimitException(limit);
+      }
+
+      final distanceEntry = input.decode(distanceDecoder);
+      if (distanceEntry & entryException != 0) {
+        throw DeflateFormatException(
+          'Invalid distance code: ${entryValue(distanceEntry)}',
+        );
+      }
+      var distance = entryValue(distanceEntry);
+      final distanceExtra = entryExtra(distanceEntry);
+      if (distanceExtra > 0) {
+        distance += input.read(distanceExtra);
+      }
+
+      if (distance > output.length) {
+        throw DeflateFormatException(
+          'Distance exceeds output size: distance=$distance, '
+          'outputLength=${output.length}, length=$length',
+        );
+      }
+
+      // Copy from history (handles overlapping copies internally).
+      output.copyFromHistory(distance, length);
     }
   }
 
@@ -260,63 +248,70 @@ class DeflateDecoder {
       }
 
       var entry = literals[hold & literalMask];
-      if (entry & 16 != 0) {
+      if (entry & entrySubtable != 0) {
         entry =
-            literals[(entry >> 5) +
-                ((hold >>> literalRoot) & ((1 << (entry & 0xF)) - 1))];
+            literals[(entry >> 16) +
+                ((hold >>> literalRoot) & ((1 << ((entry >> 4) & 0xF)) - 1))];
       }
-      if (entry == 0) throw DeflateFormatException('Invalid Huffman code');
-      final used = entry & 0xF;
-      hold >>>= used;
-      count -= used;
-      final symbol = entry >> 5;
 
-      if (symbol < 256) {
+      if (entry & entryLiteral != 0) {
         if (op == limit) throw LimitException(limit);
-        out[op++] = symbol;
+        final used = entry & entryLength;
+        hold >>>= used;
+        count -= used;
+        out[op++] = entry >> 16;
         continue;
       }
-      if (symbol == endBlock) {
-        done = true;
-        break;
-      }
-      if (symbol > 285) {
-        throw DeflateFormatException('Invalid literal/length symbol: $symbol');
+      if (entry & entryException != 0) {
+        final used = entry & entryLength;
+        if (used == 0) throw DeflateFormatException('Invalid Huffman code');
+        if (entry & entryEnd != 0) {
+          hold >>>= used;
+          count -= used;
+          done = true;
+          break;
+        }
+        throw DeflateFormatException(
+          'Invalid literal/length symbol: ${entry >> 16}',
+        );
       }
 
-      final code = symbol - 257;
-      final extra = _lengthExtraBits[code];
-      final length = _lengthBase[code] + (hold & ((1 << extra) - 1));
-      hold >>>= extra;
-      count -= extra;
+      // The code and its extra bits are consumed together: at most 15 + 5.
+      final used = entry & entryLength;
+      final extra = (entry >> 4) & 0xF;
+      final length = (entry >> 16) + ((hold >>> used) & ((1 << extra) - 1));
+      hold >>>= used + extra;
+      count -= used + extra;
       if (limit >= 0 && op + length > limit) throw LimitException(limit);
 
       var distanceEntry = distances[hold & distanceMask];
-      if (distanceEntry & 16 != 0) {
+      if (distanceEntry & entrySubtable != 0) {
         distanceEntry =
-            distances[(distanceEntry >> 5) +
-                ((hold >>> distanceRoot) & ((1 << (distanceEntry & 0xF)) - 1))];
+            distances[(distanceEntry >> 16) +
+                ((hold >>> distanceRoot) &
+                    ((1 << ((distanceEntry >> 4) & 0xF)) - 1))];
       }
-      if (distanceEntry == 0) {
-        throw DeflateFormatException('Invalid Huffman code');
+      if (distanceEntry & entryException != 0) {
+        if (distanceEntry & entryLength == 0) {
+          throw DeflateFormatException('Invalid Huffman code');
+        }
+        throw DeflateFormatException(
+          'Invalid distance code: ${distanceEntry >> 16}',
+        );
       }
-      final distanceUsed = distanceEntry & 0xF;
-      hold >>>= distanceUsed;
-      count -= distanceUsed;
-      final distanceCode = distanceEntry >> 5;
-      if (distanceCode >= 30) {
-        throw DeflateFormatException('Invalid distance code: $distanceCode');
-      }
-      final distanceExtra = _distanceExtraBits[distanceCode];
+      // At most 15 + 13 bits: with the length's 20, within the 48 loaded.
+      final distanceUsed = distanceEntry & entryLength;
+      final distanceExtra = (distanceEntry >> 4) & 0xF;
       final distance =
-          _distanceBase[distanceCode] + (hold & ((1 << distanceExtra) - 1));
-      hold >>>= distanceExtra;
-      count -= distanceExtra;
+          (distanceEntry >> 16) +
+          ((hold >>> distanceUsed) & ((1 << distanceExtra) - 1));
+      hold >>>= distanceUsed + distanceExtra;
+      count -= distanceUsed + distanceExtra;
 
       if (distance > op) {
         throw DeflateFormatException(
           'Distance exceeds output size: distance=$distance, '
-          'outputLength=$op, length=$length, distanceCode=$distanceCode',
+          'outputLength=$op, length=$length',
         );
       }
       final from = op - distance;

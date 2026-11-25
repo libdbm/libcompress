@@ -12,6 +12,13 @@ import 'package:libcompress/src/zstd/streaming_zstd_encoder.dart';
 // Literal-section tests drive the block and Huffman encoders directly.
 import 'package:libcompress/src/zstd/compressed_block_encoder.dart';
 import 'package:libcompress/src/zstd/huffman_encoder.dart';
+// Repeat offset tests count the Offset_Values the match finder emits.
+import 'package:libcompress/src/zstd/match_finder.dart';
+// The sequence table test compares the table builder with the FSE decoder.
+import 'package:libcompress/src/zstd/fse_decoder.dart';
+import 'package:libcompress/src/zstd/fse_encoder.dart';
+import 'package:libcompress/src/zstd/sequence_constants.dart' as seq;
+import 'package:libcompress/src/zstd/sequence_tables.dart';
 
 import 'support/differential_fuzz.dart';
 import 'test_utils.dart';
@@ -723,6 +730,88 @@ void main() {
       );
     });
 
+    group('frame window cap', () {
+      // A frame with a window descriptor ([windowByte]: exponent << 3, so a
+      // window of 2^(10 + exponent) bytes) and one raw last block 'abc'.
+      Uint8List frame(final int windowByte) => bytes([
+        0x28, 0xB5, 0x2F, 0xFD, 0x00, windowByte, //
+        0x19, 0x00, 0x00, 0x61, 0x62, 0x63,
+      ]);
+      const window256M = 18 << 3;
+      const window128M = 17 << 3;
+
+      Future<void> expectWindow(
+        final Uint8List data,
+        final int window,
+        final int? rejected,
+      ) async {
+        final block = ZstdCodec(window: window);
+        final stream = ZstdStreamCodec(window: window);
+        if (rejected == null) {
+          expect(block.decompress(data), 'abc'.codeUnits);
+          expect(
+            await collect(stream.decompress(Stream.value(data))),
+            'abc'.codeUnits,
+          );
+          return;
+        }
+        final matcher = throwsA(
+          isA<LimitException>()
+              .having((final e) => e.limit, 'limit', window)
+              .having(
+                (final e) => e.message,
+                'message',
+                contains('Frame window of $rejected bytes'),
+              ),
+        );
+        expect(() => block.decompress(data), matcher);
+        await expectLater(
+          collect(stream.decompress(Stream.value(data))),
+          matcher,
+        );
+      }
+
+      test('defaults to 128 MB', () {
+        expect(zstdDefaultWindow, 128 * 1024 * 1024);
+        expect(ZstdCodec().window, zstdDefaultWindow);
+        expect(ZstdStreamCodec().window, zstdDefaultWindow);
+        expect(ZstdOptions().window, zstdDefaultWindow);
+      });
+
+      test('rejects a declared window above the cap', () async {
+        await expectWindow(frame(window256M), zstdDefaultWindow, 1 << 28);
+        await expectWindow(frame(0x00), 512, 1024);
+      });
+
+      test('accepts a declared window at or below the cap', () async {
+        await expectWindow(frame(window128M), zstdDefaultWindow, null);
+        await expectWindow(frame(window256M), 1 << 28, null);
+      });
+
+      test('does not check single-segment frames', () async {
+        // Single-segment, 1-byte content size 3: no window descriptor.
+        final single = bytes([
+          0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x03, //
+          0x19, 0x00, 0x00, 0x61, 0x62, 0x63,
+        ]);
+        await expectWindow(single, 1, null);
+      });
+
+      test('options carry the window', () {
+        final options = ZstdOptions(window: 1 << 20);
+        expect(ZstdCodec.fromOptions(options).window, 1 << 20);
+        expect(ZstdStreamCodec.fromOptions(options).window, 1 << 20);
+      });
+
+      test('rejects a non-positive window', () {
+        for (final window in [0, -1]) {
+          expect(() => ZstdCodec(window: window), throwsArgumentError);
+          expect(() => ZstdStreamCodec(window: window), throwsArgumentError);
+          expect(() => ZstdOptions(window: window), throwsArgumentError);
+        }
+      });
+    });
+
     test('rejects absurd declared contentSize in header', () {
       final codec = ZstdCodec(maxSize: 1024);
       final frame = _buildFrameWithContentSize(0xFFFFFFFF); // 4GB declared
@@ -905,6 +994,197 @@ void main() {
         expect(out.length, lessThan(data.length));
       },
     );
+  });
+
+  group('Zstd sequence tables', () {
+    test('built tables equal the FSE decoder table entry for entry', () {
+      void check(final List<int> counts, final int log, final String label) {
+        final reference = FseDecoder()..buildTable(List.of(counts), log);
+        final table = SequenceCodingTable.fromCounts(
+          counts,
+          log,
+          SequenceComponent.matchLength,
+        );
+        for (var state = 0; state < 1 << log; state++) {
+          final entry = reference.tableEntries[state];
+          expect(
+            [table.symbols[state], table.widths[state], table.nexts[state]],
+            [entry.symbol, entry.numberOfBits, entry.baseline],
+            reason: '$label state $state',
+          );
+          expect(
+            table.bases[state],
+            seq.matchLengthBase[entry.symbol],
+            reason: '$label state $state',
+          );
+          expect(
+            table.extras[state],
+            seq.matchLengthBits[entry.symbol],
+            reason: '$label state $state',
+          );
+        }
+      }
+
+      check(seq.llDefaultNorm, seq.llDefaultNormLog, 'predefined LL');
+      check(seq.ofDefaultNorm, seq.ofDefaultNormLog, 'predefined OF');
+      check(seq.mlDefaultNorm, seq.mlDefaultNormLog, 'predefined ML');
+      final random = Random(5);
+      for (var round = 0; round < 300; round++) {
+        final frequencies = List<int>.generate(
+          53,
+          (_) => random.nextInt(4) == 0 ? 0 : random.nextInt(1000),
+        );
+        frequencies[random.nextInt(53)] = 1 + random.nextInt(50);
+        // A log from the smallest that holds every symbol up to 9.
+        final used = frequencies.where((final f) => f > 0).length;
+        final least = max(5, (used - 1).bitLength);
+        final log = least + random.nextInt(10 - least);
+        final encoder = FseEncoder()..build(frequencies, log, 52);
+        final counts = List.of(encoder.normalized);
+        // A count of 1 may be written as -1 (less than 1): it takes a state
+        // at the top of the table.
+        for (var i = 0; i < counts.length; i++) {
+          if (counts[i] == 1 && random.nextBool()) counts[i] = -1;
+        }
+        check(counts, encoder.tableLog, 'round $round');
+      }
+    });
+  });
+
+  group('Zstd encoder state', () {
+    test('a block is RLE only when every byte is the same', () {
+      for (final value in [0, 0x7F, 0x80, 0xFF]) {
+        for (final length in [1, 15, 16, 17, 23, 24, 40, 128 * 1024]) {
+          final same = Uint8List(length)..fillRange(0, length, value);
+          expect(_blockTypes(ZstdCodec().compress(same)), [
+            1,
+          ], reason: '$value x $length');
+          // One byte different, at the start, in the word part and in the
+          // tail.
+          for (final at in {
+            0,
+            1,
+            length ~/ 2,
+            length - 9,
+            length - 1,
+          }.where((final at) => at >= 0 && at < length && length > 1)) {
+            final data = Uint8List.fromList(same)..[at] = value ^ 1;
+            final frame = ZstdCodec().compress(data);
+            expect(
+              _blockTypes(frame).first,
+              isNot(1),
+              reason: '$value x $length, $at',
+            );
+            expect(ZstdCodec().decompress(frame), data);
+          }
+        }
+      }
+    });
+
+    test('literals of one byte are an RLE section', () {
+      // A random block, then blocks of random slices of it, each followed by
+      // 'z' and padded with 'z' at both ends, so that every literal in those
+      // blocks is 'z'.
+      final random = Random(7);
+      final source = pseudoRandom(4096, 7);
+      final data = Uint8List(64 * 1024)..setRange(0, 4096, source);
+      for (var start = 4096; start < data.length; start += 4096) {
+        data.fillRange(start, start + 4096, 0x7A);
+        var at = start + 16;
+        while (at < start + 4096 - 120) {
+          final length = 40 + random.nextInt(60);
+          final from = random.nextInt(source.length - length);
+          data.setRange(at, at + length, source, from);
+          at += length + 1;
+        }
+      }
+      final codec = ZstdCodec(level: 19, blockSize: 4096, strict: true);
+      final frame = codec.compress(data);
+      expect(_sections(frame), contains(1));
+      expect(codec.decompress(frame), data);
+      expect(
+        ZstdCodec(level: 19, blockSize: 4096, validate: true).compress(data),
+        frame,
+      );
+    });
+
+    test('similar blocks reuse the previous Huffman tree', () {
+      final data = readDataFixture('large/world192.txt');
+      final codec = ZstdCodec(blockSize: 4096, strict: true);
+      final frame = codec.compress(data);
+      expect(_sections(frame), contains(3));
+      expect(codec.decompress(frame), data);
+    });
+
+    test('repeat offsets are coded as repeats at every level', () {
+      // Records whose fields keep their distances: matches recur at the
+      // offsets just used.
+      final text = StringBuffer();
+      for (var i = 0; i < 2000; i++) {
+        text.write('id=${i * 7919 % 100000};name=n${i % 13};v=${i % 97}\n');
+      }
+      final data = bytes(text.toString().codeUnits);
+      for (final level in [1, 3, 6, 19]) {
+        final finder = MatchFinder(
+          depth: 32,
+          min: level >= 6 ? 3 : 4,
+          nice: 64,
+          strength: level <= 5 ? 8 : 31,
+          fast: level <= 3,
+        );
+        finder.find(data, 0, data.length);
+        final sequences = finder.sequences;
+        var repeats = 0;
+        for (var i = 0; i < sequences.count; i++) {
+          if (sequences.offsets[i] <= 3) repeats++;
+        }
+        expect(repeats, greaterThan(sequences.count ~/ 10), reason: 'L$level');
+        expectRoundTrip(ZstdCodec(level: level, validate: true), data);
+      }
+    });
+
+    for (final stream in [false, true]) {
+      test('${stream ? 'stream' : 'frame'}: a block written raw keeps the '
+          'repeat offsets of the block before it', () async {
+        final data = _rawMiddleBlock();
+        final Uint8List frame;
+        if (stream) {
+          final codec = ZstdStreamCodec(
+            level: 6,
+            blockSize: 4096,
+            checksum: true,
+          );
+          frame = await collect(codec.compress(Stream.value(data)));
+          expect(await collect(codec.decompress(Stream.value(frame))), data);
+        } else {
+          final codec = ZstdCodec(level: 6, blockSize: 4096, checksum: true);
+          frame = codec.compress(data);
+          expect(codec.decompress(frame), data);
+        }
+        // A stream that ends on a block boundary adds an empty raw block.
+        expect(_blockTypes(frame).take(3), [2, 0, 2]);
+        if (!await cliAvailableCached('zstd')) {
+          markTestSkipped('zstd CLI tool not available');
+          return;
+        }
+        await _expectCliReadsFrame(frame, data);
+      });
+    }
+
+    test('CLI decodes the corpus at levels 1, 6 and 19', () async {
+      if (!await cliAvailableCached('zstd')) {
+        markTestSkipped('zstd CLI tool not available');
+        return;
+      }
+      for (final level in [1, 6, 19]) {
+        final codec = ZstdCodec(level: level);
+        for (final path in standardFixtures) {
+          if (level == 19 && path.startsWith('large/')) continue;
+          final data = readDataFixture(path);
+          await _expectCliReadsFrame(codec.compress(data), data);
+        }
+      }
+    });
   });
 
   group('Zstd CLI compatibility', () {
@@ -1701,10 +1981,7 @@ void main() {
         }
         final block = CompressedBlockEncoder(strict: true).encodeBlock(data);
         expect(treeHeader(block), 127 + 128);
-        // The 2.1.0 output, from before FSE-compressed weights.
-        final compressed = ZstdCodec().compress(data);
-        expect(compressed.length, 52921);
-        expect(Crc32.hash(compressed), 0xbfbb25ca);
+        expectRoundTrip(ZstdCodec(strict: true), data);
       });
 
       test('equal weights have no FSE description', () {
@@ -1725,8 +2002,13 @@ void main() {
             final block = encoder.encodeBlock(
               Uint8List.sublistView(data, offset, end),
             );
-            // Literals_Block_Type is the low two bits: 2 = Compressed.
-            expect(block[0] & 0x03, 2, reason: 'block at $offset');
+            // Literals_Block_Type is the low two bits: 2 = Compressed, with a
+            // tree; 3 = Treeless, reusing the previous block's tree.
+            expect(
+              block[0] & 0x03,
+              offset == 0 ? 2 : anyOf(2, 3),
+              reason: 'block at $offset',
+            );
           }
         });
       }
@@ -1992,6 +2274,57 @@ void main() {
             128, weight << 4, 0xFF, 1, 0,
           ]),
           'weight $weight',
+        );
+      }
+    });
+
+    test(
+      'FSE weights shorter than their initial states are rejected',
+      () async {
+        // Accuracy log 5, so the two states need 10 bits, but the weight
+        // bitstream is one byte holding only its end marker (0 bits).
+        const weights = [4, 16, 136, 31, 0x01]; // size, description, stream
+        const value = 2 | (4 << 4) | (7 << 14); // 4 literals in 7 bytes
+        final frame = blockFrame([
+          value & 255, (value >> 8) & 255, value >> 16, //
+          ...weights, 0x80, 0x01, 0,
+        ]);
+        final rejected = throwsA(
+          isA<ZstdFormatException>().having(
+            (final error) => error.message,
+            'message',
+            contains('initial states'),
+          ),
+        );
+        expect(() => ZstdCodec().decompress(frame), rejected);
+        await expectLater(
+          collect(ZstdStreamCodec().decompress(Stream.value(frame))),
+          rejected,
+        );
+      },
+    );
+
+    test('Huffman weights must end inside the literals section', () async {
+      // Each section declares 2 compressed bytes, but its weight description
+      // is longer and runs into the bytes that follow, still in the block.
+      final rejected = throwsA(
+        isA<ZstdFormatException>().having(
+          (final error) => error.message,
+          'message',
+          contains('exceed the literals section'),
+        ),
+      );
+      const value = 2 | (4 << 4) | (2 << 14); // 4 literals in 2 bytes
+      final header = [value & 255, (value >> 8) & 255, value >> 16];
+      for (final weights in [
+        [0x83, 0x11, 0x11], // direct: 4 weights in 2 bytes
+        [4, 16, 136, 31, 0x01], // FSE: a 4-byte stream
+      ]) {
+        final frame = blockFrame([...header, ...weights, 0, 0, 0, 0]);
+        expect(() => ZstdCodec().decompress(frame), rejected);
+        await expectLater(
+          collect(ZstdStreamCodec().decompress(Stream.value(frame))),
+          rejected,
         );
       }
     });
@@ -2321,5 +2654,83 @@ List<({bool last, int type, int size})> _blocks(final Uint8List frame) {
     blocks.add(block);
     offset += 3 + (block.type == 1 ? 1 : block.size);
     if (block.last) return blocks;
+  }
+}
+
+/// Three 4 KB blocks for level 6: text, then random bytes holding one
+/// 5-byte repeat 1000 bytes back, then a byte and a 32-byte copy from 1000
+/// bytes back, then text. The middle block's encoding finds the repeat, which
+/// makes 1000 the encoder's newest repeat offset, but the block is written
+/// raw, so the decoder never sees it. An encoder that kept the offset would
+/// code the third block's copy as a repeat of 1000, which the decoder reads
+/// with the first block's offset instead.
+Uint8List _rawMiddleBlock() {
+  final text = bytes(
+    List<String>.filled(
+      200,
+      'the quick brown fox jumps over the lazy dog ',
+    ).join().codeUnits,
+  );
+  final data = Uint8List(3 * 4096);
+  data.setRange(0, 4096, text);
+  data.setRange(4096, 8192, pseudoRandom(4096, 99));
+  data.setRange(4096 + 2000, 4096 + 2005, data, 4096 + 1000);
+  data.setRange(8192, 3 * 4096, text, 7);
+  data[8192] = 0xFF;
+  data.setRange(8193, 8225, data, 8193 - 1000);
+  return data;
+}
+
+/// The block types (0 raw, 1 RLE, 2 compressed) of the blocks of [frame].
+List<int> _blockTypes(final Uint8List frame) {
+  final types = <int>[];
+  _visit(frame, (final type, final at) => types.add(type));
+  return types;
+}
+
+/// The literals section type (0 raw, 1 RLE, 2 Huffman, 3 Huffman reusing the
+/// previous tree) of each compressed block of [frame].
+List<int> _sections(final Uint8List frame) {
+  final types = <int>[];
+  _visit(frame, (final type, final at) {
+    if (type == 2) types.add(frame[at] & 3);
+  });
+  return types;
+}
+
+/// Calls [visit] with the type and body offset of each block of [frame].
+void _visit(
+  final Uint8List frame,
+  final void Function(int type, int at) visit,
+) {
+  final flags = frame[4];
+  final single = (flags & 0x20) != 0;
+  final width = flags >> 6;
+  var at = 5 + (single ? 0 : 1) + (width == 0 ? (single ? 1 : 0) : 1 << width);
+  while (true) {
+    final header = frame[at] | frame[at + 1] << 8 | frame[at + 2] << 16;
+    at += 3;
+    final type = (header >> 1) & 3;
+    visit(type, at);
+    at += type == 1 ? 1 : header >> 3;
+    if ((header & 1) != 0) return;
+  }
+}
+
+/// Decodes [frame] with the zstd CLI and expects [original].
+Future<void> _expectCliReadsFrame(
+  final Uint8List frame,
+  final Uint8List original,
+) async {
+  final directory = await Directory.systemTemp.createTemp('libcompress_zstd');
+  final path = '${directory.path}/in.zst';
+  final out = '${directory.path}/out.bin';
+  try {
+    await File(path).writeAsBytes(frame);
+    final result = await Process.run('zstd', ['-d', '-f', '-o', out, path]);
+    expect(result.exitCode, 0, reason: 'zstd -d failed: ${result.stderr}');
+    expect(await File(out).readAsBytes(), equals(original));
+  } finally {
+    await directory.delete(recursive: true);
   }
 }

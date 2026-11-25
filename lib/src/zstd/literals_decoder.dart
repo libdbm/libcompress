@@ -254,10 +254,18 @@ class LiteralsDecoder {
   ) {
     var pos = offset;
 
+    final compressedEnd = offset + compressedSize;
+    if (compressedEnd > data.length) {
+      throw ZstdFormatException(
+        'Compressed literals exceed input buffer: '
+        'end=$compressedEnd, length=${data.length}',
+      );
+    }
+
     // Build Huffman decoder if we have a tree
     HuffmanDecoder? decoder;
     if (hasTree) {
-      final weightsResult = _decodeHuffmanWeights(data, pos);
+      final weightsResult = _decodeHuffmanWeights(data, pos, compressedEnd);
       final weights = weightsResult.$1;
       pos = weightsResult.$2;
 
@@ -274,14 +282,6 @@ class LiteralsDecoder {
           'Treeless Huffman mode requires previous tree',
         );
       }
-    }
-
-    final compressedEnd = offset + compressedSize;
-    if (compressedEnd > data.length) {
-      throw ZstdFormatException(
-        'Compressed literals exceed input buffer: '
-        'end=$compressedEnd, length=${data.length}',
-      );
     }
 
     final treeBytes = pos - offset;
@@ -369,8 +369,14 @@ class LiteralsDecoder {
     var state1 = reader.readBits(accuracyLog);
     var state2 = reader.readBits(accuracyLog);
 
-    // Now load before decoding loop
+    // Now load before decoding loop. A stream too short for the two states
+    // is corrupt, as in the reference FSE_decompress_usingDTable_generic.
     reader.load();
+    if (reader.isOverflow) {
+      throw ZstdFormatException(
+        'FSE weight stream too short for its initial states',
+      );
+    }
 
     // Decode weights from FSE stream. A table holds at most 255 weights (the
     // last symbol's weight is implied), and that output size is what bounds
@@ -445,9 +451,14 @@ class LiteralsDecoder {
     return weights;
   }
 
-  /// Decode Huffman weights from header
-  (List<int>, int) _decodeHuffmanWeights(final Uint8List data, int offset) {
-    if (offset >= data.length) {
+  /// Decode Huffman weights from header, which must end by [end], the end of
+  /// the literals section.
+  (List<int>, int) _decodeHuffmanWeights(
+    final Uint8List data,
+    int offset,
+    final int end,
+  ) {
+    if (offset >= end) {
       throw ZstdFormatException('Missing Huffman weights header');
     }
 
@@ -459,8 +470,10 @@ class LiteralsDecoder {
       final fseStreamSize = header;
       final fseStreamEnd = offset + fseStreamSize;
 
-      if (fseStreamEnd > data.length) {
-        throw ZstdFormatException('FSE Huffman stream exceeds data length');
+      if (fseStreamEnd > end) {
+        throw ZstdFormatException(
+          'FSE Huffman weights exceed the literals section',
+        );
       }
 
       // Maximum possible Huffman symbols is 256 (one per byte value)
@@ -481,8 +494,10 @@ class LiteralsDecoder {
       final numWeights = header - 127;
       final numBytes = (numWeights + 1) ~/ 2; // Round up
 
-      if (offset + numBytes > data.length) {
-        throw ZstdFormatException('Not enough data for Huffman weights');
+      if (offset + numBytes > end) {
+        throw ZstdFormatException(
+          'Direct Huffman weights exceed the literals section',
+        );
       }
 
       final weights = List<int>.filled(numWeights, 0, growable: false);

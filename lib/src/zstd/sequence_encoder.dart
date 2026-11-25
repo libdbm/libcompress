@@ -21,13 +21,13 @@ final FseCompressionTable _predefinedMlTable = FseCompressionTable.create(
   52,
 );
 
-/// The offset code of absolute [offset] (RFC 8878 §3.1.1.3.2.1.1): Offset_Value
-/// is offset + 3, and code `n` covers values `2^n .. 2^(n+1) - 1`, so the code
-/// is the highest set bit of offset + 3 (`offsetBase[n]` is `2^n - 3`).
-int _offsetSymbol(final int offset) {
-  final symbol = (offset + 3).bitLength - 1;
-  if (offset < 1 || symbol >= seq.offsetBase.length) {
-    throw StateError('Unable to encode offset $offset');
+/// The offset code of an `Offset_Value` (RFC 8878 section 3.1.1.3.2.1.1):
+/// 1-3 for a repeat offset, the distance plus 3 otherwise. Code `n` covers
+/// values `2^n .. 2^(n+1) - 1`, so it is the value's highest set bit.
+int _offsetSymbol(final int value) {
+  final symbol = value.bitLength - 1;
+  if (value < 1 || symbol >= seq.offsetBase.length) {
+    throw StateError('Unable to encode offset value $value');
   }
   return symbol;
 }
@@ -183,8 +183,7 @@ class SequenceEncoder {
   }
 
   /// Writes the extra bits of sequence [index]: literal length, match length,
-  /// then offset (absolute offsets only; repeat-offset codes are frame
-  /// stateful across blocks, and this encoder builds each block on its own).
+  /// then offset (the `Offset_Value` less `2^code`).
   void _writeExtras(
     final BitStreamWriter stream,
     final Sequences sequences,
@@ -203,7 +202,7 @@ class SequenceEncoder {
     );
     final offset = codes.offsets[index];
     stream.writeBits(
-      sequences.offsets[index] - seq.offsetBase[offset],
+      sequences.offsets[index] - (1 << offset),
       seq.offsetBits[offset],
     );
   }
@@ -228,7 +227,7 @@ final class SequenceCodes {
   /// Literal-length codes (0..35).
   Uint8List get literals => _literals;
 
-  /// Offset codes (0..31), from absolute offsets.
+  /// Offset codes (0..31), from `Offset_Value`s.
   Uint8List get offsets => _offsets;
 
   /// Match-length codes (0..52).

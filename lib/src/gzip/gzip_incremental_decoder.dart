@@ -6,7 +6,6 @@ import '../util/crc32.dart';
 import '../util/incremental_decoder.dart';
 import '../util/output_limit.dart';
 import '../util/window_buffer.dart';
-import 'deflate_common.dart';
 import 'deflate_reader.dart';
 import 'gzip_frame.dart';
 import 'huffman_tables.dart';
@@ -259,28 +258,29 @@ class GzipIncrementalDecoder implements IncrementalDecoder {
 
   /// Decodes one literal/match. Returns true at end-of-block.
   bool _decodeOneSymbol(final DeflateReader input, final WindowBuffer output) {
-    final symbol = input.decode(_litDecoder!);
-    if (symbol < 256) {
-      output.addByte(symbol);
+    final entry = input.decode(_litDecoder!);
+    if (entry & entryLiteral != 0) {
+      output.addByte(entryValue(entry));
       return false;
     }
-    if (symbol == endBlock) {
-      return true;
+    if (entry & entryException != 0) {
+      if (entry & entryEnd != 0) return true;
+      throw DeflateFormatException(
+        'Invalid literal/length symbol: ${entryValue(entry)}',
+      );
     }
-    if (symbol > 285) {
-      throw DeflateFormatException('Invalid literal/length symbol: $symbol');
-    }
-    final code = symbol - 257;
-    var length = lengthBase[code];
-    final extra = lengthExtraBits[code];
+    var length = entryValue(entry);
+    final extra = entryExtra(entry);
     if (extra > 0) length += input.read(extra);
 
-    final distanceCode = input.decode(_distDecoder!);
-    if (distanceCode >= 30) {
-      throw DeflateFormatException('Invalid distance code: $distanceCode');
+    final distanceEntry = input.decode(_distDecoder!);
+    if (distanceEntry & entryException != 0) {
+      throw DeflateFormatException(
+        'Invalid distance code: ${entryValue(distanceEntry)}',
+      );
     }
-    var distance = distanceBase[distanceCode];
-    final distExtra = distanceExtraBits[distanceCode];
+    var distance = entryValue(distanceEntry);
+    final distExtra = entryExtra(distanceEntry);
     if (distExtra > 0) distance += input.read(distExtra);
 
     if (distance > output.length || distance > _deflateWindow) {

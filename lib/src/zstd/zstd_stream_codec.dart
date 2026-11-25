@@ -31,6 +31,11 @@ final class ZstdStreamCodec extends CompressionStreamCodec {
   /// Maximum buffer size for compressed data before rejecting
   final int maxBufferSize;
 
+  /// Largest declared frame window accepted when decoding, in bytes. A frame
+  /// that declares a larger window throws [LimitException]. Defaults to
+  /// [zstdDefaultWindow] (128MB).
+  final int window;
+
   /// Whether to validate compressed blocks by decompressing them
   final bool validate;
 
@@ -55,6 +60,7 @@ final class ZstdStreamCodec extends CompressionStreamCodec {
     this.checksum = false,
     this.maxSize = defaultMaxSize,
     this.maxBufferSize = defaultMaxBufferSize,
+    this.window = zstdDefaultWindow,
     this.validate = false,
     this.verified = false,
     this.strict = false,
@@ -64,6 +70,7 @@ final class ZstdStreamCodec extends CompressionStreamCodec {
     validateRange(blockSize, 1, zstdMaxBlockSize, 'blockSize');
     validateOptionalPositive(maxSize, 'maxSize');
     validatePositive(maxBufferSize, 'maxBufferSize');
+    validatePositive(window, 'window');
   }
 
   /// Creates a Zstd stream codec from [options].
@@ -73,6 +80,7 @@ final class ZstdStreamCodec extends CompressionStreamCodec {
       blockSize: options.blockSize,
       checksum: options.checksum,
       maxSize: options.maxSize,
+      window: options.window,
       validate: options.validate,
       strict: options.strict,
       onFallback: options.onFallback,
@@ -108,6 +116,7 @@ final class ZstdStreamCodec extends CompressionStreamCodec {
         maxSize: maxSize,
         maxBufferSize: maxBufferSize,
         verified: verified,
+        window: window,
       ),
     ).bind(input);
   }

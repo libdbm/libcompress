@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import '../util/byte_utils.dart';
+import '../util/platform.dart';
 import '../util/xxh64.dart';
 import 'zstd_common.dart';
 import 'compressed_block_encoder.dart';
@@ -15,10 +16,12 @@ import 'compressed_block_encoder.dart';
 /// - Level 16: Very high compression (search depth 512)
 /// - Level 17-22: Maximum compression (search depth 1024)
 ///
-/// Current implementation uses:
-/// - Hash chain match finding with level-based search depth
-/// - Huffman-compressed literals for compressible data
-/// - FSE-compressed sequences
+/// Current implementation uses (as the Java port):
+/// - Double-fast match finding at levels 1-3; hash chains with lazy matching
+///   above, with level-based search depth
+/// - Match tables and repeat offsets kept across the blocks of a frame
+/// - RLE, Huffman or treeless (previous tree) literals, or raw
+/// - FSE-compressed sequences with predefined or custom tables
 /// - Raw/RLE blocks for incompressible/repetitive data
 /// - XXH64 content checksum (optional)
 class ZstdEncoder {
@@ -48,13 +51,13 @@ class ZstdEncoder {
 
   // Reused across compress() calls and blocks (its match finder owns large
   // hash/chain tables that should be allocated once, not per block).
-  late final CompressedBlockEncoder _compressedEncoder = CompressedBlockEncoder(
-    searchDepth: searchDepth,
-    minMatch: minMatchLen,
-    validate: validate,
-    strict: strict,
-    onFallback: onFallback,
-  );
+  late final CompressedBlockEncoder _compressedEncoder =
+      CompressedBlockEncoder.level(
+        level,
+        validate: validate,
+        strict: strict,
+        onFallback: onFallback,
+      );
 
   /// Number of blocks that fell back to raw output due to an unexpected encode
   /// error (0 in healthy operation; >0 signals a compression regression).
@@ -115,7 +118,11 @@ class ZstdEncoder {
     if (input.isEmpty) {
       pos = _writeBlockHeader(output, pos, true, ZstdBlockType.raw, 0);
     } else {
-      final compressedEncoder = _compressedEncoder;
+      // Frame mode: the match tables and repeat offsets persist across the
+      // blocks of this frame. They are set up at the first block that is not
+      // RLE, so input of RLE blocks only never clears them; nothing reads
+      // them before that block, so the output is the same.
+      var framed = false;
 
       // Compress data in blocks
       var offset = 0;
@@ -131,12 +138,24 @@ class ZstdEncoder {
         if (_isRleCandidate(chunk)) {
           pos = _writeRleBlock(output, pos, chunk, isLastBlock);
         } else {
+          if (!framed) {
+            _compressedEncoder.frame(input, input.length);
+            framed = true;
+          }
           // Try compressed block encoding with FSE sequences
           // Falls back to raw if compression doesn't help
-          final compressed = compressedEncoder.encodeBlock(chunk);
+          final compressed = _compressedEncoder.encodeBlock(
+            input,
+            from: offset,
+            end: offset + chunkSize,
+            persistent: true,
+          );
           if (compressed.length < chunk.length && compressed.isNotEmpty) {
             pos = _writeCompressedBlock(output, pos, compressed, isLastBlock);
           } else {
+            // The decoder keeps neither this block's repeat offsets nor its
+            // Huffman tree.
+            _compressedEncoder.discard();
             pos = _writeRawBlock(output, pos, chunk, isLastBlock);
           }
         }
@@ -184,8 +203,7 @@ class ZstdEncoder {
 
     // Single segment (window = content size) up to the 8 MB window RFC 8878
     // recommends every decoder support; larger content declares an 8 MB
-    // window instead. Matches never cross a block, so offsets stay well
-    // inside it.
+    // window instead. Matches reach at most 4 MB back, inside it.
     final single = contentSize <= _windowLimit;
     if (single) {
       descriptor |= 0x20;
@@ -321,8 +339,18 @@ class ZstdEncoder {
     if (chunk.isEmpty) return false;
 
     final firstByte = chunk[0];
-
-    for (var i = 1; i < chunk.length; i++) {
+    var i = 1;
+    // 8 bytes at a time on the VM, against the first byte repeated (built
+    // from 32-bit halves: the 64-bit literal is not exact on dart2js).
+    if (wide && chunk.length >= 16) {
+      final view = ByteData.sublistView(chunk);
+      final half = firstByte * 0x01010101;
+      final word = half << 32 | half;
+      for (; i + 8 <= chunk.length; i += 8) {
+        if (view.getUint64(i, Endian.little) != word) return false;
+      }
+    }
+    for (; i < chunk.length; i++) {
       if (chunk[i] != firstByte) {
         return false;
       }
