@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import '../util/lz77_common.dart';
 import '../util/byte_utils.dart';
+import '../util/growable_buffer.dart' show trim;
 import '../util/varint.dart';
 
 /// Native Dart implementation of Snappy compression
@@ -57,10 +58,9 @@ class SnappyEncoder {
       sourceIndex = blockEnd;
     }
 
-    // Return trimmed result
-    return Uint8List.fromList(
-      Uint8List.sublistView(compressed, 0, compressedIndex),
-    );
+    // A copy only when the worst-case buffer is more than twice the result,
+    // so a small result does not keep it alive.
+    return trim(compressed, compressedIndex);
   }
 
   /// Compress a single block of data

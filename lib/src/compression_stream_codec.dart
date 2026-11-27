@@ -78,7 +78,8 @@ import 'dart:typed_data';
 /// );
 /// ```
 abstract base class CompressionStreamCodec {
-  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4' or 'ZSTD'.
+  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4', 'ZSTD'
+  /// or 'BROTLI'.
   String get name;
 
   /// Compresses a stream of data chunks

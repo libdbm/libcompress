@@ -108,9 +108,25 @@ class WindowBuffer implements DirectSink {
     final from = _length - distance;
     if (distance >= length) {
       _buffer.setRange(_length, _length + length, _buffer, from);
-    } else {
+    } else if (length <= 32) {
       for (var i = 0; i < length; i++) {
         _buffer[_length + i] = _buffer[from + i];
+      }
+    } else {
+      // Doubling copies from the pattern start, as GrowableBuffer does: each
+      // is a whole number of periods, and its source ends before its
+      // destination begins.
+      var copied = distance;
+      _buffer.setRange(_length, _length + distance, _buffer, from);
+      while (copied < length) {
+        final count = copied < length - copied ? copied : length - copied;
+        _buffer.setRange(
+          _length + copied,
+          _length + copied + count,
+          _buffer,
+          from,
+        );
+        copied += count;
       }
     }
     _length += length;

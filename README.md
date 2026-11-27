@@ -1,6 +1,7 @@
 # libcompress
 
-A pure Dart compression library with native implementations of LZ4, Snappy, GZIP, raw DEFLATE, and Zstd algorithms.
+A pure Dart compression library with native implementations of LZ4, Snappy, GZIP, raw DEFLATE, Zstd, and Brotli
+algorithms.
 No native dependencies - works on all Dart platforms (VM and web).
 
 ## Features
@@ -41,8 +42,19 @@ No native dependencies - works on all Dart platforms (VM and web).
   - **Not supported:** dictionary-compressed frames (frames with a non-zero Dictionary_ID
     are rejected) and the legacy (pre-v0.8) frame formats
 
+- **Brotli Compression**: Brotli implementation (RFC 7932)
+  - The decoder handles the whole format: block switching, context modeling, the static dictionary and its 121
+    transforms, and windows up to 16MB; streams from the `brotli` tool at every quality decode
+  - The encoder writes valid streams with one block type per category, no context modeling and no dictionary
+    references, so its output is larger than the reference encoder's at the same quality; at the default level 6 it
+    is 3-32% smaller than GZIP level 6 on compressible data
+  - Compression levels 1-11 and windows (`WBITS`) 10-24, default 22
+  - Brotli has no checksum, so there is no `verified` stream mode, and bytes after the stream are an error
+  - **Not supported:** the large-window extension (rejected) and shared dictionaries (RFC 9842); a stream
+    compressed with a shared dictionary cannot be detected and decodes to wrong bytes or fails
+
 - **Stream Processing**: every codec has a stream codec for its framed format (LZ4 frame, Snappy framing, GZIP,
-  Zstd); raw and Hadoop blocks are block-only
+  Zstd, Brotli); raw and Hadoop blocks are block-only
 
 ## Usage
 
@@ -89,6 +101,7 @@ it, and output of any other length is rejected.
 | `LZ4`         | `Lz4Codec(format: Lz4Format.hadoop)` |
 | `LZ4_RAW`     | `Lz4Codec(format: Lz4Format.raw)` |
 | `ZSTD`        | `ZstdCodec()` |
+| `BROTLI`      | `BrotliCodec()` |
 
 ```dart
 final codec = Lz4Codec(format: Lz4Format.raw);
@@ -98,7 +111,7 @@ final page = codec.decompress(compressedPage, size: uncompressedPageSize);
 ### Errors and limits
 
 Malformed input raises a `CompressionFormatException` subclass (`Lz4FormatException`, `GzipFormatException`,
-`ZstdFormatException`, `SnappyFormatException`). Exceeding a limit (a codec's `maxSize`, an expected `size`, or a
+`ZstdFormatException`, `SnappyFormatException`, `BrotliFormatException`). Exceeding a limit (a codec's `maxSize`, an expected `size`, or a
 stream's `maxBufferSize`) raises `LimitException`, which is also a `CompressionFormatException` and carries the
 `limit` that was exceeded:
 
@@ -132,6 +145,7 @@ dart run :libcompress --zstd -9 input.txt output.zst
 dart run :libcompress --zstd --level 19 input.txt output.zst
 dart run :libcompress --gzip input.txt output.gz
 dart run :libcompress --snappy input.txt output.sz
+dart run :libcompress --brotli --level 11 --window 24 input.txt output.br
 
 # Raw and Hadoop formats (Parquet)
 dart run :libcompress --lz4 --raw input.bin page.lz4raw
@@ -181,6 +195,14 @@ dart run :libcompress --lz4 -9 --block-size 1M input.txt output.lz4
 - Huffman and sequence bitstreams must be consumed exactly (RFC 8878), so corrupt frames are rejected rather than
   decoded to wrong bytes
 
+### Brotli
+- Decoder: two-level prefix-code tables (8-bit root), the four literal context modes, and the static dictionary
+  (RFC 7932 Appendix A) stored in the package and decoded on first use
+- Encoder: hash-chain LZ77 (greedy at levels 1-3, lazy above, chain depth 4-4096); matches reach back up to 1MB;
+  each 256KB meta-block is written compressed, or stored when that is smaller
+- The streaming decoder decodes one meta-block at a time; when input ends inside one, it retries once the buffered
+  input has doubled, so the work stays linear however the input is split
+
 ## Testing
 
 ```bash
@@ -191,7 +213,7 @@ dart test
 dart test test/lz4_codec_test.dart
 dart test test/zstd_codec_test.dart
 
-# Differential fuzzing against the lz4, gzip, snzip and zstd tools
+# Differential fuzzing against the lz4, gzip, snzip, zstd and brotli tools
 RUN_FUZZ=1 dart test -N "differential fuzz"
 
 # Large tests (e.g. a 200MB Zstd frame)
@@ -212,6 +234,7 @@ All codecs produce output compatible with standard command-line tools:
 | Snappy | `snzip`  | ✓        |
 | GZIP   | `gzip`   | ✓        |
 | Zstd   | `zstd`   | ✓        |
+| Brotli | `brotli` | ✓        |
 
 Bidirectional compatibility: library output can be decompressed by CLI tools, and CLI output can be decompressed by
 the library. One exception: **Zstd dictionary-compressed frames** (produced with `zstd -D`) are not supported and are
@@ -237,7 +260,13 @@ rejected on decode.
 - [RFC 1952 - GZIP](https://datatracker.ietf.org/doc/html/rfc1952)
 - [RFC 1951 - DEFLATE](https://datatracker.ietf.org/doc/html/rfc1951)
 - [RFC 8878 - Zstandard](https://datatracker.ietf.org/doc/html/rfc8878)
+- [RFC 7932 - Brotli](https://datatracker.ietf.org/doc/html/rfc7932)
 
 ## License
 
 See LICENSE file for details.
+
+The Brotli codec includes third-party material, with its notices in the
+source files: the static dictionary from google/brotli (MIT License,
+`lib/src/brotli/dictionary.dart`) and tables from RFC 7932 (Simplified BSD
+License, `lib/src/brotli/tables.dart`).

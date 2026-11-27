@@ -19,6 +19,15 @@ class SnappyDecoder {
   static const int _maxExpansionNumerator = 64;
   static const int _maxExpansionDenominator = 3;
 
+  /// Room the fast loop keeps before the end of the input: a tag and a
+  /// literal of up to 60 bytes read as eight words (65 bytes).
+  static const int _inputSlack = 65;
+
+  /// Room the fast loop keeps before the end of the output: a copy of up to
+  /// 64 bytes written as words writes at most 7 bytes past its end (71
+  /// bytes); doubling a short pattern first writes less than that.
+  static const int _outputSlack = 71;
+
   /// Decompress Snappy compressed data
   ///
   /// [maxUncompressedSize] sets a safety limit on the declared uncompressed
@@ -73,7 +82,103 @@ class SnappyDecoder {
     final input = ByteData.sublistView(compressed);
 
     // Decompress data
-    while (sourceIndex < compressed.length) {
+    final end = compressed.length;
+    final bound = end - _inputSlack;
+    final room = actualUncompressedLength - _outputSlack;
+    while (sourceIndex < end) {
+      // The fast loop, while far from both ends: no element here can read or
+      // write past either buffer (see [_inputSlack] and [_outputSlack]), so
+      // only a copy's offset is checked. A literal of more than 60 bytes,
+      // which carries extra length bytes, and every element near either end
+      // take the checked path below.
+      if (wide) {
+        fast:
+        while (sourceIndex <= bound && targetIndex <= room) {
+          final tag = compressed[sourceIndex];
+          final int length;
+          final int offset;
+          switch (tag & 3) {
+            case 0:
+              final size = (tag >> 2) + 1;
+              if (size > 60) break fast;
+              // 8 bytes at a time; bytes written past the literal are
+              // overwritten later.
+              words.setUint64(
+                targetIndex,
+                input.getUint64(sourceIndex + 1, Endian.little),
+                Endian.little,
+              );
+              for (var i = 8; i < size; i += 8) {
+                words.setUint64(
+                  targetIndex + i,
+                  input.getUint64(sourceIndex + 1 + i, Endian.little),
+                  Endian.little,
+                );
+              }
+              sourceIndex += size + 1;
+              targetIndex += size;
+              continue;
+            case 1:
+              length = 4 + ((tag >> 2) & 7);
+              offset = ((tag & 0xe0) << 3) | compressed[sourceIndex + 1];
+              sourceIndex += 2;
+            case 2:
+              length = (tag >> 2) + 1;
+              offset = input.getUint16(sourceIndex + 1, Endian.little);
+              sourceIndex += 3;
+            default:
+              length = (tag >> 2) + 1;
+              offset = input.getUint32(sourceIndex + 1, Endian.little);
+              sourceIndex += 5;
+          }
+          if (offset == 0 || offset > targetIndex) {
+            throw SnappyFormatException(
+              'Invalid offset: $offset at position $targetIndex',
+            );
+          }
+          final from = targetIndex - offset;
+          final stop = targetIndex + length;
+          if (offset >= 8) {
+            // Each word read was written before, and bytes written past the
+            // copy are overwritten later.
+            words.setUint64(
+              targetIndex,
+              words.getUint64(from, Endian.little),
+              Endian.little,
+            );
+            for (var i = 8; i < length; i += 8) {
+              words.setUint64(
+                targetIndex + i,
+                words.getUint64(from + i, Endian.little),
+                Endian.little,
+              );
+            }
+          } else {
+            // A pattern shorter than a word is doubled by word copies from
+            // [from] until it spans one: each copy leaves a whole number of
+            // periods valid, and its tail is overwritten by the next. Then
+            // words are copied at that distance, a multiple of the period.
+            var to = targetIndex;
+            while (to - from < 8) {
+              words.setUint64(
+                to,
+                words.getUint64(from, Endian.little),
+                Endian.little,
+              );
+              to += to - from;
+            }
+            for (var at = from; to < stop; to += 8, at += 8) {
+              words.setUint64(
+                to,
+                words.getUint64(at, Endian.little),
+                Endian.little,
+              );
+            }
+          }
+          targetIndex = stop;
+        }
+      }
+
       final tag = compressed[sourceIndex];
       final int length;
       final int offset;

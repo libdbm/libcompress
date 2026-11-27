@@ -36,6 +36,7 @@ List<Subject> _subjects() {
   final fast = GzipCodec(level: 1);
   final gzip = GzipCodec(level: 6);
   final zstd = ZstdCodec();
+  final brotli = BrotliCodec();
   return [
     Subject('lz4 frame L1', lz4),
     Subject('lz4 frame L9', hc),
@@ -45,6 +46,7 @@ List<Subject> _subjects() {
     Subject('gzip L1', fast),
     Subject('gzip L6', gzip),
     Subject('zstd L3', zstd),
+    Subject('brotli L6', brotli),
   ];
 }
 

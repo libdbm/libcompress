@@ -348,7 +348,7 @@ class StreamingLz4Encoder implements StreamCompressor {
     final size = _length - _start;
     final Uint8List out;
     if (level >= 2) {
-      final block = Uint8List(size + size ~/ 255 + 16);
+      final block = _scratchFor(size);
       final count = _compressHC(data, block, _start, level);
       out = _frame(block, count, data, size);
     } else {
@@ -361,6 +361,17 @@ class StreamingLz4Encoder implements StreamCompressor {
     _start = keep;
     _length = keep;
     return out;
+  }
+
+  // Compressed block bytes, reused for every block: [_frame] copies them out
+  // before the next block overwrites them.
+  Uint8List _scratch = Uint8List(0);
+
+  /// [_scratch], grown to hold the worst-case compressed size of [size] bytes.
+  Uint8List _scratchFor(final int size) {
+    final need = size + size ~/ 255 + 16;
+    if (_scratch.length < need) _scratch = Uint8List(need);
+    return _scratch;
   }
 
   /// A frame block: the first [count] bytes of [block] when smaller than the
@@ -393,7 +404,7 @@ class StreamingLz4Encoder implements StreamCompressor {
   Uint8List _compressLinked(final Uint8List data, final int start) {
     final end = data.length;
     final length = end - start;
-    final out = Uint8List(length + length ~/ 255 + 16);
+    final out = _scratchFor(length);
     if (length <= lz4MFLimit) {
       return Uint8List.sublistView(
         out,

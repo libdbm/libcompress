@@ -1,3 +1,5 @@
+import 'brotli/brotli_codec.dart';
+import 'brotli/brotli_stream_codec.dart';
 import 'compression_codec.dart';
 import 'compression_stream_codec.dart';
 import 'noop/noop_codec.dart';
@@ -27,7 +29,10 @@ enum CodecType {
   lz4,
 
   /// Zstandard ([ZstdCodec]).
-  zstd;
+  zstd,
+
+  /// Brotli ([BrotliCodec]).
+  brotli;
 
   /// The type whose [name] is [value], ignoring case, so both `'lz4'` and a
   /// codec's upper-case `CompressionCodec.name` (`'LZ4'`) parse.
@@ -87,6 +92,7 @@ class CodecFactory {
       CodecType.gzip => GzipCodec(maxSize: maxSize),
       CodecType.lz4 => Lz4Codec(maxSize: maxSize),
       CodecType.zstd => ZstdCodec(maxSize: maxSize),
+      CodecType.brotli => BrotliCodec(maxSize: maxSize),
     };
   }
 
@@ -101,7 +107,7 @@ class CodecFactory {
   /// `null` for unlimited); [maxBufferSize] caps buffered compressed input;
   /// [verified] withholds each member/frame's output until its trailer/checksum
   /// validates (all-or-nothing integrity; not applicable to Snappy, whose chunks
-  /// are independently checksummed).
+  /// are independently checksummed, or to Brotli, which has no checksum).
   ///
   /// Example:
   /// ```dart
@@ -135,6 +141,10 @@ class CodecFactory {
         maxSize: maxSize,
         maxBufferSize: maxBufferSize,
         verified: verified,
+      ),
+      CodecType.brotli => BrotliStreamCodec(
+        maxSize: maxSize,
+        maxBufferSize: maxBufferSize,
       ),
     };
   }

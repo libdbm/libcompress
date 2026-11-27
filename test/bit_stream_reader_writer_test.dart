@@ -45,6 +45,36 @@ void main() {
       }
     });
 
+    test('writeBytes appends bytes at a byte boundary', () {
+      final writer = BitStreamWriter()
+        ..writeBits(0x5, 3)
+        ..flushToByte();
+      // More than the initial capacity, so the buffer grows.
+      final data = Uint8List.fromList(List.generate(1000, (final i) => i));
+      writer
+        ..writeBytes(data)
+        ..writeBits(0x3, 2);
+      final out = writer.toBytes();
+      expect(out.length, 1002);
+      expect(out.first, 0x5);
+      expect(out.sublist(1, 1001), data);
+      expect(out.last, 0x3);
+    });
+
+    test('writeBits takes at most 24 bits, the widest exact on the web', () {
+      final writer = BitStreamWriter()
+        ..writeBits(0x5, 3)
+        ..writeBits(0xABCDEF, 24);
+      expect(writer.toBytes(), [0x7D, 0x6F, 0x5E, 0x05]);
+      expect(() => BitStreamWriter().writeBits(0, 25), throwsArgumentError);
+      expect(() => BitStreamWriter().writeBits(0, -1), throwsArgumentError);
+    });
+
+    test('writeBytes rejects a writer that is not byte-aligned', () {
+      final writer = BitStreamWriter()..writeBits(1, 1);
+      expect(() => writer.writeBytes(Uint8List(4)), throwsStateError);
+    });
+
     test('write and read a single byte', () {
       final writer = BitStreamWriter();
       writer.writeBits(0xAB, 8);

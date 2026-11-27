@@ -21,6 +21,16 @@ final _streamId = bytes([
 
 void main() {
   group('Snappy block', () {
+    test('a small result does not hold the worst-case buffer', () {
+      // Zeros compress to a few bytes; the result may share a buffer only
+      // when that buffer is at most twice its length.
+      final compressed = SnappyCodec().compress(Uint8List(1 << 20));
+      expect(
+        compressed.buffer.lengthInBytes,
+        lessThanOrEqualTo(2 * compressed.length),
+      );
+    });
+
     group('decompresses stored fixtures', () {
       for (final path in standardFixtures) {
         test('decompresses $path', () {
@@ -1213,6 +1223,446 @@ void main() {
       }
     });
   });
+
+  // The decoder takes a fast loop while far from both ends of its buffers and
+  // a checked path near them. Each case is built so its elements fall in the
+  // fast loop (noise before and after), and again at the end of the output
+  // (the checked path); both must agree with a byte-at-a-time decoder.
+  group('Snappy fast decode loop', () {
+    final before = pseudoRandom(200, 5);
+    final after = pseudoRandom(200, 6);
+
+    void agree(final List<List<int>> elements, {final String reason = ''}) {
+      for (final middle in [true, false]) {
+        final data = _block([
+          _literal(before),
+          ...elements,
+          if (middle) _literal(after),
+        ]);
+        final expected = _reference(data);
+        expect(expected, isA<Uint8List>(), reason: reason);
+        expect(
+          _outcome(data),
+          orderedEquals(expected as Uint8List),
+          reason: '$reason ${middle ? 'in the fast loop' : 'at the end'}',
+        );
+      }
+    }
+
+    test('copies of every kind, offset 1 to 72 and length 1 to 64', () {
+      for (var offset = 1; offset <= 72; offset++) {
+        for (var length = 1; length <= 64; length++) {
+          agree([
+            _copy2(offset, length),
+          ], reason: 'copy2 offset=$offset length=$length');
+          agree([
+            _copy4(offset, length),
+          ], reason: 'copy4 offset=$offset length=$length');
+          if (length >= 4 && length <= 11) {
+            agree([
+              _copy1(offset, length),
+            ], reason: 'copy1 offset=$offset length=$length');
+          }
+        }
+      }
+    });
+
+    test('overlapping copies repeat their pattern, back to back', () {
+      for (var offset = 1; offset <= 8; offset++) {
+        agree([
+          for (var length = 1; length <= 64; length++) _copy2(offset, length),
+          for (var length = 4; length <= 11; length++) _copy1(offset, length),
+        ], reason: 'offset=$offset');
+      }
+    });
+
+    test('copies around 64 KiB back', () {
+      final noise = pseudoRandom(70000, 7);
+      for (final offset in [2047, 2048, 65535, 65536, 65537, 69999]) {
+        for (final length in [1, 4, 8, 9, 63, 64]) {
+          final copies = [
+            if (offset < 2048 && length >= 4 && length <= 11)
+              _copy1(offset, length),
+            if (offset < 65536) _copy2(offset, length),
+            _copy4(offset, length),
+          ];
+          for (final copy in copies) {
+            final data = _block([_literal(noise), copy, _literal(after)]);
+            final decoded = _outcome(data) as Uint8List;
+            final start = noise.length - offset;
+            expect(
+              decoded.sublist(noise.length, noise.length + length),
+              orderedEquals([
+                for (var i = 0; i < length; i++) noise[start + i % offset],
+              ]),
+              reason: 'offset=$offset length=$length tag=${copy.first & 3}',
+            );
+            expect(decoded, orderedEquals(_reference(data) as Uint8List));
+          }
+        }
+      }
+    });
+
+    test('literals of every length encoding', () {
+      for (final length in [
+        1, 2, 7, 8, 9, 15, 16, 17, 59, 60, 61, 64, 65, 255, 256, 257, //
+        1000, 65535, 65536, 65537, 70000,
+      ]) {
+        final data = pseudoRandom(length, length);
+        agree([_literal(data)], reason: 'length=$length');
+        // Each wider form the length fits: one, two, three or four bytes.
+        for (var extra = 1; extra <= 4; extra++) {
+          if (length - 1 < 1 << (8 * extra)) {
+            agree([
+              _literal(data, extra: extra),
+            ], reason: 'length=$length extra=$extra');
+          }
+        }
+      }
+    });
+
+    test('literals and copies in alternation', () {
+      final random = Random(11);
+      for (var round = 0; round < 50; round++) {
+        agree(_elements(random, 400), reason: 'round=$round');
+      }
+    });
+
+    test('round-trips the encoder at every size to 600 and beyond', () {
+      final codec = SnappyCodec();
+      final text = bytes(
+        List.generate(3000, (final i) => 'abcab cabbage '.codeUnitAt(i % 14)),
+      );
+      for (var size = 0; size <= 600; size++) {
+        expectRoundTrip(codec, Uint8List.sublistView(text, 0, size));
+        expectRoundTrip(codec, pseudoRandom(size, size));
+      }
+      for (final size in [4096, 65536, 65537, 300000]) {
+        expectRoundTrip(
+          codec,
+          bytes([
+            ...pseudoRandom(size ~/ 2, size),
+            ...List.generate(size ~/ 2, (final i) => (i * i) % 251 % 9),
+          ]),
+        );
+      }
+    });
+
+    test('an offset before the start fails in the fast loop', () {
+      for (final copy in [_copy1(201, 4), _copy2(201, 8), _copy4(201, 8)]) {
+        final data = _block([_literal(before), copy, _literal(after)]);
+        expect(
+          _outcome(data),
+          'SnappyFormatException: Invalid offset: 201 at position 200',
+        );
+      }
+      final zero = _block([_literal(before), _copy2(0, 8), _literal(after)]);
+      expect(
+        _outcome(zero),
+        'SnappyFormatException: Invalid offset: 0 at position 200',
+      );
+    });
+
+    test('a declared length the elements overrun fails as before', () {
+      // Every declared length short of the output, so that some copy starts
+      // at each distance from the declared end, with input to spare after it.
+      // A copy of 64 at offset 1 or 7 writes its last word furthest past it.
+      for (final (offset, length) in [(100, 50), (1, 64), (7, 64), (3, 58)]) {
+        final elements = [
+          _literal(before),
+          for (var i = 0; i < 60; i++) _copy2(offset, length),
+        ];
+        final produced = 200 + 60 * length;
+        for (var declared = 201; declared < produced; declared++) {
+          final data = _block(elements, length: declared);
+          expect(
+            _outcome(data),
+            'SnappyFormatException: Copy write exceeds output buffer',
+            reason: 'offset=$offset length=$length declared=$declared',
+          );
+        }
+      }
+      final elements = [
+        _literal(before),
+        for (var i = 0; i < 60; i++) _copy2(100, 50),
+      ];
+      const produced = 200 + 60 * 50;
+      final literal = _block([_literal(before), _literal(after)], length: 300);
+      expect(
+        _outcome(literal),
+        'SnappyFormatException: Literal write exceeds output buffer',
+      );
+      final long = _block(elements, length: produced + 1);
+      expect(
+        _outcome(long),
+        'SnappyFormatException: Decompressed size mismatch: expected '
+        '${produced + 1}, got $produced',
+      );
+    });
+
+    test('a declared length past the output fails at the input end', () {
+      // Short literals at or near the end of the input, far from the
+      // declared end: a literal's last word is read up to 64 bytes past its
+      // tag.
+      final tails = [
+        <List<int>>[],
+        [_copy1(1, 4)],
+        [_copy2(1, 1)],
+        [_copy2(1, 1), _copy1(1, 4)],
+      ];
+      for (var size = 1; size <= 60; size++) {
+        for (final tail in tails) {
+          final elements = [
+            _literal(before),
+            _literal(pseudoRandom(size, size)),
+            ...tail,
+          ];
+          final produced = _produced(
+            bytes([for (final element in elements) ...element]),
+          );
+          for (final extra in [1, 8, 70, 71, 72, 200]) {
+            final data = _block(elements, length: produced + extra);
+            expect(
+              _outcome(data),
+              'SnappyFormatException: Decompressed size mismatch: expected '
+              '${produced + extra}, got $produced',
+              reason: 'size=$size tail=${tail.length} extra=$extra',
+            );
+          }
+        }
+      }
+    });
+
+    test('every truncation fails as the byte-at-a-time decoder does', () {
+      final sources = [
+        SnappyCodec().compress(
+          bytes([
+            ...pseudoRandom(3000, 3),
+            ...List.generate(3000, (final i) => i % 13),
+          ]),
+        ),
+        _block(_elements(Random(5), 3000)),
+      ];
+      for (final data in sources) {
+        for (var length = 1; length < data.length; length++) {
+          final cut = Uint8List.sublistView(data, 0, length);
+          expect(_outcome(cut), _reference(cut), reason: 'length=$length');
+        }
+      }
+    });
+
+    test('corrupt bodies fail or decode as the byte-at-a-time decoder', () {
+      final random = Random(17);
+      final sources = [
+        SnappyCodec().compress(readDataFixture('geo.protodata')),
+        _block(_elements(Random(3), 2000)),
+      ];
+      for (final source in sources) {
+        final header = Varint.decode(source, 0).bytesRead;
+        for (var round = 0; round < 400; round++) {
+          final data = bytes(source);
+          for (var flips = 1 + random.nextInt(4); flips > 0; flips--) {
+            final at = header + random.nextInt(data.length - header);
+            data[at] = random.nextInt(256);
+          }
+          expect(_outcome(data), _reference(data), reason: 'round=$round');
+        }
+      }
+    });
+  });
+}
+
+/// A Snappy block: the varint of [length] (by default the length the
+/// elements produce), then [elements].
+Uint8List _block(final List<List<int>> elements, {final int? length}) {
+  final body = bytes([for (final element in elements) ...element]);
+  return bytes([...Varint.encode(length ?? _produced(body)), ...body]);
+}
+
+/// The output length of a well-formed block [body], read from its tags.
+int _produced(final Uint8List body) {
+  var source = 0;
+  var total = 0;
+  while (source < body.length) {
+    final tag = body[source];
+    if (tag & 3 == 0) {
+      var length = tag >> 2;
+      source++;
+      if (length >= 60) {
+        final extra = length - 59;
+        length = 0;
+        for (var i = 0; i < extra; i++) {
+          length |= body[source + i] << (8 * i);
+        }
+        source += extra;
+      }
+      source += length + 1;
+      total += length + 1;
+    } else {
+      total += tag & 3 == 1 ? 4 + ((tag >> 2) & 7) : (tag >> 2) + 1;
+      source += const [0, 2, 3, 5][tag & 3];
+    }
+  }
+  return total;
+}
+
+/// A literal element; [extra] forces that many length bytes (1 to 4).
+List<int> _literal(final List<int> data, {final int? extra}) {
+  final length = data.length - 1;
+  final count = extra ?? (length < 60 ? 0 : (length.bitLength + 7) ~/ 8);
+  return [
+    if (count == 0)
+      length << 2
+    else ...[
+      (59 + count) << 2,
+      for (var i = 0; i < count; i++) (length >> (8 * i)) & 0xFF,
+    ],
+    ...data,
+  ];
+}
+
+/// A copy with a 1-byte offset: [length] 4 to 11, [offset] below 2048.
+List<int> _copy1(final int offset, final int length) => [
+  ((offset >> 8) << 5) | ((length - 4) << 2) | 1,
+  offset & 0xFF,
+];
+
+/// A copy with a 2-byte offset: [length] 1 to 64.
+List<int> _copy2(final int offset, final int length) => [
+  ((length - 1) << 2) | 2,
+  offset & 0xFF,
+  offset >> 8,
+];
+
+/// A copy with a 4-byte offset: [length] 1 to 64.
+List<int> _copy4(final int offset, final int length) => [
+  ((length - 1) << 2) | 3,
+  offset & 0xFF,
+  (offset >> 8) & 0xFF,
+  (offset >> 16) & 0xFF,
+  offset >> 24,
+];
+
+/// Random literals and copies (offsets within what precedes them, a short
+/// one half the time) producing at least [size] bytes.
+List<List<int>> _elements(final Random random, final int size) {
+  final elements = <List<int>>[_literal(pseudoRandom(16, random.nextInt(99)))];
+  var total = 16;
+  while (total < size) {
+    final kind = random.nextInt(4);
+    if (kind == 0) {
+      final length = 1 + random.nextInt(random.nextBool() ? 8 : 80);
+      elements.add(_literal(pseudoRandom(length, random.nextInt(1 << 20))));
+      total += length;
+      continue;
+    }
+    final offset =
+        1 + random.nextInt(random.nextBool() ? min(total, 9) : total);
+    if (kind == 1 && offset < 2048) {
+      final length = 4 + random.nextInt(8);
+      elements.add(_copy1(offset, length));
+      total += length;
+    } else {
+      final length = 1 + random.nextInt(64);
+      elements.add(kind == 3 ? _copy4(offset, length) : _copy2(offset, length));
+      total += length;
+    }
+  }
+  return elements;
+}
+
+/// The decoder's output for [data], or its exception's type and message.
+Object _outcome(final Uint8List data) {
+  try {
+    return SnappyDecoder.decompress(data);
+  } on CompressionFormatException catch (error) {
+    return '${error.runtimeType}: ${error.message}';
+  }
+}
+
+/// A byte-at-a-time Snappy block decoder with the decoder's checks, in its
+/// order and with its messages, under the default size limit: the output, or
+/// the exception's type and message as [_outcome] gives them.
+Object _reference(final Uint8List data) {
+  String fail(final String message) => 'SnappyFormatException: $message';
+  if (data.isEmpty) return fail('Cannot decompress empty input');
+  final VarintResult header;
+  try {
+    header = Varint.decode(data, 0, maxBytes: 5);
+  } on FormatException catch (error) {
+    return fail('Invalid Snappy length prefix: ${error.message}');
+  }
+  final length = header.value;
+  if (length > SnappyDecoder.defaultMaxSize) {
+    final limit = LimitException(SnappyDecoder.defaultMaxSize);
+    return '${limit.runtimeType}: ${limit.message}';
+  }
+  var source = header.bytesRead;
+  final expansion = (data.length - source) * 64 ~/ 3;
+  if (length > expansion) {
+    return fail(
+      'Declared length $length exceeds the maximum expansion ($expansion) '
+      'of ${data.length - source} bytes',
+    );
+  }
+  final output = Uint8List(length);
+  var target = 0;
+  while (source < data.length) {
+    final tag = data[source];
+    if (tag & 3 == 0) {
+      var size = tag >> 2;
+      source++;
+      if (size >= 60) {
+        final extra = size - 59;
+        if (source + extra > data.length) {
+          return fail('Truncated literal length at offset $source');
+        }
+        size = 0;
+        for (var i = 0; i < extra; i++) {
+          size |= data[source + i] << (8 * i);
+        }
+        source += extra;
+      }
+      size++;
+      if (source + size > data.length) {
+        return fail('Literal extends past end of input');
+      }
+      if (target + size > length) {
+        return fail('Literal write exceeds output buffer');
+      }
+      for (var i = 0; i < size; i++) {
+        output[target++] = data[source++];
+      }
+      continue;
+    }
+    final width = const [0, 2, 3, 5][tag & 3];
+    if (source + width > data.length) {
+      return fail('Truncated copy tag at offset $source');
+    }
+    final size = tag & 3 == 1 ? 4 + ((tag >> 2) & 7) : (tag >> 2) + 1;
+    var offset = 0;
+    if (tag & 3 == 1) {
+      offset = ((tag & 0xe0) << 3) | data[source + 1];
+    } else {
+      for (var i = 1; i < width; i++) {
+        offset |= data[source + i] << (8 * (i - 1));
+      }
+    }
+    source += width;
+    if (offset == 0 || offset > target) {
+      return fail('Invalid offset: $offset at position $target');
+    }
+    if (target + size > length) {
+      return fail('Copy write exceeds output buffer');
+    }
+    for (var i = 0; i < size; i++, target++) {
+      output[target] = output[target - offset];
+    }
+  }
+  if (target != length) {
+    return fail('Decompressed size mismatch: expected $length, got $target');
+  }
+  return output;
 }
 
 /// Decodes [data] through a stream codec, feeding it in [chunk]-sized pieces.

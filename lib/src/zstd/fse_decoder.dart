@@ -41,12 +41,9 @@ class FseDecoder {
 
     for (var symbol = 0; symbol < normalizedCounters.length; symbol++) {
       final frequency = normalizedCounters[symbol];
-      if (frequency <= 0) {
-        if (frequency == -1) {
-          continue;
-        }
-        continue;
-      }
+      // Less-than-one (-1) symbols were placed above; zero-count symbols
+      // have no states.
+      if (frequency <= 0) continue;
 
       symbolNext[symbol] = frequency;
 

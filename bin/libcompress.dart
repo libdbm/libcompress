@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:libcompress/libcompress.dart';
 
@@ -84,7 +85,7 @@ Future<void> _buffered(final Config config) async {
     stdout.add(result);
     await stdout.flush();
   } else {
-    final temp = _tempPath(config.output);
+    final temp = _createTemp(config.output);
     try {
       File(temp).writeAsBytesSync(result);
       File(temp).renameSync(config.output); // atomic within a filesystem
@@ -121,7 +122,7 @@ Future<void> _streaming(final Config config) async {
     }
     await stdout.flush();
   } else {
-    final temp = _tempPath(config.output);
+    final temp = _createTemp(config.output);
     final output = File(temp).openWrite();
     try {
       await for (final chunk in stream) {
@@ -159,9 +160,30 @@ void _report(final Config config, final int before, final int after) {
   );
 }
 
-/// Sibling temp path for atomic output (same directory, so rename stays within
-/// the filesystem). The pid keeps concurrent runs from colliding.
-String _tempPath(final String output) => '$output.tmp-$pid';
+final _random = Random.secure();
+
+/// Creates the sibling temp file for atomic output (same directory, so the
+/// rename stays within the filesystem) and returns its path.
+///
+/// The name carries a random suffix, so it cannot be predicted, and the file
+/// is created exclusively: if anything already exists at the path (a file, or
+/// a symlink planted in a shared directory), creation fails instead of
+/// following it, and another name is tried.
+String _createTemp(final String output) {
+  for (var attempt = 0; ; attempt++) {
+    final suffix = _random.nextInt(1 << 32).toRadixString(16);
+    final path = '$output.tmp-$pid-$suffix';
+    try {
+      File(path).createSync(exclusive: true);
+      return path;
+    } on FileSystemException {
+      final taken =
+          FileSystemEntity.typeSync(path, followLinks: false) !=
+          FileSystemEntityType.notFound;
+      if (!taken || attempt >= 7) rethrow;
+    }
+  }
+}
 
 void _cleanup(final String temp) {
   final f = File(temp);
@@ -194,6 +216,11 @@ CompressionStreamCodec _getStreamCodec(final Config config) {
       maxSize: config.maxSize,
       verified: config.verified,
     ),
+    CodecType.brotli => BrotliStreamCodec(
+      level: config.level,
+      window: config.window,
+      maxSize: config.maxSize,
+    ),
     CodecType.noop => NoopStreamCodec(maxSize: config.maxSize),
   };
 }
@@ -211,6 +238,10 @@ Uint8List compress(final Uint8List data, final Config config) {
       level: config.level,
       blockSize: config.zstdBlockSize,
     ).compress(data),
+    CodecType.brotli => BrotliCodec(
+      level: config.level,
+      window: config.window,
+    ).compress(data),
     CodecType.noop => data,
   };
 }
@@ -227,6 +258,7 @@ Uint8List decompress(final Uint8List data, final Config config) {
     ).decompress(data),
     CodecType.gzip => GzipCodec(maxSize: config.maxSize).decompress(data),
     CodecType.zstd => ZstdCodec(maxSize: config.maxSize).decompress(data),
+    CodecType.brotli => BrotliCodec(maxSize: config.maxSize).decompress(data),
     CodecType.noop => NoopCodec(maxSize: config.maxSize).decompress(data),
   };
 }
@@ -255,6 +287,7 @@ Config? parse(final List<String> args) {
   var lz4BlockSize = 4 * 1024 * 1024; // 4MB default
   int? maxSize = CodecFactory.defaultMaxSize; // null = unlimited
   var zstdBlockSize = 128 * 1024; // 128KB default (Zstd max)
+  int? window; // Brotli WBITS
   String? input;
   String? output;
 
@@ -292,6 +325,14 @@ Config? parse(final List<String> args) {
         codec = CodecType.gzip;
       case '--zstd':
         codec = CodecType.zstd;
+      case '--brotli':
+        codec = CodecType.brotli;
+      case '--window':
+        final text = value(++i, arg);
+        window = int.tryParse(text);
+        if (window == null || window < 10 || window > 24) {
+          throw UsageException('invalid window: $text (10 to 24)');
+        }
       case '--raw':
         raw = true;
       case '--hadoop':
@@ -368,8 +409,19 @@ Config? parse(final List<String> args) {
   if (streaming && (raw || hadoop)) {
     throw UsageException('--stream needs a framed format, not --raw/--hadoop');
   }
+  if (window != null && codec != CodecType.brotli) {
+    throw UsageException('--window applies only to --brotli');
+  }
+  // Brotli has no checksum to verify, so --verified could not hold output back.
+  if (verified && codec == CodecType.brotli) {
+    throw UsageException('--verified does not apply to --brotli');
+  }
   // Snappy has no levels, so any level is accepted and ignored.
-  final most = codec == CodecType.zstd ? 22 : 9;
+  final most = switch (codec) {
+    CodecType.zstd => 22,
+    CodecType.brotli => 11,
+    _ => 9,
+  };
   if (level != null &&
       codec != CodecType.snappy &&
       (level < 1 || level > most)) {
@@ -387,6 +439,7 @@ Config? parse(final List<String> args) {
           CodecType.lz4 => Lz4Codec().level,
           CodecType.gzip => GzipCodec().level,
           CodecType.zstd => ZstdCodec().level,
+          CodecType.brotli => BrotliCodec().level,
           CodecType.snappy || CodecType.noop => 1,
         },
     decompress: decompress,
@@ -405,6 +458,7 @@ Config? parse(final List<String> args) {
     lz4BlockSize: lz4BlockSize,
     maxSize: maxSize,
     zstdBlockSize: zstdBlockSize,
+    window: window ?? BrotliCodec().window,
   );
 }
 
@@ -424,11 +478,13 @@ void usage() {
   print('  -1, --fast          Fast compression (level 1)');
   print('  -9, --best          Best compression (level 9)');
   print('  -[2-8]              Compression level (default: the codec default)');
-  print('  --level N           Compression level: 1-9, or 1-22 for --zstd');
+  print('  --level N           Compression level: 1-9, 1-22 for --zstd,');
+  print('                      or 1-11 for --brotli');
   print('  --lz4               Use LZ4 codec (default)');
   print('  --snappy            Use Snappy codec');
   print('  --gzip              Use GZIP codec');
   print('  --zstd              Use Zstd codec');
+  print('  --brotli            Use Brotli codec');
   print('  --stream            Use streaming mode for large files');
   print(
     '  --verified          Withhold streamed output until checksums validate',
@@ -455,12 +511,18 @@ void usage() {
   print('Zstd Options:');
   print('  --block-size SIZE   Block size: 64K, 128K (default: 128K max)');
   print('');
+  print('Brotli Options:');
+  print(
+    '  --window N          Window: 2^N - 16 bytes, N = 10-24 (default: 22)',
+  );
+  print('');
   print('Examples:');
   print('  libcompress input.txt output.lz4');
   print('  libcompress -9 --block-size 1M input.txt output.lz4');
   print('  libcompress --snappy input.txt output.sz');
   print('  libcompress -9 --gzip input.txt output.gz');
   print('  libcompress --zstd - - < input.txt > output.zst');
+  print('  libcompress --brotli --level 11 input.txt output.br');
   print('  libcompress -d -f input.lz4 output.txt');
   print('  libcompress --stream large.bin large.lz4  # streaming mode');
 }
@@ -480,6 +542,7 @@ class Config {
     required this.lz4BlockSize,
     required this.maxSize,
     required this.zstdBlockSize,
+    required this.window,
   });
 
   final CodecType codec;
@@ -495,4 +558,5 @@ class Config {
   final int lz4BlockSize;
   final int? maxSize; // null = unlimited
   final int zstdBlockSize;
+  final int window; // Brotli WBITS
 }

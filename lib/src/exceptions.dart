@@ -8,6 +8,7 @@ import 'util/output_limit.dart';
 /// - [GzipFormatException] for GZIP format errors
 /// - [ZstdFormatException] for Zstandard format errors
 /// - [SnappyFormatException] for Snappy format errors
+/// - [BrotliFormatException] for Brotli format errors
 ///
 /// All subclasses extend [FormatException] for consistency with Dart's
 /// standard library conventions.
@@ -141,6 +142,15 @@ class SnappyFormatException extends CompressionFormatException {
 
   @override
   String toString() => 'SnappyFormatException: $message';
+}
+
+/// Exception thrown when invalid Brotli data is encountered
+class BrotliFormatException extends CompressionFormatException {
+  /// Creates a Brotli format exception with the given [message].
+  const BrotliFormatException(super.message);
+
+  @override
+  String toString() => 'BrotliFormatException: $message';
 }
 
 /// Exception thrown when no-op "compressed" data does not have the expected

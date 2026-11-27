@@ -1,7 +1,7 @@
 /// Pure Dart implementations of common compression algorithms
 ///
 /// This library provides pure Dart implementations of LZ4, Snappy, GZIP, raw
-/// DEFLATE, and Zstd compression, with no native dependencies. It supports both
+/// DEFLATE, Zstd, and Brotli compression, with no native dependencies. It supports both
 /// in-memory (block) compression and stream-based processing.
 ///
 /// ## Basic Usage
@@ -32,9 +32,12 @@
 /// - **DEFLATE**: Raw DEFLATE blocks (RFC 1951), as ZIP entries hold them.
 /// - **Zstd**: Zstandard (RFC 8878) without dictionaries, including compressed
 ///   blocks with Huffman/FSE encoding and sequence encoding.
+/// - **Brotli**: Brotli (RFC 7932). The decoder handles the whole format; the
+///   encoder writes a smaller feature set. Parquet `BROTLI` pages are bare
+///   Brotli streams.
 ///
 /// The framed formats interoperate with the command-line tools (lz4, snzip,
-/// gzip, zstd); stream codecs use the framed formats.
+/// gzip, zstd, brotli); stream codecs use the framed formats.
 library;
 
 // Core compression interfaces
@@ -78,6 +81,10 @@ export 'src/gzip/gzip_stream_codec.dart' show GzipStreamCodec;
 export 'src/zstd/zstd_codec.dart';
 export 'src/zstd/zstd_stream_codec.dart' show ZstdStreamCodec;
 export 'src/zstd/zstd_common.dart' show zstdDefaultWindow;
+
+// Brotli codec
+export 'src/brotli/brotli_codec.dart';
+export 'src/brotli/brotli_stream_codec.dart';
 
 // Noop codec (pass-through, for testing)
 export 'src/noop/noop_codec.dart';

@@ -1,3 +1,50 @@
+## 2.4.0
+
+### Added
+
+- **Brotli codec** (RFC 7932): `BrotliCodec`, `BrotliStreamCodec`, `BrotliOptions`, `BrotliFormatException` and
+  `CodecType.brotli`, with `--brotli` and `--window N` in the CLI.
+  - The decoder handles the whole format: block switching, context modeling, the static dictionary with its 121
+    transforms, and windows up to 16 MB. Every stream the `brotli` 1.2.1 tool writes, at qualities 0-11 and windows
+    10-24, decodes byte for byte, as do the pages of parquet-testing's `large_string_map.brotli.parquet` (two of them
+    over 1 GB). Parquet `BROTLI` pages decode with `BrotliCodec().decompress(page, size: n)`. Block decoding runs at
+    0.6-1.1 times the speed of GZIP decoding of the same data.
+  - The encoder writes valid streams with one block type per category, no context modeling and no dictionary
+    references; `brotli -d` reads its output at every level and window. At the default level 6 it is 3-32% smaller
+    than `GzipCodec` level 6 on the test corpus (`kennedy.xls` 32%, `world192.txt` 21%, `alice29.txt` 3%), and stores
+    incompressible input with at most a few bytes of overhead. Levels 1-11 set the search effort; they do not match
+    the reference encoder's ratio at the same quality.
+  - Streaming decode works one meta-block at a time, within `maxSize` and `maxBufferSize`. Streaming compression
+    gives the same bytes as `BrotliCodec.compress` however the input is split.
+  - Brotli has no checksum, so `CodecFactory.streaming(CodecType.brotli, verified: true)` ignores `verified`, and a
+    corrupt stream can decode to wrong bytes. Bytes after the end of a stream are an error. The large-window
+    extension is rejected. Shared dictionaries (RFC 9842) are not supported; a stream compressed with one carries no
+    mark of it, so it decodes to wrong bytes or fails.
+  - **`CodecType` has a new value.** An exhaustive `switch` on `CodecType` needs a `brotli` case.
+  - The package source is about 250 KB larger, 180 KB of it the 122,784-byte static dictionary, which is stored
+    base64-encoded and decoded on first use.
+
+### Changed
+
+- **Faster decoding of long repeats**: streaming GZIP, LZ4 and Zstd decoders, and the Brotli decoder, copy an
+  overlapping back-reference longer than 32 bytes by doubling block copies instead of a byte at a time. Runs of
+  zeros and short periods decode 1.4-3x faster (LZ4 stream about 1.6x, Zstd stream on a 7-byte period 2x, Brotli
+  block decode 3x); text is unchanged.
+- **Faster compression of incompressible data**: GZIP and DEFLATE write stored blocks with one copy instead of a
+  byte at a time (random data about 25% faster); Snappy and Zstd return their output without a final copy when it
+  fills more than half of the worst-case buffer (Snappy raw on random data and JPEG about 60% faster); streaming LZ4
+  reuses one compression buffer for every block (random data about 3% faster). Output is unchanged.
+- **CLI temp files** have a random name and are created exclusively, so a file or symlink planted at the temp path
+  in a shared directory is never followed or overwritten.
+- **Faster Snappy decoding**: while an element is far from both ends of the input and the output (65 and 71 bytes),
+  the decoder copies literals of up to 60 bytes and matches as 8-byte words with no length checks, which cannot fail
+  there, and doubles a pattern shorter than 8 bytes by word copies before copying it a word at a time. Only a copy's
+  offset is checked in that loop. Longer literals and elements near either end take the checked path as before.
+  Output and errors are unchanged: every malformed input fails with the same exception and message. Raw decoding is
+  33-37% faster on text (`world192.txt` 796 to 1089 MB/s, `bible.txt` 699 to 928), 30% on `geo.protodata`, 28-48% on
+  1 KB to 64 KB pages, and 80-116% on runs of zeros and short periods; incompressible data is unchanged. The six
+  Snappy pages of a 100,000-row Parquet file decode in 1.66 ms instead of 2.63. The web build keeps the old loop.
+
 ## 2.3.0
 
 ### Added

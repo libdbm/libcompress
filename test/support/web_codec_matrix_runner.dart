@@ -20,6 +20,14 @@ Future<void> main() async {
     ZstdStreamCodec(checksum: true),
   );
   results['zstdLargeWindow'] = await _largeWindows();
+  // An expected size far above maxSize must be capped before the output is
+  // allocated (2^40 as a literal: `1 << 40` is 0 on the web).
+  results['brotliLargeSize'] = _attempt(
+    () => BrotliCodec().decompress(
+      BrotliCodec().compress(Uint8List(100)),
+      size: 1099511627776,
+    ),
+  );
   print(jsonEncode(results));
 }
 

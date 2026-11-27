@@ -25,6 +25,16 @@ import 'test_utils.dart';
 
 void main() {
   group('Zstd block', () {
+    test('a small result does not hold the worst-case buffer', () {
+      // Zeros compress to a few bytes; the result may share a buffer only
+      // when that buffer is at most twice its length.
+      final compressed = ZstdCodec().compress(Uint8List(1 << 20));
+      expect(
+        compressed.buffer.lengthInBytes,
+        lessThanOrEqualTo(2 * compressed.length),
+      );
+    });
+
     test('decompresses stored fixtures', () {
       final codec = ZstdCodec();
       for (final path in standardFixtures) {

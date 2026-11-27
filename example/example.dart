@@ -15,6 +15,7 @@ void main() async {
     CodecType.snappy,
     CodecType.gzip,
     CodecType.zstd,
+    CodecType.brotli,
   ]) {
     final codec = CodecFactory.codec(type);
     final compressed = codec.compress(data);

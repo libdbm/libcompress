@@ -183,6 +183,11 @@ void main() {
       final codec = CodecFactory.codec(CodecType.zstd);
       expect(codec, isA<ZstdCodec>());
     });
+
+    test('returns BrotliCodec for brotli', () {
+      final codec = CodecFactory.codec(CodecType.brotli);
+      expect(codec, isA<BrotliCodec>());
+    });
   });
 
   group('CodecType.parse', () {
@@ -192,6 +197,7 @@ void main() {
       expect(CodecType.parse('gzip'), CodecType.gzip);
       expect(CodecType.parse('lz4'), CodecType.lz4);
       expect(CodecType.parse('zstd'), CodecType.zstd);
+      expect(CodecType.parse('BROTLI'), CodecType.brotli);
     });
 
     test('throws ArgumentError for unknown codec', () {
@@ -335,6 +341,7 @@ void main() {
           CodecType.gzip,
           CodecType.lz4,
           CodecType.zstd,
+          CodecType.brotli,
         ]),
       );
     });
@@ -511,6 +518,7 @@ void main() {
       CodecType.gzip,
       CodecType.lz4,
       CodecType.zstd,
+      CodecType.brotli,
     ];
 
     test('codec(type, maxSize: small) enforces the cap', () {

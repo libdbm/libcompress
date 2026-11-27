@@ -7,6 +7,31 @@ import 'package:libcompress/src/util/window_buffer.dart';
 
 void main() {
   group('WindowBuffer', () {
+    test('overlapping copies repeat the pattern at every distance', () {
+      // Compared with a byte-at-a-time copy, which is right by definition.
+      for (var distance = 1; distance <= 40; distance++) {
+        for (final length in [distance + 1, 33, 64, 100, 300]) {
+          if (length <= distance) continue;
+          final seed = List.generate(
+            distance,
+            (final i) => (i * 37 + 11) & 255,
+          );
+          final expected = [...seed];
+          for (var i = 0; i < length; i++) {
+            expected.add(expected[expected.length - distance]);
+          }
+          final buffer = WindowBuffer(1 << 16)
+            ..addBytes(Uint8List.fromList(seed))
+            ..copyFromHistory(distance, length);
+          expect(
+            buffer.finish(),
+            expected,
+            reason: 'distance $distance, length $length',
+          );
+        }
+      }
+    });
+
     // Replays a randomized append/back-reference op stream against both a
     // full GrowableBuffer (reference) and a windowed WindowBuffer (drained
     // periodically), and asserts the reconstructed output is identical.

@@ -109,8 +109,18 @@ void main() {
     ], sample);
     expect(code, 0);
     expect(packed, orderedEquals(ZstdCodec(level: 19).compress(sample)));
+    final (brotli, best, _) = await pipe([
+      '--brotli',
+      '--level',
+      '11',
+      '-',
+      '-',
+    ], sample);
+    expect(brotli, 0);
+    expect(best, orderedEquals(BrotliCodec(level: 11).compress(sample)));
     for (final args in [
       ['--zstd', '--level', '23'],
+      ['--brotli', '--level', '12'],
       ['--lz4', '--level', '10'],
       ['--gzip', '--level', '0'],
       ['--zstd', '--level', 'x'],
@@ -122,7 +132,7 @@ void main() {
   });
 
   test('- reads stdin and writes stdout, with status on stderr', () async {
-    for (final codec in ['--lz4', '--snappy', '--gzip', '--zstd']) {
+    for (final codec in ['--lz4', '--snappy', '--gzip', '--zstd', '--brotli']) {
       for (final stream in [
         <String>[],
         ['--stream'],
@@ -158,6 +168,8 @@ void main() {
       ['--snappy', '--raw']: SnappyCodec().compress(sample),
       ['--gzip']: GzipCodec().compress(sample),
       ['--zstd']: ZstdCodec().compress(sample),
+      ['--brotli']: BrotliCodec().compress(sample),
+      ['--brotli', '--window', '16']: BrotliCodec(window: 16).compress(sample),
     };
     for (final entry in cases.entries) {
       final (code, packed, _) = await pipe([...entry.key, '-', '-'], sample);
@@ -175,6 +187,10 @@ void main() {
       ['--snappy', '--hadoop'],
       ['--lz4', '--framing'],
       ['--raw', '--hadoop'],
+      ['--zstd', '--window', '16'],
+      ['--brotli', '--window', '9'],
+      ['--brotli', '--window', '25'],
+      ['--brotli', '--stream', '--verified'],
     ]) {
       final r = run([...args, '-', '-']);
       expect(r.exitCode, 2, reason: '$args');
@@ -196,6 +212,42 @@ void main() {
       ).listSync().where((final e) => e.path.contains('.tmp-')),
       isEmpty,
     );
+  });
+
+  test('the temp file has a random name and is a regular file', () async {
+    // While the CLI streams from stdin, its temp file exists: it must not be
+    // the old predictable '<output>.tmp-<pid>', and must not be a link.
+    final process = await Process.start('dart', [
+      'run',
+      'bin/libcompress.dart',
+      '--gzip',
+      '--stream',
+      '-',
+      p('c.gz'),
+    ]);
+    final errors = process.stderr.drain<void>();
+    process.stdin.add(sample);
+    await process.stdin.flush();
+    List<FileSystemEntity> temps() => Directory(
+      dir.path,
+    ).listSync().where((final e) => e.path.contains('.tmp-')).toList();
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (temps().isEmpty && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    final found = temps();
+    expect(found, hasLength(1));
+    final name = found.single.path.split('/').last;
+    expect(name, matches(RegExp('^c\\.gz\\.tmp-${process.pid}-[0-9a-f]+\$')));
+    expect(
+      FileSystemEntity.typeSync(found.single.path, followLinks: false),
+      FileSystemEntityType.file,
+    );
+    await process.stdin.close();
+    expect(await process.exitCode, 0);
+    await errors;
+    expect(temps(), isEmpty);
+    expect(GzipCodec().decompress(File(p('c.gz')).readAsBytesSync()), sample);
   });
 
   test('corrupt input fails without leaving output or temp files', () {

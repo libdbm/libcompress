@@ -19,10 +19,15 @@ class BitStreamWriter {
     _bytes[_length++] = byte;
   }
 
-  /// Writes a value with a specific number of bits to the stream.
+  /// Writes the low [bitCount] bits (0..24) of [value] to the stream.
+  ///
+  /// At most 7 bits are pending between writes, so a 24-bit write stays
+  /// within 31 bits and is exact on dart2js, where bitwise operations are
+  /// 32-bit. DEFLATE writes at most 15 bits and Zstd at most 23 (offsets up
+  /// to 4 MB).
   void writeBits(final int value, final int bitCount) {
-    if (bitCount < 0 || bitCount > 32) {
-      throw ArgumentError('bitCount must be between 0 and 32');
+    if (bitCount < 0 || bitCount > 24) {
+      throw ArgumentError('bitCount must be between 0 and 24');
     }
     _bitBuffer |= (value & ((1 << bitCount) - 1)) << _bitCount;
     _bitCount += bitCount;
@@ -42,6 +47,24 @@ class BitStreamWriter {
       _bitBuffer = 0;
       _bitCount = 0;
     }
+  }
+
+  /// Appends [data] as whole bytes. The writer must be at a byte boundary
+  /// (after [flushToByte]); a writer with pending bits throws [StateError].
+  void writeBytes(final Uint8List data) {
+    if (_bitCount != 0) {
+      throw StateError('writeBytes needs a byte-aligned writer');
+    }
+    final need = _length + data.length;
+    if (need > _bytes.length) {
+      var size = _bytes.length * 2;
+      while (size < need) {
+        size *= 2;
+      }
+      _bytes = Uint8List(size)..setRange(0, _length, _bytes);
+    }
+    _bytes.setRange(_length, need, data);
+    _length = need;
   }
 
   /// Returns and clears the complete bytes written so far, preserving any

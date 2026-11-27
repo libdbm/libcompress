@@ -91,9 +91,7 @@ class DeflateEncoder {
     output.writeBits((complement >> 8) & 0xFF, 8);
 
     // Write literal data
-    for (final byte in data) {
-      output.writeBits(byte, 8);
-    }
+    output.writeBytes(data);
   }
 
   /// Writes a block using fixed Huffman codes from the first [count] packed

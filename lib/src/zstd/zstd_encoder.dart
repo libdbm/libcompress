@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import '../util/byte_utils.dart';
+import '../util/growable_buffer.dart' show trim;
 import '../util/platform.dart';
 import '../util/xxh64.dart';
 import 'zstd_common.dart';
@@ -43,12 +44,6 @@ class ZstdEncoder {
   /// Observability hook for silent raw-block fallbacks (see [fallbacks]).
   final void Function(Object error, StackTrace stackTrace)? onFallback;
 
-  /// Search depth for match finding (derived from level)
-  late final int searchDepth;
-
-  /// Minimum match length (lower = better compression, slower)
-  late final int minMatchLen;
-
   // Reused across compress() calls and blocks (its match finder owns large
   // hash/chain tables that should be allocated once, not per block).
   late final CompressedBlockEncoder _compressedEncoder =
@@ -80,24 +75,6 @@ class ZstdEncoder {
     if (blockSize > zstdMaxBlockSize) {
       throw ArgumentError('Block size cannot exceed $zstdMaxBlockSize');
     }
-
-    // Map level to search depth (similar to zstd CLI behavior)
-    searchDepth = _levelToSearchDepth(level);
-    minMatchLen = level >= 6 ? 3 : 4;
-  }
-
-  /// Map compression level to match search depth
-  static int _levelToSearchDepth(final int level) {
-    if (level <= 1) return 4;
-    if (level <= 2) return 8;
-    if (level <= 3) return 32;
-    if (level <= 4) return 48;
-    if (level <= 5) return 64;
-    if (level <= 6) return 96;
-    if (level <= 9) return 128;
-    if (level <= 12) return 256;
-    if (level <= 16) return 512;
-    return 1024; // Levels 17-22
   }
 
   Uint8List compress(final Uint8List input) {
@@ -172,9 +149,9 @@ class ZstdEncoder {
       pos += 4;
     }
 
-    // Own only the encoded bytes: a view would retain the input-sized
-    // worst-case allocation even for a tiny RLE frame.
-    return Uint8List.fromList(Uint8List.sublistView(output, 0, pos));
+    // A copy only when the worst-case buffer is more than twice the encoded
+    // bytes, so a tiny RLE frame does not retain the input-sized buffer.
+    return trim(output, pos);
   }
 
   /// Write frame header per RFC 8878. Returns new position.

@@ -5,13 +5,14 @@ import 'dart:typed_data';
 /// Compresses and decompresses whole byte arrays synchronously. For large
 /// or untrusted input, see [CompressionStreamCodec].
 ///
-/// ## Thread Safety
+/// ## Sharing codecs
 ///
-/// Codec instances are generally **not** thread-safe for concurrent use.
-/// Each codec maintains internal state (buffers, hash tables) that could
-/// be corrupted by concurrent access. For parallel processing:
-/// - Create a separate codec instance per isolate
-/// - Use `Isolate.run()` with a fresh codec for background work
+/// A codec instance holds only its configuration, in final fields; every
+/// [compress] and [decompress] call builds its own encoder or decoder. One
+/// instance can therefore be shared: by any number of calls in an isolate, and
+/// across isolates (for example `Isolate.run(() => codec.compress(data))`,
+/// which copies the codec). Stream codecs ([CompressionStreamCodec]) work the
+/// same way: each stream gets its own encoder or decoder.
 ///
 /// ## Exception Behavior
 ///
@@ -22,6 +23,7 @@ import 'dart:typed_data';
 ///   [GzipFormatException])
 /// - **[ZstdFormatException]**: Invalid Zstandard frame/block structure
 /// - **[SnappyFormatException]**: Invalid Snappy block or framing format
+/// - **[BrotliFormatException]**: Invalid Brotli stream
 ///
 /// Exceeding a limit (`maxSize`, an expected `size`, or a stream's
 /// `maxBufferSize`) raises [LimitException], naming the limit.
@@ -79,6 +81,7 @@ abstract base class CompressionCodec {
   /// [size] is an [ArgumentError].
   Uint8List decompress(final Uint8List data, {final int? size});
 
-  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4' or 'ZSTD'.
+  /// The codec's name in upper case: 'NOOP', 'SNAPPY', 'GZIP', 'LZ4', 'ZSTD'
+  /// or 'BROTLI'.
   String get name;
 }
